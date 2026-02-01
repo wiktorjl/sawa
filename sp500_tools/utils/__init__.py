@@ -17,6 +17,19 @@ from .dates import (
 )
 from .logging import setup_logging
 from .symbols import load_symbols, validate_ticker
+from .xdg import (
+    ensure_dirs,
+    get_cache_dir,
+    get_config_dir,
+    get_config_file,
+    get_data_dir,
+    get_log_file,
+    get_state_dir,
+    load_config,
+    load_toml,
+    save_config,
+    save_toml,
+)
 
 __all__ = [
     # config
@@ -39,4 +52,16 @@ __all__ = [
     # symbols
     "validate_ticker",
     "load_symbols",
+    # xdg
+    "get_config_dir",
+    "get_data_dir",
+    "get_cache_dir",
+    "get_state_dir",
+    "get_config_file",
+    "get_log_file",
+    "ensure_dirs",
+    "load_toml",
+    "save_toml",
+    "load_config",
+    "save_config",
 ]

@@ -6,7 +6,102 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from sp500_tui.state import AppState, EconomyTab, FundamentalsTab, View
+from sp500_tui.config import get_tui_config
+from sp500_tui.state import AppState, EconomyTab, FundamentalsTab, SettingsCategory, View
+from sp500_tui.themes import get_theme
+
+# Sparkline characters (8 levels)
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def render_sparkline(values: list[float | None], width: int = 20) -> Text:
+    """
+    Render a sparkline from a list of values.
+
+    Args:
+        values: List of numeric values (None values are skipped)
+        width: Target width of sparkline
+
+    Returns:
+        Rich Text object with colored sparkline
+    """
+    theme = get_theme()
+    # Filter out None values
+    clean_values = [v for v in values if v is not None]
+    if not clean_values:
+        return Text("-" * width, style=theme.text_muted)
+
+    # Resample if needed
+    if len(clean_values) > width:
+        step = len(clean_values) / width
+        sampled = []
+        for i in range(width):
+            idx = int(i * step)
+            sampled.append(clean_values[idx])
+        clean_values = sampled
+    elif len(clean_values) < width:
+        # Pad with last value or leave shorter
+        pass
+
+    min_val = min(clean_values)
+    max_val = max(clean_values)
+    val_range = max_val - min_val
+
+    result = Text()
+    for i, val in enumerate(clean_values):
+        if val_range > 0:
+            normalized = (val - min_val) / val_range
+            char_idx = min(int(normalized * 7), 7)
+        else:
+            char_idx = 4  # Middle if all same
+
+        # Color based on trend (compare to previous)
+        if i > 0 and clean_values[i] > clean_values[i - 1]:
+            style = theme.positive
+        elif i > 0 and clean_values[i] < clean_values[i - 1]:
+            style = theme.negative
+        else:
+            style = theme.warning
+
+        result.append(SPARK_CHARS[char_idx], style=style)
+
+    return result
+
+
+def format_rate_as_pct(value: float | None) -> tuple[str, float | None]:
+    """
+    Format a rate value as percentage string.
+
+    Handles both decimal (0.044 = 4.4%) and already-percentage (4.4 = 4.4%) formats.
+    Returns (formatted_string, normalized_value_for_comparison).
+    """
+    if value is None:
+        return "-", None
+    # If value > 1, it's already a percentage (e.g., 4.4 means 4.4%)
+    # If value <= 1, it's a decimal (e.g., 0.044 means 4.4%)
+    if abs(value) > 1:
+        return f"{value:.1f}%", value
+    else:
+        return f"{value * 100:.1f}%", value * 100
+
+
+def render_trend_indicator(current: float | None, previous: float | None, width: int = 8) -> Text:
+    """Render a trend arrow based on current vs previous value."""
+    theme = get_theme()
+    if current is None or previous is None:
+        return Text(" " * width, style=theme.text_muted)
+
+    if current > previous:
+        pct = ((current - previous) / abs(previous)) * 100 if previous != 0 else 0
+        text = f"▲{pct:+.1f}%"
+        return Text(f"{text:<{width}}", style=theme.positive)
+    elif current < previous:
+        pct = ((current - previous) / abs(previous)) * 100 if previous != 0 else 0
+        text = f"▼{pct:+.1f}%"
+        return Text(f"{text:<{width}}", style=theme.negative)
+    else:
+        text = "► 0.0%"
+        return Text(f"{text:<{width}}", style=theme.warning)
 
 
 def format_number(value: float | int | None, decimals: int = 2, prefix: str = "") -> str:
@@ -24,20 +119,22 @@ def format_number(value: float | int | None, decimals: int = 2, prefix: str = ""
 
 def format_change(value: float | None) -> Text:
     """Format a price change with color."""
+    theme = get_theme()
     if value is None:
         return Text("-")
     if value >= 0:
-        return Text(f"+{value:.2f}", style="green")
-    return Text(f"{value:.2f}", style="red")
+        return Text(f"+{value:.2f}", style=theme.positive)
+    return Text(f"{value:.2f}", style=theme.negative)
 
 
 def format_pct_change(value: float | None) -> Text:
     """Format a percentage change with color."""
+    theme = get_theme()
     if value is None:
         return Text("-")
     if value >= 0:
-        return Text(f"+{value:.2f}%", style="green")
-    return Text(f"{value:.2f}%", style="red")
+        return Text(f"+{value:.2f}%", style=theme.positive)
+    return Text(f"{value:.2f}%", style=theme.negative)
 
 
 # =============================================================================
@@ -47,6 +144,8 @@ def format_pct_change(value: float | None) -> Text:
 
 def render_header(state: AppState) -> Panel:
     """Render the top navigation header."""
+    theme = get_theme()
+
     views = [
         ("F1", "Stocks", View.STOCKS),
         ("F2", "Fundamentals", View.FUNDAMENTALS),
@@ -55,7 +154,7 @@ def render_header(state: AppState) -> Panel:
         ("F5", "Glossary", View.GLOSSARY),
     ]
 
-    parts = [Text(" S&P 500 ", style="bold green"), Text(" | ")]
+    parts = [Text(" S&P 500 ", style=f"bold {theme.primary}"), Text(" | ")]
 
     for key, name, view in views:
         # Stock detail and news fullscreen are sub-views of Stocks
@@ -63,123 +162,131 @@ def render_header(state: AppState) -> Panel:
             view == View.STOCKS and state.current_view in (View.STOCK_DETAIL, View.NEWS_FULLSCREEN)
         )
         if is_current:
-            parts.append(Text(f" {key}:{name} ", style="bold black on green"))
+            parts.append(Text(f" {key}:{name} ", style=f"bold black on {theme.primary}"))
         else:
-            parts.append(Text(f" {key}:{name} ", style="dim"))
+            parts.append(Text(f" {key}:{name} ", style=theme.text_muted))
 
-    parts.append(Text(" | ", style="dim"))
-    parts.append(Text("q:Quit  r:Refresh", style="dim"))
+    parts.append(Text(" | ", style=theme.text_muted))
+    parts.append(Text("q:Quit  r:Refresh", style=theme.text_muted))
 
     header_text = Text()
     for part in parts:
         header_text.append_text(part)
 
-    return Panel(header_text, style="on black", height=3, padding=(0, 1))
+    return Panel(header_text, border_style=theme.border, height=3, padding=(0, 1))
 
 
 def render_footer(state: AppState) -> Panel:
     """Render the bottom status bar."""
+    theme = get_theme()
+
     if state.input_mode:
         # Input mode
         text = Text()
-        text.append(state.input_prompt, style="yellow")
+        text.append(state.input_prompt, style=theme.warning)
         text.append(": ")
-        text.append(state.input_value, style="bold")
+        text.append(state.input_value, style=theme.text_bright)
         text.append("_", style="blink")
-        text.append("  [Esc] Cancel", style="dim")
+        text.append("  [Esc] Cancel", style=theme.text_muted)
     elif state.message:
         # Status message
-        style = "red" if state.message_error else "green"
+        style = theme.negative if state.message_error else theme.positive
         text = Text(state.message, style=style)
     else:
         # Default help based on current view
         text = _get_view_help(state)
 
-    return Panel(text, style="on black", height=3, padding=(0, 1))
+    return Panel(text, border_style=theme.border, height=3, padding=(0, 1))
 
 
 def _get_view_help(state: AppState) -> Text:
     """Get help text for current view."""
+    theme = get_theme()
     text = Text()
 
     if state.current_view == View.STOCKS:
-        text.append("Enter", style="yellow")
-        text.append(":View  ")
-        text.append("Tab", style="yellow")
-        text.append(":Switch  ")
-        text.append("n", style="yellow")
-        text.append(":New WL  ")
-        text.append("d", style="yellow")
-        text.append(":Delete WL  ")
-        text.append("a", style="yellow")
-        text.append(":Add Stock  ")
-        text.append("x", style="yellow")
-        text.append(":Remove Stock")
+        text.append("Enter", style=theme.warning)
+        text.append(":View  ", style=theme.text_muted)
+        text.append("Tab", style=theme.warning)
+        text.append(":Switch  ", style=theme.text_muted)
+        text.append("n", style=theme.warning)
+        text.append(":New WL  ", style=theme.text_muted)
+        text.append("d", style=theme.warning)
+        text.append(":Delete WL  ", style=theme.text_muted)
+        text.append("a", style=theme.warning)
+        text.append(":Add Stock  ", style=theme.text_muted)
+        text.append("x", style=theme.warning)
+        text.append(":Remove Stock", style=theme.text_muted)
 
     elif state.current_view == View.STOCK_DETAIL:
-        text.append("Esc", style="yellow")
-        text.append(":Back  ")
-        text.append("a", style="yellow")
-        text.append(":Add to Watchlist  ")
-        text.append("n", style="yellow")
-        text.append(":Toggle News  ")
-        text.append("N", style="yellow")
-        text.append(":Fullscreen News")
+        text.append("Esc", style=theme.warning)
+        text.append(":Back  ", style=theme.text_muted)
+        text.append("a", style=theme.warning)
+        text.append(":Add to Watchlist  ", style=theme.text_muted)
+        text.append("n", style=theme.warning)
+        text.append(":Toggle News  ", style=theme.text_muted)
+        text.append("N", style=theme.warning)
+        text.append(":Fullscreen News", style=theme.text_muted)
 
     elif state.current_view == View.NEWS_FULLSCREEN:
-        text.append("Esc", style="yellow")
-        text.append(":Back  ")
-        text.append("Up/Down", style="yellow")
-        text.append(":Navigate  ")
-        text.append("Enter", style="yellow")
-        text.append(":Open URL")
+        text.append("Esc", style=theme.warning)
+        text.append(":Back  ", style=theme.text_muted)
+        text.append("Up/Down", style=theme.warning)
+        text.append(":Navigate  ", style=theme.text_muted)
+        text.append("Enter", style=theme.warning)
+        text.append(":Open URL", style=theme.text_muted)
 
     elif state.current_view == View.FUNDAMENTALS:
-        text.append("1", style="yellow")
-        text.append(":Income  ")
-        text.append("2", style="yellow")
-        text.append(":Balance  ")
-        text.append("3", style="yellow")
-        text.append(":Cash Flow  ")
-        text.append("t", style="yellow")
-        text.append(":Toggle Q/A  ")
-        text.append("/", style="yellow")
-        text.append(":Search Ticker")
+        text.append("1", style=theme.warning)
+        text.append(":Income  ", style=theme.text_muted)
+        text.append("2", style=theme.warning)
+        text.append(":Balance  ", style=theme.text_muted)
+        text.append("3", style=theme.warning)
+        text.append(":Cash Flow  ", style=theme.text_muted)
+        text.append("t", style=theme.warning)
+        text.append(":Toggle Q/A  ", style=theme.text_muted)
+        text.append("/", style=theme.warning)
+        text.append(":Search Ticker", style=theme.text_muted)
 
     elif state.current_view == View.ECONOMY:
-        text.append("1", style="yellow")
-        text.append(":Yields  ")
-        text.append("2", style="yellow")
-        text.append(":Inflation  ")
-        text.append("3", style="yellow")
-        text.append(":Labor")
+        text.append("1", style=theme.warning)
+        text.append(":Yields  ", style=theme.text_muted)
+        text.append("2", style=theme.warning)
+        text.append(":Inflation  ", style=theme.text_muted)
+        text.append("3", style=theme.warning)
+        text.append(":Labor", style=theme.text_muted)
 
     elif state.current_view == View.SETTINGS:
-        text.append("Settings view - use arrow keys to navigate", style="dim")
+        text.append("1-4", style=theme.warning)
+        text.append(":Category  ", style=theme.text_muted)
+        text.append("Up/Down", style=theme.warning)
+        text.append(":Navigate  ", style=theme.text_muted)
+        text.append("Enter", style=theme.warning)
+        text.append(":Select", style=theme.text_muted)
 
     elif state.current_view == View.GLOSSARY:
         if state.glossary_show_regen_menu:
-            text.append("1-4", style="yellow")
-            text.append(":Select  ")
-            text.append("c", style="yellow")
-            text.append(":Custom  ")
-            text.append("Esc", style="yellow")
-            text.append(":Cancel")
+            text.append("1-4", style=theme.warning)
+            text.append(":Select  ", style=theme.text_muted)
+            text.append("c", style=theme.warning)
+            text.append(":Custom  ", style=theme.text_muted)
+            text.append("Esc", style=theme.warning)
+            text.append(":Cancel", style=theme.text_muted)
         elif state.glossary_loading:
-            text.append("Generating definition...", style="yellow")
+            text.append("Generating definition...", style=theme.warning)
         else:
-            text.append("/", style="yellow")
-            text.append(":Search  ")
-            text.append("Enter", style="yellow")
-            text.append(":Generate  ")
-            text.append("g", style="yellow")
-            text.append(":Regen  ")
-            text.append("n", style="yellow")
-            text.append(":Add  ")
-            text.append("d", style="yellow")
-            text.append(":Delete  ")
-            text.append("1-5", style="yellow")
-            text.append(":Related")
+            text.append("/", style=theme.warning)
+            text.append(":Search  ", style=theme.text_muted)
+            text.append("Enter", style=theme.warning)
+            text.append(":Generate  ", style=theme.text_muted)
+            text.append("g", style=theme.warning)
+            text.append(":Regen  ", style=theme.text_muted)
+            text.append("n", style=theme.warning)
+            text.append(":Add  ", style=theme.text_muted)
+            text.append("d", style=theme.warning)
+            text.append(":Delete  ", style=theme.text_muted)
+            text.append("1-5", style=theme.warning)
+            text.append(":Related", style=theme.text_muted)
 
     return text
 
@@ -209,6 +316,7 @@ def render_stocks_view(state: AppState) -> Layout:
 
 def _render_watchlist_sidebar(state: AppState) -> Panel:
     """Render the watchlist sidebar."""
+    theme = get_theme()
     lines = []
     visible_rows = state.get_visible_watchlist_rows()
     start = state.watchlist_scroll_offset
@@ -219,48 +327,50 @@ def _render_watchlist_sidebar(state: AppState) -> Panel:
         name = f"{prefix}{wl.name} ({wl.symbol_count})"
 
         if i == state.selected_watchlist_idx and state.focus_sidebar:
-            lines.append(Text(name, style="bold green on dark_green"))
+            lines.append(Text(name, style=f"{theme.selected_text} {theme.selected}"))
         elif i == state.selected_watchlist_idx:
-            lines.append(Text(name, style="green"))
+            lines.append(Text(name, style=theme.primary))
         else:
-            lines.append(Text(name, style="dim"))
+            lines.append(Text(name, style=theme.text_muted))
 
-    content = Text("\n").join(lines) if lines else Text("No watchlists", style="dim")
+    content = Text("\n").join(lines) if lines else Text("No watchlists", style=theme.text_muted)
 
     # Scroll indicators
     scroll_info = ""
     total = len(state.watchlists)
     if total > visible_rows:
         if start > 0:
-            scroll_info += " [dim]^[/]"
+            scroll_info += f" [{theme.text_muted}]^[/]"
         if end < total:
-            scroll_info += " [dim]v[/]"
+            scroll_info += f" [{theme.text_muted}]v[/]"
 
-    help_text = Text("\n\n[n] New  [d] Delete", style="dim")
+    help_text = Text("\n\n[n] New  [d] Delete", style=theme.text_muted)
     full_content = Text()
     full_content.append_text(content)
     full_content.append_text(help_text)
 
-    title = f"[yellow]WATCHLISTS[/]{scroll_info}"
+    title = f"[{theme.header}]WATCHLISTS[/]{scroll_info}"
     return Panel(
         full_content,
         title=title,
         title_align="left",
-        border_style="green" if state.focus_sidebar else "dim",
+        border_style=theme.border_focus if state.focus_sidebar else theme.text_muted,
         height=None,
     )
 
 
 def _render_stock_table(state: AppState) -> Panel:
     """Render the stock table."""
+    theme = get_theme()
     wl = state.current_watchlist()
     title = wl.name if wl else "No Watchlist"
 
     table = Table(
         show_header=True,
-        header_style="bold yellow",
+        header_style=f"bold {theme.header}",
         expand=True,
-        row_styles=["", "dim"],
+        row_styles=[theme.text, theme.text_muted],
+        border_style=theme.border,
     )
 
     table.add_column("Ticker", width=10)
@@ -285,12 +395,12 @@ def _render_stock_table(state: AppState) -> Panel:
 
         # Highlight selected row
         if i == state.selected_stock_idx and not state.focus_sidebar:
-            style = "bold green on dark_green"
+            style = f"{theme.selected_text} {theme.selected}"
         else:
             style = ""
 
         table.add_row(
-            Text(ticker, style=style or "green"),
+            Text(ticker, style=style or theme.primary),
             Text(name, style=style),
             Text(f"${price:.2f}" if price else "-", style=style),
             format_change(change)
@@ -313,9 +423,9 @@ def _render_stock_table(state: AppState) -> Panel:
 
     return Panel(
         table,
-        title=f"[yellow]{title}[/] ({len(state.watchlist_stocks)} stocks){scroll_info}",
+        title=f"[{theme.header}]{title}[/] ({len(state.watchlist_stocks)} stocks){scroll_info}",
         title_align="left",
-        border_style="green" if not state.focus_sidebar else "dim",
+        border_style=theme.border if not state.focus_sidebar else theme.text_muted,
     )
 
 
@@ -354,8 +464,14 @@ def render_stock_detail_view(state: AppState) -> Layout:
     layout["body"]["chart"].update(_render_price_chart(state))
 
     # Sidebar: company info + ratios
+    # Give more space to info panel when logo is enabled to show description
+    from sp500_tui.config import get_tui_config
+
+    config = get_tui_config()
+    info_ratio = 3 if config.logo_enabled else 1
+
     layout["body"]["sidebar"].split_column(
-        Layout(name="info", ratio=1),
+        Layout(name="info", ratio=info_ratio),
         Layout(name="ratios", ratio=2),
     )
     layout["body"]["sidebar"]["info"].update(_render_company_info(state))
@@ -370,46 +486,47 @@ def render_stock_detail_view(state: AppState) -> Layout:
 
 def _render_stock_header(state: AppState) -> Panel:
     """Render stock detail header with price and key stats."""
+    theme = get_theme()
     company = state.detail_company
     if not company:
-        return Panel(Text(f"Loading {state.detail_ticker}...", style="yellow"))
+        return Panel(Text(f"Loading {state.detail_ticker}...", style=theme.warning))
 
     # Line 1: Ticker, Name, Sector
     text = Text()
-    text.append(f" {company.ticker} ", style="bold white on dark_green")
-    text.append(f" {company.name} ", style="bold white")
-    text.append(f" {company.sector or 'Unknown'} ", style="dim")
+    text.append(f" {company.ticker} ", style=f"bold {theme.text_bright} on {theme.primary}")
+    text.append(f" {company.name} ", style=f"bold {theme.text}")
+    text.append(f" {company.sector or 'Unknown'} ", style=theme.text_muted)
     if company.exchange:
-        text.append(f" [{company.exchange}]", style="dim cyan")
+        text.append(f" [{company.exchange}]", style=theme.info)
 
     # Line 2: Price and change
     text.append("\n ")
     if state.detail_prices:
         latest = state.detail_prices[0]
-        text.append(f"${latest.close:.2f}", style="bold yellow")
+        text.append(f"${latest.close:.2f}", style=f"bold {theme.header}")
 
         if len(state.detail_prices) > 1:
             prev = state.detail_prices[1]
             change = latest.close - prev.close
             pct = (change / prev.close * 100) if prev.close else 0
             if change >= 0:
-                text.append(f"  +{change:.2f} (+{pct:.2f}%)", style="bold green")
+                text.append(f"  +{change:.2f} (+{pct:.2f}%)", style=f"bold {theme.positive}")
             else:
-                text.append(f"  {change:.2f} ({pct:.2f}%)", style="bold red")
+                text.append(f"  {change:.2f} ({pct:.2f}%)", style=f"bold {theme.negative}")
 
         # Add today's OHLV
-        text.append(f"   O:{latest.open:.2f}", style="dim")
-        text.append(f"  H:{latest.high:.2f}", style="dim")
-        text.append(f"  L:{latest.low:.2f}", style="dim")
-        text.append(f"  V:{format_number(latest.volume, decimals=0)}", style="dim")
+        text.append(f"   O:{latest.open:.2f}", style=theme.text_muted)
+        text.append(f"  H:{latest.high:.2f}", style=theme.text_muted)
+        text.append(f"  L:{latest.low:.2f}", style=theme.text_muted)
+        text.append(f"  V:{format_number(latest.volume, decimals=0)}", style=theme.text_muted)
 
     # Line 3: 52-week range
     text.append("\n ")
     if state.detail_52w_low and state.detail_52w_high:
-        text.append("52W: ", style="dim")
-        text.append(f"${state.detail_52w_low:.2f}", style="red")
-        text.append(" - ", style="dim")
-        text.append(f"${state.detail_52w_high:.2f}", style="green")
+        text.append("52W: ", style=theme.text_muted)
+        text.append(f"${state.detail_52w_low:.2f}", style=theme.negative)
+        text.append(" - ", style=theme.text_muted)
+        text.append(f"${state.detail_52w_high:.2f}", style=theme.positive)
 
         # Show position in range as a mini bar
         if state.detail_prices:
@@ -419,28 +536,35 @@ def _render_stock_header(state: AppState) -> Panel:
                 pos = (current - state.detail_52w_low) / range_52w
                 bar_width = 20
                 filled = int(pos * bar_width)
-                text.append("  [", style="dim")
-                text.append("=" * filled, style="green")
-                text.append("-" * (bar_width - filled), style="dim")
-                text.append("]", style="dim")
+                text.append("  [", style=theme.text_muted)
+                text.append("=" * filled, style=theme.positive)
+                text.append("-" * (bar_width - filled), style=theme.text_muted)
+                text.append("]", style=theme.text_muted)
 
     if state.detail_avg_volume:
         text.append(
-            f"   Avg Vol: {format_number(state.detail_avg_volume, decimals=0)}", style="dim"
+            f"   Avg Vol: {format_number(state.detail_avg_volume, decimals=0)}",
+            style=theme.text_muted,
         )
 
-    return Panel(text, border_style="green", padding=(0, 1))
+    return Panel(text, border_style=theme.border, padding=(0, 1))
 
 
 def _render_price_chart(state: AppState) -> Panel:
     """Render ASCII price chart that fills available space."""
+    theme = get_theme()
     if not state.detail_prices:
-        return Panel(Text("No price data", style="dim"), title="[yellow]Price Chart[/]")
+        return Panel(
+            Text("No price data", style=theme.text_muted),
+            title=f"[{theme.header}]Price Chart[/]",
+        )
 
     # Use more price data and dynamic sizing
     prices = list(reversed(state.detail_prices))
     if not prices:
-        return Panel(Text("No data", style="dim"), title="[yellow]Price Chart[/]")
+        return Panel(
+            Text("No data", style=theme.text_muted), title=f"[{theme.header}]Price Chart[/]"
+        )
 
     # Calculate chart dimensions based on terminal size
     # Reserve space for: header(6) + footer(3) + panel borders(2) + y-axis labels(10)
@@ -482,19 +606,19 @@ def _render_price_chart(state: AppState) -> Panel:
             if l <= threshold_high and h >= threshold_low:
                 # Price range crosses this row
                 if c >= prev_c:
-                    # Green candle (up)
+                    # Up candle
                     if c >= threshold_low and c <= threshold_high:
-                        line_chars.append(("█", "green"))
+                        line_chars.append(("█", theme.positive))
                     elif h >= threshold_low and l <= threshold_high:
-                        line_chars.append(("│", "green"))
+                        line_chars.append(("│", theme.positive))
                     else:
                         line_chars.append((" ", ""))
                 else:
-                    # Red candle (down)
+                    # Down candle
                     if c >= threshold_low and c <= threshold_high:
-                        line_chars.append(("█", "red"))
+                        line_chars.append(("█", theme.negative))
                     elif h >= threshold_low and l <= threshold_high:
-                        line_chars.append(("│", "red"))
+                        line_chars.append(("│", theme.negative))
                     else:
                         line_chars.append((" ", ""))
             else:
@@ -544,66 +668,139 @@ def _render_price_chart(state: AppState) -> Panel:
     chart_content = Text()
     for i, line in enumerate(lines):
         if i > 0:
-            chart_content.append("\n")
+            chart_content.append("\n", style=theme.text_muted)
         chart_content.append_text(line)
 
     period = len(state.detail_prices)
     return Panel(
         chart_content,
-        title=f"[yellow]{period}-Day Price Chart[/]",
-        border_style="green",
+        title=f"[{theme.header}]{period}-Day Price Chart[/]",
+        border_style=theme.border,
     )
 
 
 def _render_company_info(state: AppState) -> Panel:
-    """Render company information panel with description."""
+    """Render company information panel with description and logo."""
+    import textwrap
+
+    theme = get_theme()
     company = state.detail_company
+    config = get_tui_config()
 
     content = Text()
 
-    if company:
-        # Company description
-        if company.description:
-            content.append(company.description, style="white")
-            content.append("\n\n")
+    # Check if we have a logo to display
+    has_logo = config.logo_enabled and (state.detail_logo_ascii or state.detail_logo_loading)
 
-        # Key stats in a compact format
-        stats = []
-        if company.employees:
-            stats.append(f"Employees: {company.employees:,}")
-        if company.exchange:
-            stats.append(f"Exchange: {company.exchange}")
-        if company.cik:
-            stats.append(f"CIK: {company.cik}")
+    if has_logo and state.detail_logo_ascii:
+        # Split logo into lines
+        logo_lines = str(state.detail_logo_ascii).split("\n")
+        logo_height = len(logo_lines)
+        logo_width = config.logo_width + 2  # Add spacing
 
-        if stats:
-            content.append(" | ".join(stats), style="dim")
+        # Prepare text content
+        text_parts = []
+        if company:
+            if company.description:
+                text_parts.append(company.description)
 
-        if company.homepage_url:
+        # Wrap text to fit next to logo (assume ~60 char panel width)
+        text_width = 45  # Width available for text next to logo
+        wrapped_lines = []
+        for part in text_parts:
+            wrapped_lines.extend(textwrap.wrap(part, width=text_width))
+
+        # Combine logo and text side-by-side
+        for i in range(max(logo_height, len(wrapped_lines))):
+            # Logo column
+            if i < logo_height:
+                content.append(logo_lines[i])
+                # Pad to logo width if line is shorter
+                line_len = len(logo_lines[i])
+                if line_len < logo_width:
+                    content.append(" " * (logo_width - line_len))
+            else:
+                content.append(" " * logo_width)
+
+            # Text column
+            if i < len(wrapped_lines):
+                content.append(wrapped_lines[i], style=theme.text)
+
             content.append("\n")
-            url = company.homepage_url
-            if len(url) > 45:
-                url = url[:42] + "..."
-            content.append(url, style="dim cyan")
 
-        if company.address:
+        # Add remaining company info below logo
+        if company:
             content.append("\n")
-            content.append(company.address, style="dim")
+            stats = []
+            if company.employees:
+                stats.append(f"Employees: {company.employees:,}")
+            if company.exchange:
+                stats.append(f"Exchange: {company.exchange}")
+            if company.cik:
+                stats.append(f"CIK: {company.cik}")
+
+            if stats:
+                content.append(" | ".join(stats), style=theme.text_muted)
+
+            if company.homepage_url:
+                content.append("\n")
+                url = company.homepage_url
+                if len(url) > 45:
+                    url = url[:42] + "..."
+                content.append(url, style=theme.info)
+
+            if company.address:
+                content.append("\n")
+                content.append(company.address, style=theme.text_muted)
+    elif has_logo and state.detail_logo_loading:
+        content.append("Loading...", style=theme.text_muted)
+        content.append("\n\n")
+        if company and company.description:
+            content.append(company.description, style=theme.text)
     else:
-        content.append("No company data", style="dim")
+        # No logo - just text
+        if company:
+            if company.description:
+                content.append(company.description, style=theme.text)
+                content.append("\n\n")
 
-    return Panel(content, title="[yellow]About[/]", border_style="dim")
+            stats = []
+            if company.employees:
+                stats.append(f"Employees: {company.employees:,}")
+            if company.exchange:
+                stats.append(f"Exchange: {company.exchange}")
+            if company.cik:
+                stats.append(f"CIK: {company.cik}")
+
+            if stats:
+                content.append(" | ".join(stats), style=theme.text_muted)
+
+            if company.homepage_url:
+                content.append("\n")
+                url = company.homepage_url
+                if len(url) > 45:
+                    url = url[:42] + "..."
+                content.append(url, style=theme.info)
+
+            if company.address:
+                content.append("\n")
+                content.append(company.address, style=theme.text_muted)
+        else:
+            content.append("No company data", style=theme.text_muted)
+
+    return Panel(content, title=f"[{theme.header}]About[/]", border_style=theme.text_muted)
 
 
 def _render_ratios(state: AppState) -> Panel:
     """Render key ratios in two columns."""
+    theme = get_theme()
     ratios = state.detail_ratios
 
     table = Table(show_header=False, expand=True, box=None, padding=(0, 1))
-    table.add_column("Metric", style="dim", width=12)
-    table.add_column("Value", style="green", width=10)
-    table.add_column("Metric", style="dim", width=12)
-    table.add_column("Value", style="green", width=10)
+    table.add_column("Metric", style=theme.text_muted, width=12)
+    table.add_column("Value", style=theme.positive, width=10)
+    table.add_column("Metric", style=theme.text_muted, width=12)
+    table.add_column("Value", style=theme.positive, width=10)
 
     def fmt_ratio(value: float | None, decimals: int = 2) -> str:
         if value is None:
@@ -651,13 +848,14 @@ def _render_ratios(state: AppState) -> Panel:
         # Row 8: FCF
         table.add_row("FCF", fmt_money(ratios.fcf), "", "")
     else:
-        table.add_row(Text("No ratio data", style="dim"), "", "", "")
+        table.add_row(Text("No ratio data", style=theme.text_muted), "", "", "")
 
-    return Panel(table, title="[yellow]Key Ratios[/]", border_style="dim")
+    return Panel(table, title=f"[{theme.header}]Key Ratios[/]", border_style=theme.text_muted)
 
 
 def _render_news_pane(state: AppState) -> Panel:
     """Render news and sentiment pane."""
+    theme = get_theme()
     content = Text()
 
     # Sentiment summary header
@@ -668,16 +866,16 @@ def _render_news_pane(state: AppState) -> Panel:
         neu = sentiment.get("neutral", 0)
         total = pos + neg + neu
 
-        content.append(" SENTIMENT (30d): ", style="bold cyan")
+        content.append(" SENTIMENT (30d): ", style=f"bold {theme.info}")
         if pos > 0:
-            content.append(f"+{pos}", style="bold green")
-            content.append("  ")
+            content.append(f"+{pos}", style=f"bold {theme.positive}")
+            content.append("  ", style=theme.text_muted)
         if neg > 0:
-            content.append(f"-{neg}", style="bold red")
-            content.append("  ")
+            content.append(f"-{neg}", style=f"bold {theme.negative}")
+            content.append("  ", style=theme.text_muted)
         if neu > 0:
-            content.append(f"~{neu}", style="dim")
-            content.append("  ")
+            content.append(f"~{neu}", style=theme.text_muted)
+            content.append("  ", style=theme.text_muted)
 
         # Sentiment bar
         if total > 0:
@@ -685,45 +883,45 @@ def _render_news_pane(state: AppState) -> Panel:
             pos_width = int((pos / total) * bar_width)
             neg_width = int((neg / total) * bar_width)
             neu_width = bar_width - pos_width - neg_width
-            content.append("[", style="dim")
-            content.append("+" * pos_width, style="green")
-            content.append("-" * neg_width, style="red")
-            content.append("=" * neu_width, style="dim")
-            content.append("]", style="dim")
-        content.append("\n\n")
+            content.append("[", style=theme.text_muted)
+            content.append("+" * pos_width, style=theme.positive)
+            content.append("-" * neg_width, style=theme.negative)
+            content.append("=" * neu_width, style=theme.text_muted)
+            content.append("]", style=theme.text_muted)
+        content.append("\n\n", style=theme.text_muted)
 
     # News headlines
     if state.detail_news:
         for article in state.detail_news[:6]:  # Show top 6 articles
             # Sentiment indicator
             if article.sentiment == "positive":
-                content.append(" + ", style="green")
+                content.append(" + ", style=theme.positive)
             elif article.sentiment == "negative":
-                content.append(" - ", style="red")
+                content.append(" - ", style=theme.negative)
             else:
-                content.append(" ~ ", style="dim")
+                content.append(" ~ ", style=theme.text_muted)
 
             # Date
             date_str = article.published_utc.strftime("%m/%d")
-            content.append(f"[{date_str}] ", style="dim")
+            content.append(f"[{date_str}] ", style=theme.text_muted)
 
             # Title (truncated)
             title = article.title
             max_title_len = state.term_width - 25
             if len(title) > max_title_len:
                 title = title[: max_title_len - 3] + "..."
-            content.append(title, style="white")
+            content.append(title, style=theme.text)
 
             # Publisher
             if article.publisher_name:
-                content.append(f" ({article.publisher_name})", style="dim")
+                content.append(f" ({article.publisher_name})", style=theme.text_muted)
 
-            content.append("\n")
+            content.append("\n", style=theme.text_muted)
     else:
-        content.append(" No recent news available", style="dim")
+        content.append(" No recent news available", style=theme.text_muted)
 
-    title = "[yellow]News & Sentiment[/] [dim](n:toggle N:fullscreen)[/]"
-    return Panel(content, title=title, border_style="dim")
+    title = f"[{theme.header}]News & Sentiment[/] [{theme.text_muted}](n:toggle N:fullscreen)[/]"
+    return Panel(content, title=title, border_style=theme.text_muted)
 
 
 def _calculate_detail_height(state: AppState) -> int:
@@ -800,13 +998,14 @@ def render_news_fullscreen_view(state: AppState) -> Layout:
 
 def _render_news_header(state: AppState) -> Panel:
     """Render news header with ticker and sentiment."""
+    theme = get_theme()
     content = Text()
 
     # Ticker info
-    content.append(f" {state.detail_ticker} ", style="bold white on dark_green")
+    content.append(f" {state.detail_ticker} ", style=f"bold {theme.text_bright} on {theme.primary}")
     if state.detail_company:
-        content.append(f" {state.detail_company.name} ", style="white")
-    content.append(" - News & Sentiment\n", style="dim")
+        content.append(f" {state.detail_company.name} ", style=theme.text)
+    content.append(" - News & Sentiment\n", style=theme.text_muted)
 
     # Sentiment summary
     sentiment = state.detail_news_sentiment
@@ -816,15 +1015,15 @@ def _render_news_header(state: AppState) -> Panel:
         neu = sentiment.get("neutral", 0)
         total = pos + neg + neu
 
-        content.append(" 30-Day Sentiment: ", style="bold cyan")
+        content.append(" 30-Day Sentiment: ", style=f"bold {theme.info}")
         if pos > 0:
-            content.append(f"Positive: {pos}", style="bold green")
-            content.append("  ")
+            content.append(f"Positive: {pos}", style=f"bold {theme.positive}")
+            content.append("  ", style=theme.text_muted)
         if neg > 0:
-            content.append(f"Negative: {neg}", style="bold red")
-            content.append("  ")
+            content.append(f"Negative: {neg}", style=f"bold {theme.negative}")
+            content.append("  ", style=theme.text_muted)
         if neu > 0:
-            content.append(f"Neutral: {neu}", style="dim")
+            content.append(f"Neutral: {neu}", style=theme.text_muted)
 
         # Sentiment bar
         if total > 0:
@@ -832,23 +1031,24 @@ def _render_news_header(state: AppState) -> Panel:
             pos_width = int((pos / total) * bar_width)
             neg_width = int((neg / total) * bar_width)
             neu_width = bar_width - pos_width - neg_width
-            content.append("\n ")
-            content.append("[", style="dim")
-            content.append("+" * pos_width, style="green")
-            content.append("-" * neg_width, style="red")
-            content.append("=" * neu_width, style="dim")
-            content.append("]", style="dim")
+            content.append("\n ", style=theme.text_muted)
+            content.append("[", style=theme.text_muted)
+            content.append("+" * pos_width, style=theme.positive)
+            content.append("-" * neg_width, style=theme.negative)
+            content.append("=" * neu_width, style=theme.text_muted)
+            content.append("]", style=theme.text_muted)
 
-    return Panel(content, border_style="green")
+    return Panel(content, border_style=theme.border)
 
 
 def _render_news_list(state: AppState) -> Panel:
     """Render scrollable news list with selection."""
+    theme = get_theme()
     content = Text()
 
     if not state.detail_news:
-        content.append(" No news articles available", style="dim")
-        return Panel(content, title="[yellow]Articles[/]", border_style="dim")
+        content.append(" No news articles available", style=theme.text_muted)
+        return Panel(content, title=f"[{theme.header}]Articles[/]", border_style=theme.text_muted)
 
     visible_rows = state.get_visible_news_rows()
     start = state.news_scroll_offset
@@ -859,21 +1059,21 @@ def _render_news_list(state: AppState) -> Panel:
 
         # Selection indicator
         if is_selected:
-            content.append(" > ", style="bold green")
+            content.append(" > ", style=f"bold {theme.primary}")
         else:
             content.append("   ", style="")
 
         # Sentiment indicator
         if article.sentiment == "positive":
-            content.append("[+] ", style="green")
+            content.append("[+] ", style=theme.positive)
         elif article.sentiment == "negative":
-            content.append("[-] ", style="red")
+            content.append("[-] ", style=theme.negative)
         else:
-            content.append("[~] ", style="dim")
+            content.append("[~] ", style=theme.text_muted)
 
         # Date
         date_str = article.published_utc.strftime("%m/%d %H:%M")
-        content.append(f"[{date_str}] ", style="dim")
+        content.append(f"[{date_str}] ", style=theme.text_muted)
 
         # Title (truncated)
         title = article.title
@@ -882,11 +1082,11 @@ def _render_news_list(state: AppState) -> Panel:
             title = title[: max_title_len - 3] + "..."
 
         if is_selected:
-            content.append(title, style="bold green")
+            content.append(title, style=f"bold {theme.primary}")
         else:
-            content.append(title, style="white")
+            content.append(title, style=theme.text)
 
-        content.append("\n")
+        content.append("\n", style=theme.text_muted)
 
     # Scroll indicators
     total = len(state.detail_news)
@@ -897,55 +1097,61 @@ def _render_news_list(state: AppState) -> Panel:
         if end < total:
             scroll_info += " v"
 
-    title = f"[yellow]Articles ({len(state.detail_news)})[/]{scroll_info}"
-    return Panel(content, title=title, border_style="green")
+    title = f"[{theme.header}]Articles ({len(state.detail_news)})[/]{scroll_info}"
+    return Panel(content, title=title, border_style=theme.border)
 
 
 def _render_news_detail(state: AppState) -> Panel:
     """Render selected article detail."""
+    theme = get_theme()
     article = state.current_news_article()
     content = Text()
 
     if not article:
-        content.append(" Select an article to view details", style="dim")
-        return Panel(content, title="[yellow]Details[/]", border_style="dim")
+        content.append(" Select an article to view details", style=theme.text_muted)
+        return Panel(content, title=f"[{theme.header}]Details[/]", border_style=theme.text_muted)
 
     # Title
-    content.append(f" {article.title}\n", style="bold white")
+    content.append(f" {article.title}", style=f"bold {theme.text}")
+    content.append("\n", style=theme.text_muted)
 
     # Meta info
     if article.author:
-        content.append(f" By: {article.author}", style="dim")
+        content.append(f" By: {article.author}", style=theme.text_muted)
         if article.publisher_name:
-            content.append(f" | {article.publisher_name}", style="dim")
-        content.append("\n")
+            content.append(f" | {article.publisher_name}", style=theme.text_muted)
+        content.append("\n", style=theme.text_muted)
     elif article.publisher_name:
-        content.append(f" Source: {article.publisher_name}\n", style="dim")
+        content.append(f" Source: {article.publisher_name}", style=theme.text_muted)
+        content.append("\n", style=theme.text_muted)
 
     # Date and sentiment
     date_str = article.published_utc.strftime("%Y-%m-%d %H:%M UTC")
-    content.append(f" Published: {date_str}", style="dim")
+    content.append(f" Published: {date_str}", style=theme.text_muted)
     if article.sentiment:
         style = (
-            "green"
+            theme.positive
             if article.sentiment == "positive"
-            else ("red" if article.sentiment == "negative" else "dim")
+            else (theme.negative if article.sentiment == "negative" else theme.text_muted)
         )
         content.append(f"  |  Sentiment: {article.sentiment.capitalize()}", style=style)
-    content.append("\n")
+    content.append("\n", style=theme.text_muted)
 
     # Description
     if article.description:
         desc = article.description
         if len(desc) > 200:
             desc = desc[:197] + "..."
-        content.append(f"\n {desc}\n", style="white")
+        content.append("\n", style=theme.text_muted)
+        content.append(f" {desc}", style=theme.text)
+        content.append("\n", style=theme.text_muted)
 
     # URL hint
     if article.article_url:
-        content.append("\n [Enter] Open in browser", style="yellow")
+        content.append("\n", style=theme.text_muted)
+        content.append(" [Enter] Open in browser", style=theme.warning)
 
-    return Panel(content, title="[yellow]Details[/]", border_style="dim")
+    return Panel(content, title=f"[{theme.header}]Details[/]", border_style=theme.text_muted)
 
 
 # =============================================================================
@@ -959,28 +1165,108 @@ def render_fundamentals_view(state: AppState) -> Layout:
 
     layout.split_column(
         Layout(name="header", size=4),
-        Layout(name="body"),
+        Layout(name="charts", size=6),
+        Layout(name="table"),
     )
 
     # Header with search and tabs
     layout["header"].update(_render_fund_header(state))
 
+    # Charts/sparklines summary
+    layout["charts"].update(_render_fund_charts(state))
+
     # Body with data table
-    layout["body"].update(_render_fund_table(state))
+    layout["table"].update(_render_fund_table(state))
 
     return layout
 
 
+def _render_fund_charts(state: AppState) -> Panel:
+    """Render sparkline charts for fundamentals data."""
+    theme = get_theme()
+    content = Text()
+
+    if state.fund_tab == FundamentalsTab.INCOME:
+        # Income statement sparklines
+        revenues = [inc.revenue for inc in reversed(state.fund_income)]
+        net_incomes = [inc.net_income for inc in reversed(state.fund_income)]
+        eps_values = [inc.eps for inc in reversed(state.fund_income)]
+
+        # Row 1: Revenue and Net Income
+        content.append(f" {'Revenue':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(revenues, 20))
+        rev_val = format_number(revenues[-1]) if revenues and revenues[-1] else "-"
+        content.append(f" {rev_val:>8}", style=f"bold {theme.positive}")
+        content.append("   ", style=theme.text_muted)
+        content.append(f"{'Net Income':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(net_incomes, 20))
+        ni_val = format_number(net_incomes[-1]) if net_incomes and net_incomes[-1] else "-"
+        content.append(f" {ni_val:>8}", style=f"bold {theme.positive}")
+        content.append("\n", style=theme.text_muted)
+
+        # Row 2: EPS
+        content.append(f" {'EPS':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(eps_values, 20))
+        eps_val = f"${eps_values[-1]:.2f}" if eps_values and eps_values[-1] else "-"
+        content.append(f" {eps_val:>8}", style=f"bold {theme.info}")
+
+    elif state.fund_tab == FundamentalsTab.BALANCE:
+        # Balance sheet sparklines
+        assets = [bal.total_assets for bal in reversed(state.fund_balance)]
+        equity = [bal.total_equity for bal in reversed(state.fund_balance)]
+        cash = [bal.cash for bal in reversed(state.fund_balance)]
+
+        # Row 1: Assets and Equity
+        content.append(f" {'Assets':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(assets, 20))
+        assets_val = format_number(assets[-1]) if assets and assets[-1] else "-"
+        content.append(f" {assets_val:>8}", style=f"bold {theme.positive}")
+        content.append("   ", style=theme.text_muted)
+        content.append(f"{'Equity':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(equity, 20))
+        equity_val = format_number(equity[-1]) if equity and equity[-1] else "-"
+        content.append(f" {equity_val:>8}", style=f"bold {theme.positive}")
+        content.append("\n", style=theme.text_muted)
+
+        # Row 2: Cash
+        content.append(f" {'Cash':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(cash, 20))
+        cash_val = format_number(cash[-1]) if cash and cash[-1] else "-"
+        content.append(f" {cash_val:>8}", style=f"bold {theme.info}")
+
+    elif state.fund_tab == FundamentalsTab.CASHFLOW:
+        # Cash flow sparklines
+        operating = [cf.operating_cash_flow for cf in reversed(state.fund_cashflow)]
+        net_change = [cf.net_change for cf in reversed(state.fund_cashflow)]
+
+        # Row 1: Operating CF and Net Change
+        content.append(f" {'Operating CF':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(operating, 20))
+        op_val = format_number(operating[-1]) if operating and operating[-1] else "-"
+        content.append(f" {op_val:>8}", style=f"bold {theme.positive}")
+        content.append("   ", style=theme.text_muted)
+        content.append(f"{'Net Change':<12}", style=theme.text_muted)
+        content.append_text(render_sparkline(net_change, 20))
+        nc_val = format_number(net_change[-1]) if net_change and net_change[-1] else "-"
+        content.append(f" {nc_val:>8}", style=f"bold {theme.info}")
+
+    if not content.plain:
+        content.append(" No data available", style=theme.text_muted)
+
+    return Panel(content, title=f"[{theme.header}]Trends[/]", border_style=theme.text_muted)
+
+
 def _render_fund_header(state: AppState) -> Panel:
     """Render fundamentals header with ticker and tabs."""
+    theme = get_theme()
     text = Text()
 
     # Ticker/company info
     if state.fund_company:
-        text.append(f" {state.fund_ticker} ", style="bold green")
-        text.append(f"{state.fund_company.name}", style="white")
+        text.append(f" {state.fund_ticker} ", style=f"bold {theme.primary}")
+        text.append(f"{state.fund_company.name}", style=theme.text)
     else:
-        text.append(" Press / to search for a ticker", style="dim")
+        text.append(" Press / to search for a ticker", style=theme.text_muted)
 
     text.append("\n")
 
@@ -993,24 +1279,26 @@ def _render_fund_header(state: AppState) -> Panel:
 
     for key, name, tab in tabs:
         if state.fund_tab == tab:
-            text.append(f" [{key}]{name} ", style="bold black on green")
+            text.append(f" [{key}]{name} ", style=f"bold black on {theme.primary}")
         else:
-            text.append(f" [{key}]{name} ", style="dim")
+            text.append(f" [{key}]{name} ", style=theme.text_muted)
 
     text.append("   ")
     tf = "Quarterly" if state.fund_quarterly else "Annual"
-    text.append(f"[t] {tf}", style="yellow")
+    text.append(f"[t] {tf}", style=theme.warning)
 
-    return Panel(text, border_style="green")
+    return Panel(text, border_style=theme.border)
 
 
 def _render_fund_table(state: AppState) -> Panel:
     """Render the fundamentals data table."""
+    theme = get_theme()
     table = Table(
         show_header=True,
-        header_style="bold yellow",
+        header_style=f"bold {theme.header}",
         expand=True,
-        row_styles=["", "dim"],
+        row_styles=[theme.text, theme.text_muted],
+        border_style=theme.border,
     )
 
     if state.fund_tab == FundamentalsTab.INCOME:
@@ -1084,7 +1372,7 @@ def _render_fund_table(state: AppState) -> Panel:
         FundamentalsTab.CASHFLOW: "Cash Flow Statement",
     }[state.fund_tab]
 
-    return Panel(table, title=f"[yellow]{title}[/]", border_style="dim")
+    return Panel(table, title=f"[{theme.header}]{title}[/]", border_style=theme.text_muted)
 
 
 # =============================================================================
@@ -1111,8 +1399,9 @@ def render_economy_view(state: AppState) -> Layout:
 
 def _render_econ_header(state: AppState) -> Panel:
     """Render economy header with tabs."""
+    theme = get_theme()
     text = Text()
-    text.append(" ECONOMIC INDICATORS ", style="bold yellow")
+    text.append(" ECONOMIC INDICATORS ", style=f"bold {theme.header}")
     text.append("  ")
 
     tabs = [
@@ -1123,54 +1412,100 @@ def _render_econ_header(state: AppState) -> Panel:
 
     for key, name, tab in tabs:
         if state.econ_tab == tab:
-            text.append(f" [{key}]{name} ", style="bold black on green")
+            text.append(f" [{key}]{name} ", style=f"bold black on {theme.primary}")
         else:
-            text.append(f" [{key}]{name} ", style="dim")
+            text.append(f" [{key}]{name} ", style=theme.text_muted)
 
-    return Panel(text, border_style="green")
+    return Panel(text, border_style=theme.border)
 
 
 def _render_econ_indicators(state: AppState) -> Panel:
-    """Render key economic indicators summary."""
-    table = Table(show_header=False, expand=True, box=None)
+    """Render key economic indicators summary with sparklines."""
+    theme = get_theme()
+    content = Text()
 
-    # 4 columns for key metrics
-    table.add_column("Metric", style="dim", width=15)
-    table.add_column("Value", style="green", width=12)
-    table.add_column("Metric", style="dim", width=15)
-    table.add_column("Value", style="green", width=12)
-    table.add_column("Metric", style="dim", width=15)
-    table.add_column("Value", style="green", width=12)
-    table.add_column("Metric", style="dim", width=15)
-    table.add_column("Value", style="green", width=12)
-
-    # Get latest values
-    y10 = state.econ_yields[0].yield_10y if state.econ_yields else None
-    y2 = state.econ_yields[0].yield_2y if state.econ_yields else None
-    cpi = state.econ_inflation[0].cpi_yoy if state.econ_inflation else None
-    unemp = state.econ_labor[0].unemployment_rate if state.econ_labor else None
-
-    table.add_row(
-        "10Y Treasury",
-        f"{y10:.2f}%" if y10 else "-",
-        "2Y Treasury",
-        f"{y2:.2f}%" if y2 else "-",
-        "CPI YoY",
-        f"{cpi * 100:.1f}%" if cpi else "-",
-        "Unemployment",
-        f"{unemp * 100:.1f}%" if unemp else "-",
+    # Get time series data (reversed for sparkline - oldest to newest)
+    y10_series = [y.yield_10y for y in reversed(state.econ_yields)] if state.econ_yields else []
+    y2_series = [y.yield_2y for y in reversed(state.econ_yields)] if state.econ_yields else []
+    cpi_series = [i.cpi_yoy for i in reversed(state.econ_inflation)] if state.econ_inflation else []
+    unemp_series = (
+        [lm.unemployment_rate for lm in reversed(state.econ_labor)] if state.econ_labor else []
     )
 
-    return Panel(table, title="[yellow]Latest Indicators[/]", border_style="dim")
+    # Get latest and previous values for trend
+    y10 = state.econ_yields[0].yield_10y if state.econ_yields else None
+    y10_prev = state.econ_yields[1].yield_10y if len(state.econ_yields) > 1 else None
+    y2 = state.econ_yields[0].yield_2y if state.econ_yields else None
+    y2_prev = state.econ_yields[1].yield_2y if len(state.econ_yields) > 1 else None
+    cpi = state.econ_inflation[0].cpi_yoy if state.econ_inflation else None
+    cpi_prev = state.econ_inflation[1].cpi_yoy if len(state.econ_inflation) > 1 else None
+    unemp = state.econ_labor[0].unemployment_rate if state.econ_labor else None
+    unemp_prev = state.econ_labor[1].unemployment_rate if len(state.econ_labor) > 1 else None
+
+    # Row 1: 10Y Treasury and 2Y Treasury
+    content.append(f" {'10Y Treasury':<13}", style=theme.text_muted)
+    y10_val = f"{y10:.2f}%" if y10 else "-"
+    content.append(f"{y10_val:>7}", style=f"bold {theme.positive}")
+    content.append(" ", style=theme.text_muted)
+    content.append_text(render_sparkline(y10_series, 12))
+    content.append(" ", style=theme.text_muted)
+    content.append_text(render_trend_indicator(y10, y10_prev, 9))
+    content.append("  ", style=theme.text_muted)
+    content.append(f"{'2Y Treasury':<13}", style=theme.text_muted)
+    y2_val = f"{y2:.2f}%" if y2 else "-"
+    content.append(f"{y2_val:>7}", style=f"bold {theme.positive}")
+    content.append(" ", style=theme.text_muted)
+    content.append_text(render_sparkline(y2_series, 12))
+    content.append(" ", style=theme.text_muted)
+    content.append_text(render_trend_indicator(y2, y2_prev, 9))
+    content.append("\n", style=theme.text_muted)
+
+    # Row 2: CPI and Unemployment
+    content.append(f" {'CPI YoY':<13}", style=theme.text_muted)
+    cpi_str, cpi_norm = format_rate_as_pct(cpi)
+    cpi_prev_str, cpi_prev_norm = format_rate_as_pct(cpi_prev)
+    content.append(f"{cpi_str:>7}", style=f"bold {theme.warning}")
+    content.append(" ", style=theme.text_muted)
+    # Normalize sparkline data
+    cpi_spark_data = [format_rate_as_pct(c)[1] for c in cpi_series]
+    content.append_text(render_sparkline(cpi_spark_data, 12))
+    content.append(" ", style=theme.text_muted)
+    content.append_text(render_trend_indicator(cpi_norm, cpi_prev_norm, 9))
+    content.append("  ", style=theme.text_muted)
+    content.append(f"{'Unemployment':<13}", style=theme.text_muted)
+    unemp_str, unemp_norm = format_rate_as_pct(unemp)
+    unemp_prev_str, unemp_prev_norm = format_rate_as_pct(unemp_prev)
+    content.append(f"{unemp_str:>7}", style=f"bold {theme.info}")
+    content.append(" ", style=theme.text_muted)
+    # Normalize sparkline data
+    unemp_spark_data = [format_rate_as_pct(u)[1] for u in unemp_series]
+    content.append_text(render_sparkline(unemp_spark_data, 12))
+    content.append(" ", style=theme.text_muted)
+    content.append_text(render_trend_indicator(unemp_norm, unemp_prev_norm, 9))
+    content.append("\n", style=theme.text_muted)
+
+    # Yield curve inversion warning
+    if y10 and y2 and y2 > y10:
+        content.append("\n", style=theme.text_muted)
+        content.append(" ⚠ YIELD CURVE INVERTED ", style=f"bold {theme.text} on {theme.negative}")
+        content.append(f" (2Y: {y2:.2f}% > 10Y: {y10:.2f}%)", style=theme.negative)
+
+    return Panel(
+        content,
+        title=f"[{theme.header}]Key Indicators with Trends[/]",
+        border_style=theme.text_muted,
+    )
 
 
 def _render_econ_table(state: AppState) -> Panel:
     """Render economy data table based on selected tab."""
+    theme = get_theme()
     table = Table(
         show_header=True,
-        header_style="bold yellow",
+        header_style=f"bold {theme.header}",
         expand=True,
-        row_styles=["", "dim"],
+        row_styles=[theme.text, theme.text_muted],
+        border_style=theme.border,
     )
 
     if state.econ_tab == EconomyTab.YIELDS:
@@ -1207,11 +1542,12 @@ def _render_econ_table(state: AppState) -> Panel:
         table.add_column("PCE Core", justify="right")
 
         for i in state.econ_inflation:
+            cpi_yoy_str, _ = format_rate_as_pct(i.cpi_yoy)
             table.add_row(
                 str(i.date),
                 f"{i.cpi:.2f}" if i.cpi else "-",
                 f"{i.cpi_core:.2f}" if i.cpi_core else "-",
-                f"{i.cpi_yoy * 100:.1f}%" if i.cpi_yoy else "-",
+                cpi_yoy_str,
                 f"{i.pce:.2f}" if i.pce else "-",
                 f"{i.pce_core:.2f}" if i.pce_core else "-",
             )
@@ -1225,16 +1561,18 @@ def _render_econ_table(state: AppState) -> Panel:
         table.add_column("Job Openings", justify="right")
 
         for lm in state.econ_labor:
+            unemp_str, _ = format_rate_as_pct(lm.unemployment_rate)
+            partic_str, _ = format_rate_as_pct(lm.participation_rate)
             table.add_row(
                 str(lm.date),
-                f"{lm.unemployment_rate * 100:.1f}%" if lm.unemployment_rate else "-",
-                f"{lm.participation_rate * 100:.1f}%" if lm.participation_rate else "-",
+                unemp_str,
+                partic_str,
                 f"${lm.avg_hourly_earnings:.2f}" if lm.avg_hourly_earnings else "-",
                 f"{lm.job_openings / 1000:.0f}K" if lm.job_openings else "-",
             )
         title = "Labor Market History"
 
-    return Panel(table, title=f"[yellow]{title}[/]", border_style="dim")
+    return Panel(table, title=f"[{theme.header}]{title}[/]", border_style=theme.text_muted)
 
 
 # =============================================================================
@@ -1242,14 +1580,212 @@ def _render_econ_table(state: AppState) -> Panel:
 # =============================================================================
 
 
-def render_settings_view(state: AppState) -> Panel:
+def render_settings_view(state: AppState) -> Layout:
     """Render the settings view."""
-    text = Text()
-    text.append(" SETTINGS\n\n", style="bold yellow")
-    text.append(" Settings management coming soon.\n", style="dim")
-    text.append(" Current settings are stored in the database.\n", style="dim")
+    layout = Layout()
 
-    return Panel(text, border_style="green")
+    layout.split_row(
+        Layout(name="categories", size=25),
+        Layout(name="settings"),
+    )
+
+    # Left panel: categories
+    layout["categories"].update(_render_settings_categories(state))
+
+    # Right panel: settings items
+    layout["settings"].update(_render_settings_items(state))
+
+    return layout
+
+
+# Settings definitions per category
+SETTINGS_ITEMS = {
+    SettingsCategory.DISPLAY: [
+        (
+            "theme_name",
+            "Theme",
+            "choice",
+            [
+                "default",
+                "osaka-jade",
+                "mono",
+                "high-contrast",
+                "dracula",
+                "catppuccin",
+                "gruvbox",
+                "nord",
+                "tokyo-night",
+                "solarized",
+                "one-dark",
+            ],
+        ),
+        ("chart_period_days", "Chart Period (days)", "int", [30, 60, 90, 180, 365]),
+        ("number_format", "Number Format", "choice", ["compact", "full"]),
+        ("table_rows", "Table Rows", "int", [15, 20, 25, 30, 50]),
+        ("logo_enabled", "Show Company Logos", "bool", None),
+        ("logo_width", "Logo Width (chars)", "int", [20, 24, 28, 32, 36, 40]),
+        ("logo_height", "Logo Height (lines)", "int", [6, 8, 10, 12, 15, 18]),
+    ],
+    SettingsCategory.CHARTS: [
+        ("chart_detail", "Chart Detail Level", "choice", ["compact", "normal", "detailed"]),
+        ("colors_enabled", "Colors Enabled", "bool", None),
+    ],
+    SettingsCategory.BEHAVIOR: [
+        ("fundamentals_timeframe", "Default Timeframe", "choice", ["quarterly", "annual"]),
+        ("auto_refresh", "Auto Refresh", "bool", None),
+        ("refresh_interval_seconds", "Refresh Interval (sec)", "int", [30, 60, 120, 300]),
+    ],
+    SettingsCategory.API: [
+        ("polygon_api_key", "Polygon API Key", "secret", None),
+    ],
+}
+
+
+def _render_settings_categories(state: AppState) -> Panel:
+    """Render the settings category sidebar."""
+    theme = get_theme()
+    content = Text()
+
+    categories = [
+        (SettingsCategory.DISPLAY, "Display"),
+        (SettingsCategory.CHARTS, "Charts"),
+        (SettingsCategory.BEHAVIOR, "Behavior"),
+        (SettingsCategory.API, "API Keys"),
+    ]
+
+    for cat, name in categories:
+        if cat == state.settings_category:
+            content.append(f" > {name}\n", style=f"{theme.selected_text} {theme.selected}")
+        else:
+            content.append(f"   {name}\n", style=theme.text_muted)
+
+    content.append("\n\n", style=theme.text_muted)
+    content.append(" [1] Display\n", style=theme.text_muted)
+    content.append(" [2] Charts\n", style=theme.text_muted)
+    content.append(" [3] Behavior\n", style=theme.text_muted)
+    content.append(" [4] API Keys\n", style=theme.text_muted)
+
+    return Panel(
+        content,
+        title=f"[{theme.header}]CATEGORIES[/]",
+        title_align="left",
+        border_style=theme.border,
+    )
+
+
+def _render_settings_items(state: AppState) -> Panel:
+    """Render the settings items for current category."""
+    theme = get_theme()
+    config = get_tui_config()
+    items = SETTINGS_ITEMS.get(state.settings_category, [])
+
+    content = Text()
+
+    if not items:
+        content.append(" No settings in this category.\n", style=theme.text_muted)
+        return Panel(content, title=f"[{theme.header}]SETTINGS[/]", border_style=theme.text_muted)
+
+    # If popup is open, show it instead
+    if state.settings_popup_open:
+        return _render_settings_popup(state)
+
+    for i, (key, label, value_type, choices) in enumerate(items):
+        # Get current value
+        section = {
+            SettingsCategory.DISPLAY: "display",
+            SettingsCategory.CHARTS: "charts",
+            SettingsCategory.BEHAVIOR: "behavior",
+            SettingsCategory.API: "api",
+        }[state.settings_category]
+
+        # Map key to config property
+        if key == "fundamentals_timeframe":
+            section = "fundamentals"
+            config_key = "default_timeframe"
+        elif key == "theme_name":
+            section = "theme"
+            config_key = "name"
+        else:
+            config_key = key
+
+        current_value = config.get(section, config_key)
+
+        # Format value for display
+        if value_type == "bool":
+            value_str = "On" if current_value else "Off"
+        elif value_type == "secret":
+            # Mask secret values
+            if current_value:
+                value_str = (
+                    "*" * 8 + str(current_value)[-4:] if len(str(current_value)) > 4 else "****"
+                )
+            else:
+                value_str = "(not set)"
+        else:
+            value_str = str(current_value) if current_value else "(not set)"
+
+        # Highlight selected item
+        is_selected = i == state.settings_selected_idx
+        is_editing = is_selected and state.settings_editing
+
+        if is_editing:
+            # Show edit mode (only for secret/free-form)
+            content.append(f" > {label}: ", style=f"bold {theme.warning}")
+            content.append(
+                f"[{state.settings_edit_value}]", style=f"{theme.selected_text} {theme.selected}"
+            )
+            content.append("_", style="blink")
+            content.append("\n", style=theme.text_muted)
+        elif is_selected:
+            content.append(f" > {label}: ", style=f"bold {theme.primary}")
+            content.append(f"{value_str}", style=theme.text_bright)
+            content.append("  [Enter to select]", style=f"{theme.text_muted} {theme.info}")
+            content.append("\n", style=theme.text_muted)
+        else:
+            content.append(f"   {label}: ", style=theme.text_muted)
+            content.append(f"{value_str}", style=theme.text)
+            content.append("\n", style=theme.text_muted)
+
+    content.append("\n", style=theme.text_muted)
+    content.append(" [Enter] Select  [Up/Down] Navigate\n", style=theme.text_muted)
+
+    category_name = {
+        SettingsCategory.DISPLAY: "Display Settings",
+        SettingsCategory.CHARTS: "Chart Settings",
+        SettingsCategory.BEHAVIOR: "Behavior Settings",
+        SettingsCategory.API: "API Keys",
+    }[state.settings_category]
+
+    return Panel(
+        content,
+        title=f"[{theme.header}]{category_name}[/]",
+        title_align="left",
+        border_style=theme.border,
+    )
+
+
+def _render_settings_popup(state: AppState) -> Panel:
+    """Render the popup menu for selecting a choice."""
+    theme = get_theme()
+    content = Text()
+
+    content.append(f" Select {state.settings_popup_label}:\n\n", style=f"bold {theme.header}")
+
+    for i, choice in enumerate(state.settings_popup_choices):
+        if i == state.settings_popup_idx:
+            content.append(f"   > {choice}\n", style=f"{theme.selected_text} {theme.selected}")
+        else:
+            content.append(f"     {choice}\n", style=theme.text)
+
+    content.append("\n", style=theme.text_muted)
+    content.append(" [Up/Down] Navigate  [Enter] Select  [Esc] Cancel\n", style=theme.text_muted)
+
+    return Panel(
+        content,
+        title=f"[{theme.accent}]{state.settings_popup_label}[/]",
+        title_align="left",
+        border_style=theme.accent,
+    )
 
 
 # =============================================================================
@@ -1277,14 +1813,15 @@ def render_glossary_view(state: AppState) -> Layout:
 
 def _render_glossary_sidebar(state: AppState) -> Panel:
     """Render the glossary term list sidebar."""
+    theme = get_theme()
     content = Text()
 
     # Search box
     if state.glossary_search:
-        content.append(f" / {state.glossary_search}", style="yellow")
+        content.append(f" / {state.glossary_search}", style=theme.warning)
     else:
-        content.append(" / Search...", style="dim")
-    content.append("\n\n")
+        content.append(" / Search...", style=theme.text_muted)
+    content.append("\n\n", style=theme.text_muted)
 
     # Term list with scrolling
     visible_rows = state.get_visible_glossary_rows()
@@ -1315,11 +1852,13 @@ def _render_glossary_sidebar(state: AppState) -> Panel:
         line = f"{cached}[{cat_abbrev:>3}] {term.term}"
 
         if i == state.selected_term_idx and state.glossary_focus_sidebar:
-            content.append(line + "\n", style="bold green on dark_green")
+            content.append(line + "\n", style=f"{theme.selected_text} {theme.selected}")
         elif i == state.selected_term_idx:
-            content.append(line + "\n", style="green")
+            content.append(line + "\n", style=theme.primary)
         else:
-            content.append(line + "\n", style="dim" if not term.has_definition else "white")
+            content.append(
+                line + "\n", style=theme.text_muted if not term.has_definition else theme.text
+            )
 
     # Scroll indicators
     total = len(state.glossary_filtered)
@@ -1331,22 +1870,23 @@ def _render_glossary_sidebar(state: AppState) -> Panel:
             scroll_info += " v"
 
     # Help text
-    content.append("\n")
-    content.append("[n] Add term  [d] Delete", style="dim")
-    content.append("\n")
-    content.append("* = cached definition", style="dim")
+    content.append("\n", style=theme.text_muted)
+    content.append("[n] Add term  [d] Delete", style=theme.text_muted)
+    content.append("\n", style=theme.text_muted)
+    content.append("* = cached definition", style=theme.text_muted)
 
-    title = f"[yellow]TERMS ({len(state.glossary_filtered)})[/]{scroll_info}"
+    title = f"[{theme.header}]TERMS ({len(state.glossary_filtered)})[/]{scroll_info}"
     return Panel(
         content,
         title=title,
         title_align="left",
-        border_style="green" if state.glossary_focus_sidebar else "dim",
+        border_style=theme.border if state.glossary_focus_sidebar else theme.text_muted,
     )
 
 
 def _render_glossary_definition(state: AppState) -> Panel:
     """Render the glossary definition panel."""
+    theme = get_theme()
     # Show regeneration menu if active
     if state.glossary_show_regen_menu:
         return _render_regen_menu(state)
@@ -1354,120 +1894,122 @@ def _render_glossary_definition(state: AppState) -> Panel:
     # Loading state with streaming content
     if state.glossary_loading:
         content = Text()
-        content.append(" Generating definition...\n\n", style="bold yellow")
+        content.append(" Generating definition...", style=f"bold {theme.warning}")
+        content.append("\n\n", style=theme.text_muted)
 
         # Spinner animation (will be static but indicates activity)
-        content.append(" ", style="")
-        content.append("[", style="dim")
+        content.append(" ", style=theme.text_muted)
+        content.append("[", style=theme.text_muted)
         # Simple progress indicator
-        content.append("=" * 20, style="green")
-        content.append(">", style="bold green")
-        content.append(" " * 10, style="dim")
-        content.append("]", style="dim")
-        content.append("\n\n")
+        content.append("=" * 20, style=theme.positive)
+        content.append(">", style=f"bold {theme.positive}")
+        content.append(" " * 10, style=theme.text_muted)
+        content.append("]", style=theme.text_muted)
+        content.append("\n\n", style=theme.text_muted)
 
         # Show streaming content as it arrives
         if state.glossary_stream_content:
-            content.append(state.glossary_stream_content, style="white")
+            content.append(state.glossary_stream_content, style=theme.text)
 
         return Panel(
             content,
-            title="[yellow]Generating...[/]",
-            border_style="yellow",
+            title=f"[{theme.warning}]Generating...[/]",
+            border_style=theme.warning,
         )
 
     # Error state
     if state.glossary_error:
         content = Text()
-        content.append(" Error\n\n", style="bold red")
-        content.append(f" {state.glossary_error}\n\n", style="red")
-        content.append(" Press Enter to retry", style="dim")
+        content.append(" Error\n\n", style=f"bold {theme.negative}")
+        content.append(f" {state.glossary_error}\n\n", style=theme.negative)
+        content.append(" Press Enter to retry", style=theme.text_muted)
 
         return Panel(
             content,
-            title="[red]Error[/]",
-            border_style="red",
+            title=f"[{theme.negative}]Error[/]",
+            border_style=theme.negative,
         )
 
     # No term selected
     term = state.current_glossary_term()
     if not term:
         content = Text()
-        content.append("\n Select a term from the list\n", style="dim")
-        content.append(" Press Enter to generate definition\n", style="dim")
+        content.append("\n Select a term from the list\n", style=theme.text_muted)
+        content.append(" Press Enter to generate definition\n", style=theme.text_muted)
 
         return Panel(
             content,
-            title="[yellow]Definition[/]",
-            border_style="dim",
+            title=f"[{theme.header}]Definition[/]",
+            border_style=theme.text_muted,
         )
 
     # No definition yet
     definition = state.glossary_definition
     if not definition:
         content = Text()
-        content.append(f"\n {term.term}\n\n", style="bold green")
-        content.append(" No definition cached.\n", style="dim")
-        content.append(" Press Enter to generate.\n", style="dim")
+        content.append(f"\n {term.term}\n\n", style=f"bold {theme.primary}")
+        content.append(" No definition cached.\n", style=theme.text_muted)
+        content.append(" Press Enter to generate.\n", style=theme.text_muted)
 
         return Panel(
             content,
-            title=f"[yellow]{term.term}[/]",
-            border_style="dim",
+            title=f"[{theme.header}]{term.term}[/]",
+            border_style=theme.text_muted,
         )
 
     # Render the full definition
     content = Text()
 
     # Official definition
-    content.append(" OFFICIAL DEFINITION\n", style="bold cyan")
-    content.append(f" {definition.official_definition}\n\n", style="white")
+    content.append(" OFFICIAL DEFINITION\n", style=f"bold {theme.info}")
+    content.append(f" {definition.official_definition}\n\n", style=theme.text)
 
     # Plain English
-    content.append(" WHAT IT ACTUALLY MEANS\n", style="bold cyan")
-    content.append(f" {definition.plain_english}\n\n", style="white")
+    content.append(" WHAT IT ACTUALLY MEANS\n", style=f"bold {theme.info}")
+    content.append(f" {definition.plain_english}\n\n", style=theme.text)
 
     # Examples
     if definition.examples:
-        content.append(" EXAMPLES\n", style="bold cyan")
+        content.append(" EXAMPLES\n", style=f"bold {theme.info}")
         for i, example in enumerate(definition.examples, 1):
-            content.append(f" {i}. {example}\n", style="white")
-        content.append("\n")
+            content.append(f" {i}. {example}\n", style=theme.text)
+        content.append("\n", style=theme.text_muted)
 
     # Related terms with numbers for quick jump
     if definition.related_terms:
-        content.append(" RELATED TERMS\n", style="bold cyan")
+        content.append(" RELATED TERMS\n", style=f"bold {theme.info}")
         for i, related in enumerate(definition.related_terms[:5], 1):
-            content.append(f" [{i}] ", style="yellow")
-            content.append(f"{related}  ", style="green")
-        content.append("\n\n")
+            content.append(f" [{i}] ", style=theme.warning)
+            content.append(f"{related}  ", style=theme.positive)
+        content.append("\n\n", style=theme.text_muted)
 
     # Learn more links
     if definition.learn_more:
-        content.append(" LEARN MORE\n", style="bold cyan")
+        content.append(" LEARN MORE\n", style=f"bold {theme.info}")
         for url in definition.learn_more[:3]:
             # Truncate long URLs
             display_url = url
             if len(display_url) > 60:
                 display_url = display_url[:57] + "..."
-            content.append(f" {display_url}\n", style="dim cyan")
+            content.append(f" {display_url}\n", style=theme.info)
 
     # Show if regenerated with custom prompt
     if definition.custom_prompt:
-        content.append("\n")
-        content.append(f" [Customized: {definition.custom_prompt[:30]}...]", style="dim")
+        content.append("\n", style=theme.text_muted)
+        content.append(f" [Customized: {definition.custom_prompt[:30]}...]", style=theme.text_muted)
 
     return Panel(
         content,
-        title=f"[yellow]{definition.term}[/]",
-        border_style="green" if not state.glossary_focus_sidebar else "dim",
+        title=f"[{theme.header}]{definition.term}[/]",
+        border_style=theme.border if not state.glossary_focus_sidebar else theme.text_muted,
     )
 
 
 def _render_regen_menu(state: AppState) -> Panel:
     """Render the regeneration options menu."""
+    theme = get_theme()
     content = Text()
-    content.append("\n Regenerate definition with:\n\n", style="bold yellow")
+    content.append("\n Regenerate definition with:\n\n", style=f"bold {theme.warning}")
 
     options = [
         ("1", "More technical", "Use more technical language and formulas"),
@@ -1478,19 +2020,19 @@ def _render_regen_menu(state: AppState) -> Panel:
     ]
 
     for key, label, desc in options:
-        content.append(f"  [{key}] ", style="yellow")
-        content.append(f"{label}\n", style="bold white")
-        content.append(f"      {desc}\n\n", style="dim")
+        content.append(f"  [{key}] ", style=theme.warning)
+        content.append(f"{label}\n", style=f"bold {theme.text}")
+        content.append(f"      {desc}\n\n", style=theme.text_muted)
 
-    content.append("\n  Press Esc to cancel", style="dim")
+    content.append("\n  Press Esc to cancel", style=theme.text_muted)
 
     term = state.current_glossary_term()
     title = f"Regenerate: {term.term}" if term else "Regenerate"
 
     return Panel(
         content,
-        title=f"[yellow]{title}[/]",
-        border_style="yellow",
+        title=f"[{theme.warning}]{title}[/]",
+        border_style=theme.warning,
     )
 
 

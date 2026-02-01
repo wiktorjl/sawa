@@ -11,6 +11,7 @@ from rich.console import Console
 
 from sp500_tui.ai.client import ZAIClient, ZAIError
 from sp500_tui.ai.prompts import REGEN_OPTIONS
+from sp500_tui.config import get_tui_config
 from sp500_tui.database import init_schema
 from sp500_tui.input import (
     KEY_BACKSPACE,
@@ -31,8 +32,8 @@ from sp500_tui.input import (
 )
 from sp500_tui.models.glossary import GlossaryManager
 from sp500_tui.models.watchlist import WatchlistManager
-from sp500_tui.state import AppState, EconomyTab, FundamentalsTab, View
-from sp500_tui.views import render_app
+from sp500_tui.state import AppState, EconomyTab, FundamentalsTab, SettingsCategory, View
+from sp500_tui.views import SETTINGS_ITEMS, render_app
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class SP500App:
             if not self.state.glossary_terms:
                 self.state.load_glossary_terms()
             return
-        if key == "r":
+        if key == "r" and self.state.current_view != View.SETTINGS:
             self._refresh()
             return
 
@@ -150,6 +151,8 @@ class SP500App:
             self._handle_fundamentals_key(key)
         elif self.state.current_view == View.ECONOMY:
             self._handle_economy_key(key)
+        elif self.state.current_view == View.SETTINGS:
+            self._handle_settings_key(key)
         elif self.state.current_view == View.GLOSSARY:
             self._handle_glossary_key(key)
 
@@ -206,7 +209,7 @@ class SP500App:
                 self.state.set_message(f"Added term: {value}")
                 self.state.load_glossary_terms()
             else:
-                self.state.set_message(f"Term already exists or failed to add", error=True)
+                self.state.set_message("Term already exists or failed to add", error=True)
 
         elif callback == "glossary_custom_regen":
             # Custom regeneration with user-provided instructions
@@ -440,6 +443,215 @@ class SP500App:
             self.state.econ_tab = EconomyTab.LABOR
 
     # =========================================================================
+    # SETTINGS VIEW
+    # =========================================================================
+
+    def _handle_settings_key(self, key: str) -> None:
+        """Handle keys in settings view."""
+        items = SETTINGS_ITEMS.get(self.state.settings_category, [])
+        config = get_tui_config()
+
+        # Handle popup menu
+        if self.state.settings_popup_open:
+            self._handle_settings_popup(key, items, config)
+            return
+
+        # Handle editing mode
+        if self.state.settings_editing:
+            self._handle_settings_edit(key, items, config)
+            return
+
+        # Category switching
+        if key == "1":
+            self.state.settings_category = SettingsCategory.DISPLAY
+            self.state.settings_selected_idx = 0
+            return
+        if key == "2":
+            self.state.settings_category = SettingsCategory.CHARTS
+            self.state.settings_selected_idx = 0
+            return
+        if key == "3":
+            self.state.settings_category = SettingsCategory.BEHAVIOR
+            self.state.settings_selected_idx = 0
+            return
+        if key == "4":
+            self.state.settings_category = SettingsCategory.API
+            self.state.settings_selected_idx = 0
+            return
+
+        # Navigation
+        if key == KEY_UP:
+            if self.state.settings_selected_idx > 0:
+                self.state.settings_selected_idx -= 1
+            return
+
+        if key == KEY_DOWN:
+            if self.state.settings_selected_idx < len(items) - 1:
+                self.state.settings_selected_idx += 1
+            return
+
+        # Enter/Space: toggle bool, cycle choice, or edit text
+        if key == KEY_ENTER or key == " ":
+            if not items:
+                return
+            item_key, label, value_type, choices = items[self.state.settings_selected_idx]
+            section, config_key = self._get_config_location(item_key)
+            current_value = config.get(section, config_key)
+
+            if value_type == "bool":
+                # Toggle boolean
+                config.set(section, config_key, not current_value)
+                self.state.set_message(f"{label}: {'On' if not current_value else 'Off'}")
+            elif (value_type == "choice" or value_type == "int") and choices:
+                # Open popup menu for choices
+                self.state.settings_popup_open = True
+                self.state.settings_popup_choices = [str(c) for c in choices]
+                self.state.settings_popup_label = label
+                # Set current selection
+                try:
+                    self.state.settings_popup_idx = choices.index(current_value)
+                except ValueError:
+                    self.state.settings_popup_idx = 0
+            elif value_type == "secret":
+                # For secrets, start with empty value (user re-enters)
+                self.state.settings_editing = True
+                self.state.settings_edit_value = ""
+            else:
+                # Enter edit mode for free-form text/int
+                self.state.settings_editing = True
+                self.state.settings_edit_value = str(current_value) if current_value else ""
+            return
+
+        # Left/Right to cycle through choices
+        if key == KEY_LEFT or key == KEY_RIGHT:
+            if not items:
+                return
+            item_key, label, value_type, choices = items[self.state.settings_selected_idx]
+            if not choices:
+                return
+
+            section, config_key = self._get_config_location(item_key)
+            current_value = config.get(section, config_key)
+
+            if value_type == "choice":
+                try:
+                    idx = choices.index(current_value)
+                except ValueError:
+                    idx = 0
+                if key == KEY_RIGHT:
+                    idx = (idx + 1) % len(choices)
+                else:
+                    idx = (idx - 1) % len(choices)
+                new_value = choices[idx]
+                config.set(section, config_key, new_value)
+                self.state.set_message(f"{label}: {new_value}")
+            elif value_type == "int":
+                try:
+                    idx = choices.index(current_value)
+                except ValueError:
+                    idx = 0
+                if key == KEY_RIGHT:
+                    idx = (idx + 1) % len(choices)
+                else:
+                    idx = (idx - 1) % len(choices)
+                new_value = choices[idx]
+                config.set(section, config_key, new_value)
+                self.state.set_message(f"{label}: {new_value}")
+            return
+
+    def _handle_settings_edit(self, key: str, items: list, config) -> None:
+        """Handle keys while editing a setting value."""
+        if key == KEY_ESCAPE:
+            self.state.settings_editing = False
+            self.state.settings_edit_value = ""
+            return
+
+        if key == KEY_ENTER:
+            # Save the value
+            item_key, label, value_type, choices = items[self.state.settings_selected_idx]
+            section, config_key = self._get_config_location(item_key)
+
+            try:
+                if value_type == "int":
+                    new_value = int(self.state.settings_edit_value)
+                else:
+                    new_value = self.state.settings_edit_value
+
+                config.set(section, config_key, new_value)
+
+                # For API keys, also set environment variable for current session
+                if value_type == "secret" and item_key == "polygon_api_key":
+                    os.environ["POLYGON_API_KEY"] = str(new_value)
+                    self.state.set_message(f"Saved: {label}")
+                else:
+                    self.state.set_message(f"Saved: {label} = {new_value}")
+            except ValueError:
+                self.state.set_message(f"Invalid value for {label}", error=True)
+
+            self.state.settings_editing = False
+            self.state.settings_edit_value = ""
+            return
+
+        if key == KEY_BACKSPACE:
+            self.state.settings_edit_value = self.state.settings_edit_value[:-1]
+            return
+
+        # Add character(s) - handle paste (multiple chars) and single char input
+        if key and all(c.isprintable() for c in key):
+            self.state.settings_edit_value += key
+
+    def _handle_settings_popup(self, key: str, items: list, config) -> None:
+        """Handle keys in settings popup menu."""
+        if key == KEY_ESCAPE:
+            # Close popup without saving
+            self.state.settings_popup_open = False
+            return
+
+        if key == KEY_UP:
+            if self.state.settings_popup_idx > 0:
+                self.state.settings_popup_idx -= 1
+            return
+
+        if key == KEY_DOWN:
+            if self.state.settings_popup_idx < len(self.state.settings_popup_choices) - 1:
+                self.state.settings_popup_idx += 1
+            return
+
+        if key == KEY_ENTER or key == " ":
+            # Select the highlighted choice
+            item_key, label, value_type, choices = items[self.state.settings_selected_idx]
+            section, config_key = self._get_config_location(item_key)
+
+            selected_value = self.state.settings_popup_choices[self.state.settings_popup_idx]
+            # Convert back to int if needed
+            if value_type == "int":
+                selected_value = int(selected_value)
+
+            config.set(section, config_key, selected_value)
+            self.state.set_message(f"{label}: {selected_value}")
+
+            # Close popup
+            self.state.settings_popup_open = False
+            return
+
+    def _get_config_location(self, key: str) -> tuple[str, str]:
+        """Get config section and key for a setting."""
+        # Special case mappings
+        if key == "fundamentals_timeframe":
+            return "fundamentals", "default_timeframe"
+        if key == "theme_name":
+            return "theme", "name"
+
+        # Default: derive section from category
+        section_map = {
+            SettingsCategory.DISPLAY: "display",
+            SettingsCategory.CHARTS: "charts",
+            SettingsCategory.BEHAVIOR: "behavior",
+            SettingsCategory.API: "api",
+        }
+        return section_map[self.state.settings_category], key
+
+    # =========================================================================
     # GLOSSARY VIEW
     # =========================================================================
 
@@ -647,12 +859,19 @@ class SP500App:
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Set up logging configuration."""
+    """Set up logging configuration using XDG state directory."""
+    from sp500_tui.config import get_tui_log_file
+
     level = logging.DEBUG if verbose else logging.WARNING
+    log_file = get_tui_log_file()
+
+    # Ensure parent directory exists
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler("/tmp/sp500-tui.log")],
+        handlers=[logging.FileHandler(log_file)],
     )
 
 

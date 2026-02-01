@@ -3,8 +3,10 @@
 Stock Data MCP Server
 
 An MCP server providing read-only access to S&P 500 stock data in PostgreSQL.
+Includes colorful Unicode charts for data visualization.
 """
 
+import json
 import logging
 import os
 import sys
@@ -14,6 +16,17 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from .charts.config import ChartDetail, get_chart_config
+from .charts.core.layout import get_layout
+from .charts.core.modal import check_width_and_warn
+from .charts.renderers import (
+    render_economy_chart,
+    render_economy_dashboard,
+    render_fundamentals_chart,
+    render_price_chart,
+    render_ratios_chart,
+)
+from .charts.themes import get_theme
 from .database import execute_query
 from .tools.companies import get_company_details, list_companies, search_companies
 from .tools.economy import get_economy_dashboard, get_economy_data
@@ -101,7 +114,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_stock_prices",
-            description="Get daily OHLCV prices for a ticker",
+            description="Get daily OHLCV prices for a ticker with visual chart",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -124,13 +137,18 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 1000,
                     },
+                    "chart_detail": {
+                        "type": "string",
+                        "description": "Chart detail level",
+                        "enum": ["compact", "normal", "detailed"],
+                    },
                 },
                 "required": ["ticker", "start_date"],
             },
         ),
         Tool(
             name="get_financial_ratios",
-            description="Get time-series financial ratios (P/E, ROE, debt/equity, etc.)",
+            description="Get time-series financial ratios (P/E, ROE, debt/equity, etc.) with visual chart",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -153,13 +171,18 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 1000,
                     },
+                    "chart_detail": {
+                        "type": "string",
+                        "description": "Chart detail level",
+                        "enum": ["compact", "normal", "detailed"],
+                    },
                 },
                 "required": ["ticker", "start_date"],
             },
         ),
         Tool(
             name="get_fundamentals",
-            description="Get latest balance sheet, cash flow, and income statement data",
+            description="Get latest balance sheet, cash flow, and income statement data with visual charts",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -180,13 +203,18 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 20,
                     },
+                    "chart_detail": {
+                        "type": "string",
+                        "description": "Chart detail level",
+                        "enum": ["compact", "normal", "detailed"],
+                    },
                 },
                 "required": ["ticker"],
             },
         ),
         Tool(
             name="get_economy_data",
-            description="Get economic indicators for a date range",
+            description="Get economic indicators for a date range with visual charts",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -215,13 +243,18 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 1000,
                     },
+                    "chart_detail": {
+                        "type": "string",
+                        "description": "Chart detail level",
+                        "enum": ["compact", "normal", "detailed"],
+                    },
                 },
                 "required": ["indicator_type", "start_date"],
             },
         ),
         Tool(
             name="get_economy_dashboard",
-            description="Get a summary of recent economic indicators",
+            description="Get a visual summary of recent economic indicators",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -231,6 +264,11 @@ async def list_tools() -> list[Tool]:
                         "default": 10,
                         "minimum": 1,
                         "maximum": 100,
+                    },
+                    "chart_detail": {
+                        "type": "string",
+                        "description": "Chart detail level",
+                        "enum": ["compact", "normal", "detailed"],
                     },
                 },
             },
@@ -258,6 +296,29 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     logger.debug(f"Tool called: {name} with arguments: {arguments}")
 
     try:
+        # Get chart configuration
+        config = get_chart_config()
+
+        # Override detail level if specified in arguments
+        if chart_detail := arguments.get("chart_detail"):
+            try:
+                config.detail = ChartDetail(chart_detail.lower())
+            except ValueError:
+                pass
+
+        layout = get_layout(config)
+        theme = get_theme(config.theme)
+
+        # Check terminal width and get warning if needed
+        width_warning = check_width_and_warn(
+            layout.width,
+            config.get_min_width(),
+            theme,
+        )
+
+        chart = None
+        result = None
+
         if name == "list_companies":
             result = list_companies(
                 limit=arguments.get("limit", 100),
@@ -280,6 +341,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 end_date=arguments.get("end_date"),
                 limit=arguments.get("limit", 252),
             )
+            # Render price chart
+            chart = render_price_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_financial_ratios":
             result = get_financial_ratios(
                 ticker=arguments["ticker"],
@@ -287,12 +350,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 end_date=arguments.get("end_date"),
                 limit=arguments.get("limit", 100),
             )
+            # Render ratios chart
+            chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_fundamentals":
             result = get_fundamentals(
                 ticker=arguments["ticker"],
                 timeframe=arguments.get("timeframe", "quarterly"),
                 limit=arguments.get("limit", 4),
             )
+            # Render fundamentals chart
+            chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_economy_data":
             result = get_economy_data(
                 indicator_type=arguments["indicator_type"],
@@ -300,17 +367,36 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 end_date=arguments.get("end_date"),
                 limit=arguments.get("limit", 100),
             )
+            # Render economy chart
+            chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
         elif name == "get_economy_dashboard":
             result = get_economy_dashboard(limit=arguments.get("limit", 10))
+            # Render economy dashboard
+            chart = render_economy_dashboard(result, layout, theme)
         elif name == "execute_query":
             result = execute_query(arguments["sql"])
         else:
             raise ValueError(f"Unknown tool: {name}")
 
-        # Convert result to JSON string
-        import json
+        # Build response with chart and data
+        parts = []
 
-        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        # Add width warning if needed
+        if width_warning:
+            parts.append(width_warning)
+            parts.append("")
+
+        # Add chart if available
+        if chart:
+            parts.append(chart)
+            parts.append("")
+            parts.append("\u2500" * 40 + " DATA " + "\u2500" * 40)
+            parts.append("")
+
+        # Add JSON data
+        parts.append(json.dumps(result, indent=2, default=str))
+
+        return [TextContent(type="text", text="\n".join(parts))]
 
     except Exception as e:
         logger.error(f"Error executing tool {name}: {e}")
