@@ -4,7 +4,7 @@ import logging
 from datetime import date
 from typing import Any
 
-from database import execute_query
+from ..database import execute_query
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from database import execute_query
+from ..database import execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +61,9 @@ def get_fundamentals(
             net_cash_from_operating_activities as operating_cash_flow,
             net_cash_from_investing_activities as investing_cash_flow,
             net_cash_from_financing_activities as financing_cash_flow,
-            free_cash_flow,
-            capital_expenditures as capex,
-            depreciation_and_amortization as dda
+            purchase_of_property_plant_and_equipment as capex,
+            depreciation_depletion_and_amortization as dda,
+            (net_cash_from_operating_activities + purchase_of_property_plant_and_equipment) as free_cash_flow
         FROM cash_flows
         WHERE ticker = %(ticker)s
             AND timeframe = %(timeframe)s

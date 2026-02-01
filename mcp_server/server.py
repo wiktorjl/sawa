@@ -14,11 +14,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from database import execute_query
-from tools.companies import get_company_details, list_companies, search_companies
-from tools.economy import get_economy_dashboard, get_economy_data
-from tools.fundamentals import get_fundamentals
-from tools.market_data import get_financial_ratios, get_stock_prices
+from .database import execute_query
+from .tools.companies import get_company_details, list_companies, search_companies
+from .tools.economy import get_economy_dashboard, get_economy_data
+from .tools.fundamentals import get_fundamentals
+from .tools.market_data import get_financial_ratios, get_stock_prices
 
 # Setup logging
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
@@ -323,7 +323,7 @@ async def main():
 
     # Verify database connection
     try:
-        from database import get_database_url
+        from .database import get_database_url
 
         get_database_url()
         logger.info("Database configuration verified")
