@@ -5,7 +5,10 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from rich.text import Text
+
 from sp500_tui.ai.client import GlossaryEntry
+from sp500_tui.logo import get_placeholder, load_logo_async
 from sp500_tui.models.glossary import GlossaryManager, GlossaryTerm
 from sp500_tui.models.queries import (
     BalanceSheet,
@@ -53,6 +56,15 @@ class EconomyTab(Enum):
     LABOR = auto()
 
 
+class SettingsCategory(Enum):
+    """Settings categories."""
+
+    DISPLAY = auto()
+    CHARTS = auto()
+    BEHAVIOR = auto()
+    API = auto()
+
+
 @dataclass
 class AppState:
     """Complete application state."""
@@ -88,6 +100,9 @@ class AppState:
     detail_show_news: bool = True  # Show news pane by default
     selected_news_idx: int = 0  # Selected news item index
     news_scroll_offset: int = 0  # Scroll offset for news list
+    # Logo state
+    detail_logo_ascii: Text | None = None
+    detail_logo_loading: bool = False
 
     # Fundamentals view
     fund_ticker: str = ""
@@ -116,6 +131,16 @@ class AppState:
     glossary_error: str = ""  # Error message if generation failed
     glossary_show_regen_menu: bool = False  # Show regeneration options menu
     glossary_focus_sidebar: bool = True  # True = term list, False = definition
+
+    # Settings view
+    settings_category: SettingsCategory = SettingsCategory.DISPLAY
+    settings_selected_idx: int = 0  # Selected item in current category
+    settings_editing: bool = False  # Are we editing a value?
+    settings_edit_value: str = ""  # Current edit value
+    settings_popup_open: bool = False  # Is choice popup menu open?
+    settings_popup_choices: list[str] = field(default_factory=list)  # Available choices
+    settings_popup_idx: int = 0  # Selected index in popup
+    settings_popup_label: str = ""  # Label for the setting being edited
 
     # UI state
     message: str = ""  # Status message to display
@@ -209,6 +234,9 @@ class AppState:
         if not self.detail_news:
             self._fetch_news_from_api(ticker)
 
+        # Load company logo
+        self._load_logo()
+
     def _fetch_news_from_api(self, ticker: str) -> None:
         """Fetch news from Polygon API if not in database."""
         api_key = os.environ.get("POLYGON_API_KEY")
@@ -234,6 +262,34 @@ class AppState:
 
         except Exception as e:
             logger.warning(f"Failed to fetch news from API: {e}")
+
+    def _load_logo(self) -> None:
+        """Load company logo asynchronously."""
+        from sp500_tui.config import get_tui_config
+
+        config = get_tui_config()
+        if not config.logo_enabled:
+            self.detail_logo_ascii = None
+            self.detail_logo_loading = False
+            return
+
+        company = self.detail_company
+        if not company or not company.logo_url:
+            self.detail_logo_ascii = get_placeholder(config.logo_width, config.logo_height)
+            self.detail_logo_loading = False
+            return
+
+        self.detail_logo_loading = True
+        self.detail_logo_ascii = None
+
+        def on_logo_loaded(result: Text | None) -> None:
+            self.detail_logo_loading = False
+            self.detail_logo_ascii = result or get_placeholder(
+                config.logo_width, config.logo_height
+            )
+            self.needs_redraw = True
+
+        load_logo_async(company.logo_url, config.logo_width, config.logo_height, on_logo_loaded)
 
     def toggle_news_pane(self) -> None:
         """Toggle visibility of the news pane."""

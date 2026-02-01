@@ -1,7 +1,16 @@
 # Project: S&P 500 Data Downloader
 
 ## Overview
-Python package for downloading S&P 500 market data from Polygon.io API, with a Model Context Protocol (MCP) server for querying data stored in PostgreSQL.
+Python package for downloading S&P 500 market data from Polygon.io API, with a Terminal User Interface (TUI) for data exploration.
+
+## Project Priorities
+
+**Primary components (focus work here):**
+1. **Backend data ingestion pipeline** (`sp500_tools/`) - CLI tools for downloading and loading market data
+2. **TUI application** (`tui/`) - Interactive terminal interface for exploring stock data
+
+**Secondary/addon (only work on when explicitly requested):**
+- **MCP server** (`mcp_server/`) - Model Context Protocol server for LLM integration
 
 ## Project Structure
 ```
