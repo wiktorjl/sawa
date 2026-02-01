@@ -1,53 +1,12 @@
 {
   "mcpServers": {
     "stock_data": {
-      "name": "Stock Data Server",
-      "description": "S&P 500 stock market data including prices, fundamentals, and economic indicators",
-      "transport": "stdio",
-      "command": "python",
+      "type": "stdio",
+      "command": "/home/user/code/sawa-kim/.venv/bin/python",
       "args": ["-m", "mcp_server.server"],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "DATABASE_URL": "${env:DATABASE_URL}",
-        "MCP_LOG_LEVEL": "info"
-      },
-      "tools": [
-        {
-          "name": "list_companies",
-          "description": "List all active S&P 500 companies with filtering options"
-        },
-        {
-          "name": "get_company_details",
-          "description": "Get detailed information about a specific company"
-        },
-        {
-          "name": "search_companies",
-          "description": "Search companies by name or ticker symbol"
-        },
-        {
-          "name": "get_stock_prices",
-          "description": "Get historical OHLCV prices for a ticker"
-        },
-        {
-          "name": "get_financial_ratios",
-          "description": "Get time-series financial ratios like P/E, ROE, etc."
-        },
-        {
-          "name": "get_fundamentals",
-          "description": "Get balance sheet, cash flow, and income statement data"
-        },
-        {
-          "name": "get_economy_data",
-          "description": "Get economic indicators (treasury yields, inflation, labor market)"
-        },
-        {
-          "name": "get_economy_dashboard",
-          "description": "Get summary of recent economic indicators"
-        },
-        {
-          "name": "execute_query",
-          "description": "Execute custom read-only SQL queries"
-        }
+      "env": [
+        "DATABASE_URL=${DATABASE_URL}",
+        "MCP_LOG_LEVEL=info"
       ]
     }
   }

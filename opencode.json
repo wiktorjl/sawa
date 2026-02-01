@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "stock-data": {
+      "type": "local",
+      "command": [
+        "python",
+        "-m",
+        "mcp_server.server"
+      ],
+      "environment": {
+        "DATABASE_URL": "{env:DATABASE_URL}"
+      },
+      "enabled": true
+    }
+  }
+}

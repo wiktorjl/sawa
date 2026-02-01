@@ -1,24 +1,45 @@
 # Project: S&P 500 Data Downloader
 
 ## Overview
-Python scripts for downloading S&P 500 market data from Polygon.io API and a Model Context Protocol (MCP) server for querying the data stored in PostgreSQL.
+Python package for downloading S&P 500 market data from Polygon.io API, with a Model Context Protocol (MCP) server for querying data stored in PostgreSQL.
 
 ## Project Structure
 ```
 .
-├── data/                      # Output data directory
-├── mcp_server/               # MCP server package
-│   ├── server.py             # Main server entry point
-│   ├── database.py           # Database connection utilities
-│   ├── tools/                # MCP tool implementations
-│   └── pyproject.toml        # Server dependencies
-├── download_sp500_symbols.py # Fetch S&P 500 constituents
-├── check_trading_days.py     # Find trading days in date range
-├── download_daily_prices.py  # Download OHLC prices from S3
-├── download_fundamentals.py  # Download financial statements
-├── download_economy_data.py  # Download economic indicators
-├── load_csv_to_postgres.py   # Load CSVs into PostgreSQL
-└── requirements.txt          # Main script dependencies
+├── pyproject.toml            # Root package (sp500-tools)
+├── sp500_tools/              # Main package
+│   ├── __init__.py
+│   ├── cli.py                # Main entry point (sp500 command)
+│   ├── coldstart.py          # Full database setup workflow
+│   ├── update.py             # Incremental update workflow
+│   ├── api/                  # API clients
+│   │   ├── __init__.py
+│   │   ├── client.py         # Polygon REST API client
+│   │   └── s3.py             # Polygon S3 bulk data client
+│   ├── utils/                # Shared utilities
+│   │   ├── __init__.py
+│   │   ├── logging.py        # setup_logging()
+│   │   ├── dates.py          # parse_date(), calculate_date_range()
+│   │   ├── config.py         # Environment variable handling
+│   │   ├── symbols.py        # Symbol file loading + validation
+│   │   ├── csv_utils.py      # CSV read/write helpers
+│   │   └── cli.py            # Common argparse patterns
+│   ├── database/             # Database utilities
+│   │   ├── __init__.py
+│   │   ├── loader.py         # CSV to PostgreSQL loader
+│   │   ├── schema.py         # Database schema rebuild
+│   │   └── connection.py     # Shared connection handling
+│   └── processing/           # Data processing
+│       ├── __init__.py
+│       └── combine.py        # Combine fundamentals files
+├── mcp_server/               # MCP server (independent package)
+│   ├── pyproject.toml        # Depends on sp500-tools
+│   ├── server.py
+│   ├── database.py
+│   └── tools/
+├── sqlschema/                # SQL schema files (01-07)
+├── data/                     # Output directory
+└── tests/                    # Test suite (future)
 ```
 
 ## Build/Lint/Test Commands
@@ -29,20 +50,21 @@ Python scripts for downloading S&P 500 market data from Polygon.io API and a Mod
 python -m venv .venv
 source .venv/bin/activate
 
-# Install main dependencies
-pip install -r requirements.txt
+# Install main package (editable mode)
+pip install -e ".[dev]"
 
-# Install MCP server (editable mode)
+# Install MCP server
 cd mcp_server && pip install -e ".[dev]"
 ```
 
 ### Linting and Type Checking
 ```bash
-# Run ruff linter (configured in mcp_server/pyproject.toml)
+# Run ruff linter
 ruff check .
 ruff check --fix .         # Auto-fix issues
 
 # Type checking with mypy
+mypy sp500_tools/
 mypy mcp_server/
 ```
 
@@ -54,31 +76,57 @@ pytest
 # Run single test file
 pytest tests/test_database.py
 
-# Run single test function
-pytest tests/test_database.py::test_validate_select_query
-
 # Run with verbose output
 pytest -v
 
 # Run with coverage
-pytest --cov=mcp_server
+pytest --cov=sp500_tools
 ```
 
-### Running Scripts
+### CLI Commands
+After installation, the `sp500` command is available with two main workflows:
+
 ```bash
-# Download S&P 500 symbols
-python download_sp500_symbols.py -o data/sp500_symbols.txt
+# Cold start: Full database setup from scratch
+# - Drops existing tables
+# - Creates schema from SQL files
+# - Downloads all historical data (symbols, prices, fundamentals, overviews, economy, ratios)
+# - Loads all data into PostgreSQL
+sp500 coldstart --years 5
 
-# Find trading days
-POLYGON_API_KEY=xxx python check_trading_days.py --years 5
+# Mode options:
+sp500 coldstart --drop-only      # Drop tables only (keeps downloaded data)
+sp500 coldstart --schema-only    # Only create schema (no download/load)
+sp500 coldstart --load-only      # Only load existing CSV data (no schema)
+sp500 coldstart --skip-downloads # Create schema + load existing CSV data
 
-# Download daily prices
-POLYGON_S3_ACCESS_KEY=xxx POLYGON_S3_SECRET_KEY=xxx \
-  python download_daily_prices.py 2024-01-02 --end-date 2024-12-31
+# Skip specific downloads during cold start
+sp500 coldstart --years 5 --skip-prices
+sp500 coldstart --years 5 --skip-fundamentals --skip-economy
+sp500 coldstart --years 3 --skip-prices --skip-ratios --skip-overviews
+
+# Use custom symbols file instead of fetching from Wikipedia
+sp500 coldstart --years 2 --symbols-file filter.txt
+
+# Don't drop existing tables (useful for resuming)
+sp500 coldstart --years 5 --no-drop
+
+# Incremental update: Pull new data since last update
+sp500 update
+
+# Force update from specific date
+sp500 update --from-date 2024-01-01
+
+# Common options for both commands
+sp500 coldstart --verbose               # Debug logging
+sp500 coldstart --output-dir ./mydata   # Custom output directory
+sp500 coldstart --schema-dir ./schema   # Custom schema directory
+
+# Override environment variables via CLI
+sp500 coldstart --api-key YOUR_KEY --database-url postgresql://...
 
 # Start MCP server
-DATABASE_URL="postgresql://user:pass@host:5432/db" \
-  python -m mcp_server.server
+DATABASE_URL="postgresql://user:pass@host:5432/db" python -m mcp_server.server
 ```
 
 ## Code Style Guidelines
@@ -97,12 +145,12 @@ import logging
 import os
 import sys
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
 
-from database import execute_query
+from sp500_tools.utils import setup_logging, load_symbols
 ```
 
 ### Formatting
@@ -113,7 +161,7 @@ from database import execute_query
 
 ### Type Hints
 - Use type hints for function signatures
-- Use `Optional[T]` or `T | None` for nullable types
+- Use `T | None` for nullable types (not `Optional[T]`)
 - Use `list[dict[str, Any]]` for result sets
 ```python
 def fetch_data(
@@ -162,56 +210,39 @@ except requests.exceptions.RequestException as e:
 ```
 
 ### Logging
-- Create dedicated logger per module: `logger = logging.getLogger(__name__)`
-- Use structured format: `%(asctime)s [%(levelname)s] %(message)s`
-- Support `-v/--verbose` flag for DEBUG level
+- Use shared utility: `from sp500_tools.utils import setup_logging`
 - Log to stdout (not stderr) for main scripts
 ```python
-def setup_logging(verbose: bool = False) -> logging.Logger:
-    log_level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    return logging.getLogger(__name__)
+logger = setup_logging(verbose=args.verbose)
 ```
 
-### CLI Design (argparse)
-- Use RawDescriptionHelpFormatter for formatted epilog
-- Include usage examples in epilog
+### CLI Design
+- Use shared utilities from `sp500_tools.utils.cli`
 - Support environment variables for API keys with CLI override
-- Common flags: `-o/--output`, `-v/--verbose`, `--continue`
 ```python
-parser = argparse.ArgumentParser(
-    description="Download data from API.",
-    formatter_class=argparse.RawDescriptionHelpFormatter,
-    epilog="""
-Examples:
-  %(prog)s --years 5
-  %(prog)s --start-date 2020-01-01
-""",
-)
+from sp500_tools.utils.cli import create_parser, add_common_args, add_date_args
+
+parser = create_parser("Download data from API.", epilog="Examples...")
+add_common_args(parser)
+add_date_args(parser)
 ```
 
 ### Database Queries
-- Use parameterized queries with `%(param)s` syntax
-- Validate SELECT-only for user-provided SQL
+- Use `psycopg2.sql` or `psycopg.sql` for safe identifier handling
+- Never use f-strings for table/column names
 - Set query timeouts
-- Return results as list of dicts
 ```python
-sql = """
-    SELECT ticker, name FROM companies
-    WHERE ticker = %(ticker)s
-    LIMIT %(limit)s
-"""
-results = execute_query(sql, {"ticker": "AAPL", "limit": 10})
+from psycopg2 import sql
+
+query = sql.SQL("INSERT INTO {} ({}) VALUES %s").format(
+    sql.Identifier(table_name),
+    sql.SQL(', ').join(map(sql.Identifier, columns))
+)
 ```
 
 ### File I/O
 - Use atomic writes with tempfile + os.replace for critical files
-- Create parent directories with `os.makedirs(path, exist_ok=True)`
+- Create parent directories with `Path.mkdir(parents=True, exist_ok=True)`
 - Use Path objects from pathlib for path manipulation
 - Use context managers (`with open(...) as f:`)
 
@@ -239,26 +270,33 @@ python -m mcp_server.server
 ## Environment Variables
 | Variable | Description | Used By |
 |----------|-------------|---------|
-| `POLYGON_API_KEY` | Polygon.io REST API key | check_trading_days.py |
-| `POLYGON_S3_ACCESS_KEY` | Polygon S3 access key | download_daily_prices.py |
-| `POLYGON_S3_SECRET_KEY` | Polygon S3 secret key | download_daily_prices.py |
-| `MASSIVE_API_KEY` | Massive API key | download_fundamentals.py |
+| `POLYGON_API_KEY` | Polygon.io REST API key | sp500-tools |
+| `POLYGON_S3_ACCESS_KEY` | Polygon S3 access key | sp500-tools |
+| `POLYGON_S3_SECRET_KEY` | Polygon S3 secret key | sp500-tools |
 | `DATABASE_URL` | PostgreSQL connection URL | mcp_server |
+| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | PostgreSQL config | sp500-tools |
 | `MCP_LOG_LEVEL` | Server log level (default: info) | mcp_server |
 | `MCP_MAX_ROWS` | Max query rows (default: 1000) | mcp_server |
 | `MCP_QUERY_TIMEOUT` | Query timeout secs (default: 30) | mcp_server |
 
 ## Dependencies
+
+### Main Package (sp500-tools)
 - `requests>=2.28.0` - HTTP client
 - `beautifulsoup4>=4.11.0` - HTML parsing
 - `boto3>=1.28.0` - S3 client for Polygon bulk files
-- `psycopg2-binary>=2.9.0` - PostgreSQL driver (main scripts)
-- `mcp>=1.6.0` - MCP SDK (server)
-- `psycopg[binary]>=3.0` - PostgreSQL driver (server, async)
-- `pydantic>=2.0` - Data validation (server)
+- `psycopg2-binary>=2.9.0` - PostgreSQL driver (sync)
+- `psycopg[binary]>=3.0` - PostgreSQL driver (async)
+- `python-dateutil>=2.8.0` - Date utilities
+
+### MCP Server
+- `sp500-tools` - Shared utilities
+- `mcp>=1.6.0` - MCP SDK
+- `psycopg[binary]>=3.0` - PostgreSQL driver
+- `pydantic>=2.0` - Data validation
 
 ## Ruff Configuration
-From `mcp_server/pyproject.toml`:
+From `pyproject.toml`:
 ```toml
 [tool.ruff]
 line-length = 100
