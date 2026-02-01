@@ -12,6 +12,8 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+from sp500_tools.api.client import PolygonClient
+
 
 def load_csv_to_table(
     conn,
@@ -419,3 +421,43 @@ def _load_economy_file(conn, csv_path: Path, table_name: str, logger: logging.Lo
 
     logger.info(f"  Loading {table_name}...")
     return load_csv_to_table(conn, csv_path, table_name, column_mapping, logger)
+
+
+def load_news(
+    conn,
+    client: PolygonClient,
+    symbols: list[str],
+    days: int = 30,
+    limit_per_symbol: int = 50,
+    logger: logging.Logger | None = None,
+) -> int:
+    """
+    Load news articles for symbols directly from API into database.
+
+    Args:
+        conn: Database connection
+        client: Polygon API client
+        symbols: List of ticker symbols
+        days: Days of news history to fetch
+        limit_per_symbol: Max articles per symbol
+        logger: Logger instance
+
+    Returns:
+        Total number of articles loaded
+    """
+    from sp500_tools.database.news import fetch_news_for_symbols
+
+    logger = logger or logging.getLogger(__name__)
+    logger.info(f"Loading news for {len(symbols)} symbols (last {days} days)...")
+
+    total = fetch_news_for_symbols(
+        conn,
+        client,
+        symbols,
+        days=days,
+        limit_per_symbol=limit_per_symbol,
+        logger=logger,
+    )
+
+    logger.info(f"  Total news articles loaded: {total}")
+    return total
