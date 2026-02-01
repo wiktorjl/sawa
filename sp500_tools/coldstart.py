@@ -31,6 +31,7 @@ from sp500_tools.database.load import (
     load_companies,
     load_economy,
     load_fundamentals,
+    load_news,
     load_prices,
     load_ratios,
 )
@@ -305,6 +306,7 @@ def run_coldstart(
     skip_overviews: bool = False,
     skip_economy: bool = False,
     skip_ratios: bool = False,
+    skip_news: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """
@@ -329,6 +331,7 @@ def run_coldstart(
         skip_overviews: Skip downloading company overviews
         skip_economy: Skip downloading economy data
         skip_ratios: Skip downloading financial ratios
+        skip_news: Skip downloading news articles
         logger: Logger instance
 
     Returns:
@@ -359,7 +362,12 @@ def run_coldstart(
 
     # Check if all downloads are being skipped
     skip_all_downloads = skip_downloads or (
-        skip_prices and skip_fundamentals and skip_overviews and skip_economy and skip_ratios
+        skip_prices
+        and skip_fundamentals
+        and skip_overviews
+        and skip_economy
+        and skip_ratios
+        and skip_news
     )
 
     logger.info("=" * 60)
@@ -394,7 +402,7 @@ def run_coldstart(
         with psycopg.connect(database_url) as conn:
             # Schema setup (skip for load_only mode)
             if not load_only:
-                logger.info("\n[1/8] Setting up database...")
+                logger.info("\n[1/9] Setting up database...")
                 if drop_tables:
                     logger.info("  Dropping existing tables...")
                     drop_all_tables(conn, dry_run=False, logger=logger)
@@ -411,12 +419,12 @@ def run_coldstart(
 
             # If load_only or skip_all_downloads, just load existing CSV data
             if load_only or skip_all_downloads:
-                logger.info("\n[2/8] Skipping downloads, loading existing data...")
+                logger.info("\n[2/9] Skipping downloads, loading existing data...")
                 stats["symbols"] = 0
                 stats["trading_days"] = 0
 
                 # Load existing companies
-                logger.info("\n[3/8] Loading existing companies...")
+                logger.info("\n[3/9] Loading existing companies...")
                 overviews_csv = output_dir / "overviews" / "overviews.csv"
                 if overviews_csv.exists():
                     load_companies(conn, overviews_csv, logger)
@@ -426,7 +434,7 @@ def run_coldstart(
                     stats["overviews"] = 0
 
                 # Load existing prices
-                logger.info("\n[4/8] Loading existing prices...")
+                logger.info("\n[4/9] Loading existing prices...")
                 prices_dir = output_dir / "prices"
                 if prices_dir.exists():
                     load_prices(conn, prices_dir, logger)
@@ -436,7 +444,7 @@ def run_coldstart(
                     stats["prices"] = 0
 
                 # Load existing fundamentals
-                logger.info("\n[5/8] Loading existing fundamentals...")
+                logger.info("\n[5/9] Loading existing fundamentals...")
                 fundamentals_dir = output_dir / "fundamentals"
                 if fundamentals_dir.exists():
                     load_fundamentals(conn, fundamentals_dir, logger)
@@ -446,7 +454,7 @@ def run_coldstart(
                     stats["fundamentals"] = {}
 
                 # Load existing ratios
-                logger.info("\n[6/8] Loading existing ratios...")
+                logger.info("\n[6/9] Loading existing ratios...")
                 ratios_csv = output_dir / "ratios" / "ratios.csv"
                 if ratios_csv.exists():
                     load_ratios(conn, ratios_csv, logger)
@@ -456,7 +464,7 @@ def run_coldstart(
                     stats["ratios"] = 0
 
                 # Load existing economy data
-                logger.info("\n[7/8] Loading existing economy data...")
+                logger.info("\n[7/9] Loading existing economy data...")
                 economy_dir = output_dir / "economy"
                 if economy_dir.exists():
                     load_economy(conn, economy_dir, logger)
@@ -472,7 +480,7 @@ def run_coldstart(
 
                 # Step 2: Fetch or load symbols
                 if symbols_file and symbols_file.exists():
-                    logger.info(f"\n[2/8] Loading symbols from {symbols_file}...")
+                    logger.info(f"\n[2/9] Loading symbols from {symbols_file}...")
                     symbols = []
                     with open(symbols_file) as f:
                         for line in f:
@@ -481,7 +489,7 @@ def run_coldstart(
                                 symbols.append(sym)
                     logger.info(f"  Loaded {len(symbols)} symbols from file")
                 else:
-                    logger.info("\n[2/8] Fetching S&P 500 symbols from Wikipedia...")
+                    logger.info("\n[2/9] Fetching S&P 500 symbols from Wikipedia...")
                     symbols = fetch_sp500_symbols(logger)
 
                 # Save symbols list
@@ -493,17 +501,17 @@ def run_coldstart(
                 stats["symbols"] = len(symbols)
 
                 # Step 3: Get trading days
-                logger.info("\n[3/8] Getting trading days...")
+                logger.info("\n[3/9] Getting trading days...")
                 trading_days = client.get_trading_days(start_str, end_str)
                 logger.info(f"  Found {len(trading_days)} trading days")
                 stats["trading_days"] = len(trading_days)
 
                 # Step 4: Download & load company overviews (FIRST - needed for FK constraints)
                 if skip_overviews:
-                    logger.info("\n[4/8] Skipping overviews (--skip-overviews)")
+                    logger.info("\n[4/9] Skipping overviews (--skip-overviews)")
                     stats["overviews"] = 0
                 else:
-                    logger.info("\n[4/8] Downloading company overviews...")
+                    logger.info("\n[4/9] Downloading company overviews...")
                     overview_count = download_overviews(
                         client, symbols, output_dir / "overviews", logger
                     )
@@ -514,10 +522,10 @@ def run_coldstart(
 
                 # Step 5: Download & load prices
                 if skip_prices:
-                    logger.info("\n[5/8] Skipping prices (--skip-prices)")
+                    logger.info("\n[5/9] Skipping prices (--skip-prices)")
                     stats["prices"] = 0
                 else:
-                    logger.info("\n[5/8] Downloading historical prices...")
+                    logger.info("\n[5/9] Downloading historical prices...")
                     prices_dir = output_dir / "prices"
                     price_count = download_prices(
                         s3_client,
@@ -535,10 +543,10 @@ def run_coldstart(
 
                 # Step 6: Download & load fundamentals
                 if skip_fundamentals:
-                    logger.info("\n[6/8] Skipping fundamentals (--skip-fundamentals)")
+                    logger.info("\n[6/9] Skipping fundamentals (--skip-fundamentals)")
                     stats["fundamentals"] = {}
                 else:
-                    logger.info("\n[6/8] Downloading fundamentals...")
+                    logger.info("\n[6/9] Downloading fundamentals...")
                     fund_stats = download_fundamentals(
                         client, symbols, start_str, end_str, output_dir / "fundamentals", logger
                     )
@@ -549,10 +557,10 @@ def run_coldstart(
 
                 # Step 7: Download & load ratios
                 if skip_ratios:
-                    logger.info("\n[7/8] Skipping ratios (--skip-ratios)")
+                    logger.info("\n[7/9] Skipping ratios (--skip-ratios)")
                     stats["ratios"] = 0
                 else:
-                    logger.info("\n[7/8] Downloading financial ratios...")
+                    logger.info("\n[7/9] Downloading financial ratios...")
                     ratio_count = download_ratios(client, symbols, output_dir / "ratios", logger)
                     stats["ratios"] = ratio_count
                     # Load ratios into DB
@@ -561,10 +569,10 @@ def run_coldstart(
 
                 # Step 8: Download & load economy data
                 if skip_economy:
-                    logger.info("\n[8/8] Skipping economy data (--skip-economy)")
+                    logger.info("\n[8/9] Skipping economy data (--skip-economy)")
                     stats["economy"] = {}
                 else:
-                    logger.info("\n[8/8] Downloading economy data...")
+                    logger.info("\n[8/9] Downloading economy data...")
                     econ_stats = download_economy(
                         client, start_str, end_str, output_dir / "economy", logger
                     )
@@ -572,6 +580,15 @@ def run_coldstart(
                     # Load economy into DB
                     logger.info("Loading economy data into database...")
                     load_economy(conn, output_dir / "economy", logger)
+
+                # Step 9: Download & load news
+                if skip_news:
+                    logger.info("\n[9/9] Skipping news (--skip-news)")
+                    stats["news"] = 0
+                else:
+                    logger.info("\n[9/9] Downloading news articles...")
+                    news_count = load_news(conn, client, symbols, days=30, logger=logger)
+                    stats["news"] = news_count
 
         stats["success"] = True
         logger.info("\n" + "=" * 60)

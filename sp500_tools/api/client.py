@@ -37,6 +37,8 @@ ENDPOINTS = {
     # Other
     "short-interest": "/stocks/v1/short-interest",
     "short-volume": "/stocks/v1/short-volume",
+    # News
+    "news": "/v2/reference/news",
 }
 
 
@@ -253,3 +255,40 @@ class PolygonClient:
     def get_ticker_details(self, ticker: str) -> dict[str, Any] | None:
         """Get company overview/details."""
         return self.get_single("ticker-details", path_params={"ticker": ticker})
+
+    def get_news(
+        self,
+        ticker: str | None = None,
+        published_utc_gte: str | None = None,
+        published_utc_lte: str | None = None,
+        limit: int = 100,
+        order: str = "desc",
+        sort: str = "published_utc",
+    ) -> list[dict[str, Any]]:
+        """
+        Get news articles with sentiment analysis.
+
+        Args:
+            ticker: Filter by ticker symbol (e.g., 'AAPL')
+            published_utc_gte: Return articles published after this date (RFC3339)
+            published_utc_lte: Return articles published before this date (RFC3339)
+            limit: Max results per page (max 1000)
+            order: Sort order ('asc' or 'desc')
+            sort: Sort field ('published_utc')
+
+        Returns:
+            List of news articles with sentiment insights
+        """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "order": order,
+            "sort": sort,
+        }
+        if ticker:
+            params["ticker"] = ticker
+        if published_utc_gte:
+            params["published_utc.gte"] = published_utc_gte
+        if published_utc_lte:
+            params["published_utc.lte"] = published_utc_lte
+
+        return self.get_paginated("news", params)

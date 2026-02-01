@@ -73,6 +73,7 @@ def cmd_coldstart(args) -> int:
             skip_overviews=args.skip_overviews,
             skip_economy=args.skip_economy,
             skip_ratios=args.skip_ratios,
+            skip_news=args.skip_news,
             logger=logger,
         )
         return 0 if stats.get("success") else 1
@@ -196,6 +197,7 @@ Environment Variables:
     cold_parser.add_argument(
         "--skip-ratios", action="store_true", help="Skip financial ratios download"
     )
+    cold_parser.add_argument("--skip-news", action="store_true", help="Skip news download")
     cold_parser.add_argument("-v", "--verbose", action="store_true")
     cold_parser.set_defaults(func=cmd_coldstart)
 
