@@ -13,6 +13,11 @@ import psycopg
 from psycopg import sql
 
 from sawa.api.client import PolygonClient
+from sawa.utils.constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_NEWS_DAYS,
+    DEFAULT_NEWS_LIMIT_PER_SYMBOL,
+)
 
 
 def load_csv_to_table(
@@ -109,7 +114,7 @@ def _insert_rows(
         )
 
     inserted = 0
-    batch_size = 1000
+    batch_size = DEFAULT_BATCH_SIZE
 
     errors = 0
     with conn.cursor() as cur:
@@ -427,8 +432,8 @@ def load_news(
     conn,
     client: PolygonClient,
     symbols: list[str],
-    days: int = 30,
-    limit_per_symbol: int = 50,
+    days: int = DEFAULT_NEWS_DAYS,
+    limit_per_symbol: int = DEFAULT_NEWS_LIMIT_PER_SYMBOL,
     logger: logging.Logger | None = None,
 ) -> int:
     """

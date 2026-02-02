@@ -16,6 +16,9 @@ from urllib.parse import urljoin
 
 import httpx
 
+from sawa.utils.constants import DEFAULT_HTTP_TIMEOUT
+from sawa.utils.symbols import validate_ticker
+
 # Polygon rebranded to Massive, but API structure is similar
 BASE_URL = "https://api.polygon.io"
 
@@ -50,7 +53,7 @@ class PolygonClient:
         self.logger = logger or logging.getLogger(__name__)
         self.client = httpx.Client(
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30.0,
+            timeout=float(DEFAULT_HTTP_TIMEOUT),
         )
 
     def get(
@@ -58,7 +61,7 @@ class PolygonClient:
         endpoint: str,
         params: dict[str, Any] | None = None,
         path_params: dict[str, str] | None = None,
-        timeout: int = 30,
+        timeout: int = DEFAULT_HTTP_TIMEOUT,
     ) -> dict[str, Any]:
         """
         Make GET request to API.
@@ -95,7 +98,7 @@ class PolygonClient:
         self,
         endpoint: str,
         params: dict[str, Any] | None = None,
-        timeout: int = 30,
+        timeout: int = DEFAULT_HTTP_TIMEOUT,
     ) -> list[dict[str, Any]]:
         """
         Fetch all pages from paginated endpoint.
@@ -145,7 +148,7 @@ class PolygonClient:
         self,
         endpoint: str,
         path_params: dict[str, str] | None = None,
-        timeout: int = 30,
+        timeout: int = DEFAULT_HTTP_TIMEOUT,
         max_retries: int = 3,
     ) -> dict[str, Any] | None:
         """
@@ -204,6 +207,7 @@ class PolygonClient:
 
     def get_trading_days(self, start_date: str, end_date: str, ticker: str = "AAPL") -> list[str]:
         """Get trading days in date range using ticker as proxy."""
+        ticker = validate_ticker(ticker)
         data = self.get(
             "aggregates",
             path_params={"ticker": ticker, "start": start_date, "end": end_date},
@@ -216,6 +220,7 @@ class PolygonClient:
 
     def get_ratios(self, ticker: str, limit: int = 100) -> list[dict[str, Any]]:
         """Get financial ratios for ticker."""
+        ticker = validate_ticker(ticker)
         data = self.get("ratios", params={"ticker": ticker, "limit": limit})
         return data.get("results", [])
 
@@ -231,6 +236,7 @@ class PolygonClient:
         """Get fundamentals data (balance sheets, income, cash flow)."""
         params: dict[str, Any] = {"limit": limit}
         if ticker:
+            ticker = validate_ticker(ticker)
             params["tickers"] = ticker
         if start_date:
             params["period_end.gte"] = start_date
@@ -256,6 +262,7 @@ class PolygonClient:
 
     def get_ticker_details(self, ticker: str) -> dict[str, Any] | None:
         """Get company overview/details."""
+        ticker = validate_ticker(ticker)
         return self.get_single("ticker-details", path_params={"ticker": ticker})
 
     def get_news(
@@ -287,6 +294,7 @@ class PolygonClient:
             "sort": sort,
         }
         if ticker:
+            ticker = validate_ticker(ticker)
             params["ticker"] = ticker
         if published_utc_gte:
             params["published_utc.gte"] = published_utc_gte

@@ -7,7 +7,7 @@ from typing import Any
 from sawa_tui.database import execute_query, execute_write, execute_write_returning
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class User:
     """Represents a user in the system."""
 

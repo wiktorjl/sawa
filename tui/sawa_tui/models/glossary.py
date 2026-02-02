@@ -12,7 +12,7 @@ from sawa_tui.database import execute_query, execute_write
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class GlossaryTerm:
     """Represents a term in the glossary list."""
 
@@ -32,7 +32,7 @@ class GlossaryTerm:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class CachedDefinition:
     """Cached glossary definition from database."""
 
