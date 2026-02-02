@@ -751,24 +751,6 @@ class SP500App:
             self.state.settings_popup_open = False
             return
 
-    def _get_config_location(self, key: str) -> tuple[str, str]:
-        """Get config section and key for a setting."""
-        # Special case mappings
-        if key == "fundamentals_timeframe":
-            return "fundamentals", "default_timeframe"
-        if key == "theme_name":
-            return "theme", "name"
-
-        # Default: derive section from category
-        section_map = {
-            SettingsCategory.DISPLAY: "display",
-            SettingsCategory.CHARTS: "charts",
-            SettingsCategory.BEHAVIOR: "behavior",
-            SettingsCategory.API: "api",
-            SettingsCategory.USERS: "users",
-        }
-        return section_map[self.state.settings_category], key
-
     # =========================================================================
     # GLOSSARY VIEW
     # =========================================================================
