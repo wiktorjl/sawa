@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from sp500_tools.domain import models as domain
+from sawa.domain import models as domain
 
 # Add TUI to path for testing (must be before TUI imports)
 tui_path = Path(__file__).parent.parent.parent.parent / "tui"
@@ -115,8 +115,8 @@ class TestStockService:
 
     def test_get_company(self, mock_factory):
         """Test getting company info."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             result = service.get_company("AAPL")
@@ -128,8 +128,8 @@ class TestStockService:
 
     def test_get_company_not_found(self, mock_factory):
         """Test getting non-existent company."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             result = service.get_company("NONEXISTENT")
@@ -138,8 +138,8 @@ class TestStockService:
 
     def test_search_companies(self, mock_factory):
         """Test searching companies."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             results = service.search_companies("Apple")
@@ -149,8 +149,8 @@ class TestStockService:
 
     def test_get_stock_prices_with_days(self, mock_factory):
         """Test getting stock prices by days."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             results = service.get_stock_prices("AAPL", days=30)
@@ -164,8 +164,8 @@ class TestStockService:
 
     def test_get_stock_prices_with_date_range(self, mock_factory):
         """Test getting stock prices by date range."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             today = date.today()
@@ -180,8 +180,8 @@ class TestStockService:
 
     def test_get_latest_price(self, mock_factory):
         """Test getting latest price."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             result = service.get_latest_price("AAPL")
@@ -191,8 +191,8 @@ class TestStockService:
 
     def test_get_financial_ratios(self, mock_factory):
         """Test getting financial ratios."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             results = service.get_financial_ratios("AAPL", limit=10)
@@ -202,8 +202,8 @@ class TestStockService:
 
     def test_get_income_statements(self, mock_factory):
         """Test getting income statements."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             results = service.get_income_statements("AAPL", timeframe="quarterly", limit=8)
@@ -213,8 +213,8 @@ class TestStockService:
 
     def test_get_52_week_range(self, mock_factory):
         """Test getting 52-week range."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             high, low = service.get_52_week_range("AAPL")
@@ -224,8 +224,8 @@ class TestStockService:
 
     def test_get_52_week_range_no_data(self, mock_factory):
         """Test getting 52-week range with no data."""
-        with patch("sp500_tui.services.stock_service.get_factory", return_value=mock_factory):
-            from sp500_tui.services import StockService
+        with patch("sawa_tui.services.stock_service.get_factory", return_value=mock_factory):
+            from sawa_tui.services import StockService
 
             service = StockService()
             high, low = service.get_52_week_range("NONEXISTENT")

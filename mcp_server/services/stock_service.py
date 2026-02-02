@@ -7,7 +7,7 @@ via the repository layer and converts domain models to MCP-compatible dicts.
 from datetime import date
 from typing import Any
 
-from sp500_tools.repositories import get_factory
+from sawa.repositories import get_factory
 
 from mcp_server.services.converters import (
     balance_sheet_to_dict,

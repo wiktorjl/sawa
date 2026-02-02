@@ -2,7 +2,7 @@
 
 import time
 
-from sp500_tools.repositories.cache import InMemoryCache, NullCache
+from sawa.repositories.cache import InMemoryCache, NullCache
 
 
 class TestInMemoryCache:

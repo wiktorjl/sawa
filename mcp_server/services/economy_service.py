@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
-from sp500_tools.repositories import get_factory
+from sawa.repositories import get_factory
 
 from mcp_server.services.converters import (
     inflation_to_dict,

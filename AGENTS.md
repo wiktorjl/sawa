@@ -1,4 +1,4 @@
-# Project: S&P 500 Data Downloader
+# Project: Sawa - S&P 500 Data Downloader
 
 ## Overview
 Python package for downloading S&P 500 market data from Polygon.io API, with a Terminal User Interface (TUI) for data exploration.
@@ -6,7 +6,7 @@ Python package for downloading S&P 500 market data from Polygon.io API, with a T
 ## Project Priorities
 
 **Primary components (focus work here):**
-1. **Backend data ingestion pipeline** (`sp500_tools/`) - CLI tools for downloading and loading market data
+1. **Backend data ingestion pipeline** (`sawa/`) - CLI tools for downloading and loading market data
 2. **TUI application** (`tui/`) - Interactive terminal interface for exploring stock data
 
 **Secondary/addon (only work on when explicitly requested):**
@@ -15,10 +15,10 @@ Python package for downloading S&P 500 market data from Polygon.io API, with a T
 ## Project Structure
 ```
 .
-├── pyproject.toml            # Root package (sp500-tools)
-├── sp500_tools/              # Main package
+├── pyproject.toml            # Root package (sawa)
+├── sawa/                     # Main package
 │   ├── __init__.py
-│   ├── cli.py                # Main entry point (sp500 command)
+│   ├── cli.py                # Main entry point (sawa command)
 │   ├── coldstart.py          # Full database setup workflow
 │   ├── update.py             # Incremental update workflow
 │   ├── api/                  # API clients
@@ -42,7 +42,7 @@ Python package for downloading S&P 500 market data from Polygon.io API, with a T
 │       ├── __init__.py
 │       └── combine.py        # Combine fundamentals files
 ├── mcp_server/               # MCP server (independent package)
-│   ├── pyproject.toml        # Depends on sp500-tools
+│   ├── pyproject.toml        # Depends on sawa
 │   ├── server.py
 │   ├── database.py
 │   └── tools/
@@ -73,7 +73,7 @@ ruff check .
 ruff check --fix .         # Auto-fix issues
 
 # Type checking with mypy
-mypy sp500_tools/
+mypy sawa/
 mypy mcp_server/
 ```
 
@@ -89,11 +89,11 @@ pytest tests/test_database.py
 pytest -v
 
 # Run with coverage
-pytest --cov=sp500_tools
+pytest --cov=sawa
 ```
 
 ### CLI Commands
-After installation, the `sp500` command is available with two main workflows:
+After installation, the `sawa` command is available with two main workflows:
 
 ```bash
 # Cold start: Full database setup from scratch
@@ -101,38 +101,38 @@ After installation, the `sp500` command is available with two main workflows:
 # - Creates schema from SQL files
 # - Downloads all historical data (symbols, prices, fundamentals, overviews, economy, ratios)
 # - Loads all data into PostgreSQL
-sp500 coldstart --years 5
+sawa coldstart --years 5
 
 # Mode options:
-sp500 coldstart --drop-only      # Drop tables only (keeps downloaded data)
-sp500 coldstart --schema-only    # Only create schema (no download/load)
-sp500 coldstart --load-only      # Only load existing CSV data (no schema)
-sp500 coldstart --skip-downloads # Create schema + load existing CSV data
+sawa coldstart --drop-only      # Drop tables only (keeps downloaded data)
+sawa coldstart --schema-only    # Only create schema (no download/load)
+sawa coldstart --load-only      # Only load existing CSV data (no schema)
+sawa coldstart --skip-downloads # Create schema + load existing CSV data
 
 # Skip specific downloads during cold start
-sp500 coldstart --years 5 --skip-prices
-sp500 coldstart --years 5 --skip-fundamentals --skip-economy
-sp500 coldstart --years 3 --skip-prices --skip-ratios --skip-overviews
+sawa coldstart --years 5 --skip-prices
+sawa coldstart --years 5 --skip-fundamentals --skip-economy
+sawa coldstart --years 3 --skip-prices --skip-ratios --skip-overviews
 
 # Use custom symbols file instead of fetching from Wikipedia
-sp500 coldstart --years 2 --symbols-file filter.txt
+sawa coldstart --years 2 --symbols-file filter.txt
 
 # Don't drop existing tables (useful for resuming)
-sp500 coldstart --years 5 --no-drop
+sawa coldstart --years 5 --no-drop
 
 # Incremental update: Pull new data since last update
-sp500 update
+sawa update
 
 # Force update from specific date
-sp500 update --from-date 2024-01-01
+sawa update --from-date 2024-01-01
 
 # Common options for both commands
-sp500 coldstart --verbose               # Debug logging
-sp500 coldstart --output-dir ./mydata   # Custom output directory
-sp500 coldstart --schema-dir ./schema   # Custom schema directory
+sawa coldstart --verbose               # Debug logging
+sawa coldstart --output-dir ./mydata   # Custom output directory
+sawa coldstart --schema-dir ./schema   # Custom schema directory
 
 # Override environment variables via CLI
-sp500 coldstart --api-key YOUR_KEY --database-url postgresql://...
+sawa coldstart --api-key YOUR_KEY --database-url postgresql://...
 
 # Start MCP server
 DATABASE_URL="postgresql://user:pass@host:5432/db" python -m mcp_server.server
@@ -159,7 +159,7 @@ from typing import Any
 import requests
 from bs4 import BeautifulSoup
 
-from sp500_tools.utils import setup_logging, load_symbols
+from sawa.utils import setup_logging, load_symbols
 ```
 
 ### Formatting
@@ -219,17 +219,17 @@ except requests.exceptions.RequestException as e:
 ```
 
 ### Logging
-- Use shared utility: `from sp500_tools.utils import setup_logging`
+- Use shared utility: `from sawa.utils import setup_logging`
 - Log to stdout (not stderr) for main scripts
 ```python
 logger = setup_logging(verbose=args.verbose)
 ```
 
 ### CLI Design
-- Use shared utilities from `sp500_tools.utils.cli`
+- Use shared utilities from `sawa.utils.cli`
 - Support environment variables for API keys with CLI override
 ```python
-from sp500_tools.utils.cli import create_parser, add_common_args, add_date_args
+from sawa.utils.cli import create_parser, add_common_args, add_date_args
 
 parser = create_parser("Download data from API.", epilog="Examples...")
 add_common_args(parser)
@@ -279,18 +279,18 @@ python -m mcp_server.server
 ## Environment Variables
 | Variable | Description | Used By |
 |----------|-------------|---------|
-| `POLYGON_API_KEY` | Polygon.io REST API key | sp500-tools |
-| `POLYGON_S3_ACCESS_KEY` | Polygon S3 access key | sp500-tools |
-| `POLYGON_S3_SECRET_KEY` | Polygon S3 secret key | sp500-tools |
+| `POLYGON_API_KEY` | Polygon.io REST API key | sawa |
+| `POLYGON_S3_ACCESS_KEY` | Polygon S3 access key | sawa |
+| `POLYGON_S3_SECRET_KEY` | Polygon S3 secret key | sawa |
 | `DATABASE_URL` | PostgreSQL connection URL | mcp_server |
-| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | PostgreSQL config | sp500-tools |
+| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | PostgreSQL config | sawa |
 | `MCP_LOG_LEVEL` | Server log level (default: info) | mcp_server |
 | `MCP_MAX_ROWS` | Max query rows (default: 1000) | mcp_server |
 | `MCP_QUERY_TIMEOUT` | Query timeout secs (default: 30) | mcp_server |
 
 ## Dependencies
 
-### Main Package (sp500-tools)
+### Main Package (sawa)
 - `requests>=2.28.0` - HTTP client
 - `beautifulsoup4>=4.11.0` - HTML parsing
 - `boto3>=1.28.0` - S3 client for Polygon bulk files
@@ -299,7 +299,7 @@ python -m mcp_server.server
 - `python-dateutil>=2.8.0` - Date utilities
 
 ### MCP Server
-- `sp500-tools` - Shared utilities
+- `sawa` - Shared utilities
 - `mcp>=1.6.0` - MCP SDK
 - `psycopg[binary]>=3.0` - PostgreSQL driver
 - `pydantic>=2.0` - Data validation
