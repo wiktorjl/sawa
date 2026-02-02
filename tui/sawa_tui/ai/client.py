@@ -54,10 +54,18 @@ class ZAIClient:
     """Client for Z.AI API with streaming support."""
 
     def __init__(self):
-        self.api_key = get_zai_api_key()
-        self.api_url = get_zai_api_url()
         self.model = "glm-4.7"
         self.timeout = 60.0
+
+    @property
+    def api_key(self) -> str | None:
+        """Get API key fresh each time (may be set after init)."""
+        return get_zai_api_key()
+
+    @property
+    def api_url(self) -> str:
+        """Get API URL."""
+        return get_zai_api_url()
 
     def is_configured(self) -> bool:
         """Check if API key is configured."""
