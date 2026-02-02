@@ -31,9 +31,6 @@ SETTINGS_ITEMS: dict[SettingsCategory, list[tuple[str, str, str, list | None]]] 
         ),
         ("chart_period_days", "Chart Period (days)", "int", [30, 60, 90, 180, 365]),
         ("number_format", "Number Format", "choice", ["compact", "full"]),
-        ("logo_enabled", "Show Company Logos", "bool", None),
-        ("logo_width", "Logo Width (chars)", "int", [10, 20, 24, 28, 32, 36, 40]),
-        ("logo_height", "Logo Height (lines)", "int", [5, 6, 8, 10, 12, 15, 18]),
     ],
     SettingsCategory.CHARTS: [
         ("chart_detail", "Chart Detail Level", "choice", ["compact", "normal", "detailed"]),

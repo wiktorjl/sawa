@@ -188,8 +188,6 @@ COMPANY_COLUMNS = {
     "address_city": "address_city",
     "address_state": "address_state",
     "address_postal_code": "address_postal_code",
-    "branding_logo_url": "branding_logo_url",
-    "branding_icon_url": "branding_icon_url",
 }
 
 PRICE_COLUMNS = {

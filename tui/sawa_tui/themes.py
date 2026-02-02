@@ -2,8 +2,6 @@
 
 from dataclasses import dataclass
 
-from sawa_tui.config import get_tui_config
-
 
 @dataclass
 class Theme:
@@ -240,7 +238,15 @@ THEMES = {
 
 
 def get_theme() -> Theme:
-    """Get the current theme based on config."""
-    config = get_tui_config()
-    theme_name = config.get("theme", "name", "default")
-    return THEMES.get(theme_name, THEMES["default"])
+    """Get the current theme based on user settings."""
+    try:
+        from sawa_tui.models.settings import SettingsManager
+        from sawa_tui.models.users import UserManager
+
+        active_user = UserManager.get_active()
+        if active_user:
+            theme_name = SettingsManager.get(active_user.id, "theme", "osaka-jade")
+            return THEMES.get(theme_name, THEMES["osaka-jade"])
+    except Exception:
+        pass
+    return THEMES["osaka-jade"]

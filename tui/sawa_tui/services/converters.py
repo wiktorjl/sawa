@@ -48,7 +48,7 @@ def company_info_to_tui(info: domain.CompanyInfo) -> tui.Company:
         TUI Company dataclass
 
     Note:
-        Some fields in TUI Company (address, logo_url, cik, exchange)
+        Some fields in TUI Company (address, cik, exchange)
         are not available in the domain model and will be None.
     """
     return tui.Company(
@@ -63,7 +63,6 @@ def company_info_to_tui(info: domain.CompanyInfo) -> tui.Company:
         # These fields don't exist in domain model
         exchange=None,
         cik=None,
-        logo_url=None,
         active=True,
     )
 

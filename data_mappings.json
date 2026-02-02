@@ -30,9 +30,7 @@
       "address_address1",
       "address_city",
       "address_state",
-      "address_postal_code",
-      "branding_logo_url",
-      "branding_icon_url"
+      "address_postal_code"
     ]
   },
   "financial_ratios": {

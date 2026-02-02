@@ -11,7 +11,6 @@ from sawa_tui.components import (
     render_empty_state,
     render_scroll_indicator,
 )
-from sawa_tui.config import get_tui_config
 from sawa_tui.rendering.formatters import format_change, format_number, format_pct_change
 from sawa_tui.state import AppState
 from sawa_tui.themes import get_theme
@@ -188,12 +187,8 @@ def render_stock_detail_view(state: AppState) -> Layout:
     layout["body"]["chart"].update(_render_price_chart(state))
 
     # Sidebar: company info + ratios
-    # Give more space to info panel when logo is enabled to show description
-    config = get_tui_config()
-    info_ratio = 3 if config.logo_enabled else 1
-
     layout["body"]["sidebar"].split_column(
-        Layout(name="info", ratio=info_ratio),
+        Layout(name="info", ratio=1),
         Layout(name="ratios", ratio=2),
     )
     layout["body"]["sidebar"]["info"].update(_render_company_info(state))
@@ -402,113 +397,40 @@ def _render_price_chart(state: AppState) -> Panel:
 
 
 def _render_company_info(state: AppState) -> Panel:
-    """Render company information panel with description and logo."""
-    import textwrap
-
+    """Render company information panel."""
     theme = get_theme()
     company = state.detail_company
-    config = get_tui_config()
 
     content = Text()
 
-    # Check if we have a logo to display
-    has_logo = config.logo_enabled and (state.detail_logo_ascii or state.detail_logo_loading)
-
-    if has_logo and state.detail_logo_ascii:
-        # Split logo into lines
-        logo_lines = str(state.detail_logo_ascii).split("\n")
-        logo_height = len(logo_lines)
-        logo_width = config.logo_width + 2  # Add spacing
-
-        # Prepare text content
-        text_parts = []
-        if company:
-            if company.description:
-                text_parts.append(company.description)
-
-        # Wrap text to fit next to logo (assume ~60 char panel width)
-        text_width = 45  # Width available for text next to logo
-        wrapped_lines = []
-        for part in text_parts:
-            wrapped_lines.extend(textwrap.wrap(part, width=text_width))
-
-        # Combine logo and text side-by-side
-        for i in range(max(logo_height, len(wrapped_lines))):
-            # Logo column
-            if i < logo_height:
-                content.append(logo_lines[i])
-                # Pad to logo width if line is shorter
-                line_len = len(logo_lines[i])
-                if line_len < logo_width:
-                    content.append(" " * (logo_width - line_len))
-            else:
-                content.append(" " * logo_width)
-
-            # Text column
-            if i < len(wrapped_lines):
-                content.append(wrapped_lines[i], style=theme.text)
-
-            content.append("\n")
-
-        # Add remaining company info below logo
-        if company:
-            content.append("\n")
-            stats = []
-            if company.employees:
-                stats.append(f"Employees: {company.employees:,}")
-            if company.exchange:
-                stats.append(f"Exchange: {company.exchange}")
-            if company.cik:
-                stats.append(f"CIK: {company.cik}")
-
-            if stats:
-                content.append(" | ".join(stats), style=theme.text_muted)
-
-            if company.homepage_url:
-                content.append("\n")
-                url = company.homepage_url
-                if len(url) > 45:
-                    url = url[:42] + "..."
-                content.append(url, style=theme.info)
-
-            if company.address:
-                content.append("\n")
-                content.append(company.address, style=theme.text_muted)
-    elif has_logo and state.detail_logo_loading:
-        content.append("Loading...", style=theme.text_muted)
-        content.append("\n\n")
-        if company and company.description:
+    if company:
+        if company.description:
             content.append(company.description, style=theme.text)
+            content.append("\n\n")
+
+        stats = []
+        if company.employees:
+            stats.append(f"Employees: {company.employees:,}")
+        if company.exchange:
+            stats.append(f"Exchange: {company.exchange}")
+        if company.cik:
+            stats.append(f"CIK: {company.cik}")
+
+        if stats:
+            content.append(" | ".join(stats), style=theme.text_muted)
+
+        if company.homepage_url:
+            content.append("\n")
+            url = company.homepage_url
+            if len(url) > 45:
+                url = url[:42] + "..."
+            content.append(url, style=theme.info)
+
+        if company.address:
+            content.append("\n")
+            content.append(company.address, style=theme.text_muted)
     else:
-        # No logo - just text
-        if company:
-            if company.description:
-                content.append(company.description, style=theme.text)
-                content.append("\n\n")
-
-            stats = []
-            if company.employees:
-                stats.append(f"Employees: {company.employees:,}")
-            if company.exchange:
-                stats.append(f"Exchange: {company.exchange}")
-            if company.cik:
-                stats.append(f"CIK: {company.cik}")
-
-            if stats:
-                content.append(" | ".join(stats), style=theme.text_muted)
-
-            if company.homepage_url:
-                content.append("\n")
-                url = company.homepage_url
-                if len(url) > 45:
-                    url = url[:42] + "..."
-                content.append(url, style=theme.info)
-
-            if company.address:
-                content.append("\n")
-                content.append(company.address, style=theme.text_muted)
-        else:
-            content.append("No company data", style=theme.text_muted)
+        content.append("No company data", style=theme.text_muted)
 
     return Panel(content, title=f"[{theme.header}]About[/]", border_style=theme.text_muted)
 
