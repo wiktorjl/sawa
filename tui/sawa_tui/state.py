@@ -114,6 +114,14 @@ class AppState:
     # Logo state
     detail_logo_ascii: Text | None = None
     detail_logo_loading: bool = False
+    # AI Overview state
+    detail_overview: Any | None = None  # CompanyOverview (avoid circular import)
+    detail_overview_loading: bool = False
+    detail_overview_stream_content: str = ""
+    detail_overview_error: str = ""
+    detail_overview_show_regen_menu: bool = False
+    detail_overview_visible: bool = False
+    detail_overview_scroll: int = 0  # Scroll offset for overview panel
 
     # Fundamentals view
     fund_ticker: str = ""
@@ -350,6 +358,35 @@ class AppState:
     def toggle_news_pane(self) -> None:
         """Toggle visibility of the news pane."""
         self.detail_show_news = not self.detail_show_news
+
+    def load_company_overview(self, ticker: str) -> bool:
+        """
+        Load cached company overview for a ticker.
+
+        Uses two-tier lookup: user override -> shared overview.
+        Returns True if overview was found in cache.
+        """
+        from sawa_tui.models.overview import OverviewManager
+
+        self.ensure_user()
+        user_id = self.current_user.id if self.current_user else None
+        cached = OverviewManager.get_cached(ticker, user_id=user_id)
+        if cached:
+            self.detail_overview = cached
+            self.detail_overview_error = ""
+            return True
+        self.detail_overview = None
+        return False
+
+    def clear_overview_state(self) -> None:
+        """Clear overview state when leaving detail view."""
+        self.detail_overview = None
+        self.detail_overview_loading = False
+        self.detail_overview_stream_content = ""
+        self.detail_overview_error = ""
+        self.detail_overview_show_regen_menu = False
+        self.detail_overview_visible = False
+        self.detail_overview_scroll = 0
 
     def current_news_article(self) -> NewsArticle | None:
         """Get currently selected news article."""

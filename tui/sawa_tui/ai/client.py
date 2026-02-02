@@ -240,3 +240,69 @@ class ZAIClient:
             logger.error(f"Failed to parse glossary response: {e}")
             logger.error(f"Response was: {full_response[:500]}")
             raise ZAIError(f"Failed to parse AI response: {e}")
+
+    def generate_company_overview(
+        self,
+        ticker: str,
+        company_name: str,
+        sector: str | None = None,
+        custom_instructions: str = "",
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> "CompanyOverview":
+        """
+        Generate a company overview.
+
+        Args:
+            ticker: Stock ticker symbol
+            company_name: Full company name
+            sector: Industry/sector description
+            custom_instructions: Optional custom instructions for regeneration
+            stream_callback: Optional callback(chunk) for streaming updates
+
+        Returns:
+            Parsed CompanyOverview
+
+        Raises:
+            ZAIError: If generation or parsing fails
+        """
+        from sawa_tui.ai.prompts import build_company_overview_prompt
+        from sawa_tui.models.overview import CompanyOverview
+
+        messages = build_company_overview_prompt(
+            ticker, company_name, sector, custom_instructions
+        )
+
+        if stream_callback:
+            # Use streaming
+            full_response = ""
+            for chunk in self.generate_stream(messages):
+                full_response += chunk
+                stream_callback(chunk)
+        else:
+            # Non-streaming
+            full_response = self.generate_sync(messages)
+
+        # Parse the JSON response
+        try:
+            # Clean up response - remove any markdown code blocks if present
+            content = full_response.strip()
+            if content.startswith("```"):
+                # Remove markdown code block
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+
+            data = json.loads(content)
+            return CompanyOverview.from_json(
+                ticker=ticker,
+                data=data,
+                model=self.model,
+                custom_prompt=custom_instructions if custom_instructions else None,
+            )
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse overview response: {e}")
+            logger.error(f"Response was: {full_response[:500]}")
+            raise ZAIError(f"Failed to parse AI response: {e}")
