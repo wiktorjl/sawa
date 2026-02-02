@@ -9,6 +9,36 @@ from ..database import execute_query
 logger = logging.getLogger(__name__)
 
 
+# --- Async service-based implementations ---
+
+
+async def get_economy_data_async(
+    indicator_type: str,
+    start_date: str,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Get economy data via service layer (async)."""
+    from ..services import get_economy_service
+
+    service = get_economy_service()
+
+    if indicator_type == "treasury_yields":
+        return await service.get_treasury_yields(start_date, end_date, limit)
+    elif indicator_type == "inflation":
+        return await service.get_inflation(start_date, end_date, limit)
+    elif indicator_type == "labor_market":
+        return await service.get_labor_market(start_date, end_date, limit)
+    elif indicator_type == "inflation_expectations":
+        # Fall back to SQL for this one (not in repository)
+        return _get_inflation_expectations(start_date, end_date or date.today().isoformat(), limit)
+    else:
+        raise ValueError(f"Invalid indicator_type: {indicator_type}")
+
+
+# --- Sync SQL-based implementations (original) ---
+
+
 def get_economy_data(
     indicator_type: str,
     start_date: str,

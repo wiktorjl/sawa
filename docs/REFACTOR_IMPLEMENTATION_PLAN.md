@@ -1,8 +1,9 @@
 # S&P 500 Data Pipeline - Implementation Plan
 
 **Date:** 2026-02-01  
-**Status:** Ready for Implementation  
-**Estimated Duration:** 4-6 weeks
+**Status:** Implementation In Progress  
+**Estimated Duration:** 4-6 weeks  
+**Last Updated:** 2026-02-01 (Design Review Completed)
 
 ---
 
@@ -23,38 +24,60 @@ This plan implements a **Repository Pattern** architecture that abstracts data s
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Application Layer                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │     TUI      │  │  MCP Server  │  │    CLI       │      │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-└─────────┼─────────────────┼─────────────────┼──────────────┘
-          │                 │                 │
-          └─────────────────┼─────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 Repository Layer (Abstract)                  │
-│                                                              │
-│  StockPriceRepository    NewsRepository    FundamentalRepo  │
-│  ├─ get_prices()         ├─ get_news()     ├─ get_income() │
-│  ├─ get_latest()         └─ get_stream()   ├─ get_balance()│
-│  └─ get_stream()                           └─ get_cashflow()│
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-                            │
-          ┌─────────────────┼─────────────────┐
-          │                 │                 │
-          ▼                 ▼                 ▼
-┌─────────────────┐ ┌───────────────┐ ┌─────────────────┐
-│  Polygon.io     │ │   Massive     │ │   Yahoo         │
-│  Provider       │ │   Provider    │ │   Finance       │
-│                 │ │               │ │   (future)      │
-│ - REST API      │ │ - REST API    │ │ - Free tier     │
-│ - S3 bulk       │ │ - Fundamentals│ │ - Basic prices  │
-│ - Real-time     │ │ - Economy     │ │                 │
-└─────────────────┘ └───────────────┘ └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Application Layer                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────────┐ │
+│  │     TUI      │  │  MCP Server  │  │    CLI (coldstart/update) │ │
+│  └──────┬───────┘  └──────┬───────┘  └─────────────┬─────────────┘ │
+└─────────┼─────────────────┼────────────────────────┼───────────────┘
+          │                 │                        │
+          │  (read data)    │  (read data)           │ (fetch + load)
+          ▼                 ▼                        ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Repository Layer (Abstract)                       │
+│                                                                      │
+│  StockPriceRepository    FundamentalRepository    EconomyRepository │
+│  ├─ get_prices()         ├─ get_income()          ├─ get_yields()   │
+│  ├─ get_latest()         ├─ get_balance()         ├─ get_inflation()│
+│  └─ get_stream()         └─ get_cashflow()        └─ get_labor()    │
+│                                                                      │
+│  CompanyRepository       NewsRepository           RatiosRepository  │
+│  ├─ get_company()        ├─ get_news()            ├─ get_ratios()   │
+│  └─ search()             └─ get_stream()          └─ get_latest()   │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+          │                                          │
+          │ (TUI/MCP default)                        │ (CLI default)
+          ▼                                          ▼
+┌───────────────────┐                    ┌─────────────────────────────┐
+│    Database       │                    │     External APIs           │
+│    Provider       │                    │                             │
+│                   │                    │  ┌─────────┐ ┌───────────┐  │
+│  - PostgreSQL     │◄───── loads ───────│  │Polygon  │ │ Massive   │  │
+│  - Read from DB   │                    │  │ REST/S3 │ │ API       │  │
+│  - Already loaded │                    │  └─────────┘ └───────────┘  │
+│    data           │                    │                             │
+└───────────────────┘                    └─────────────────────────────┘
+
+Data Flow:
+1. CLI (coldstart) fetches from Polygon/Massive APIs -> writes CSV -> loads to PostgreSQL
+2. TUI/MCP read from PostgreSQL via DatabaseRepository (fast, no API calls)
+3. Provider can be switched via config for different use cases
 ```
+
+### Design Decisions (from Design Review)
+
+1. **Database as Primary Provider for TUI/MCP**: Since data is already loaded into PostgreSQL,
+   TUI and MCP should read from the database (fast, no rate limits) rather than call APIs.
+
+2. **API Repositories for CLI**: The coldstart/update CLI uses API repositories to fetch
+   fresh data from external providers.
+
+3. **Consistent Interface**: Both DatabaseRepository and API repositories implement the
+   same interfaces, allowing seamless switching if needed.
+
+4. **No Circular Imports**: RepositoryConfig is defined in config.py (not factory.py)
+   to avoid circular import issues.
 
 ---
 
@@ -198,6 +221,68 @@ class MarketSentiment:
     source: str
     bullish_count: int = 0
     bearish_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FinancialRatio:
+    """Financial ratios for a ticker on a date."""
+    ticker: str
+    date: date
+    
+    # Valuation
+    pe_ratio: Decimal | None = None
+    pb_ratio: Decimal | None = None
+    ps_ratio: Decimal | None = None
+    peg_ratio: Decimal | None = None
+    
+    # Profitability
+    roe: Decimal | None = None
+    roa: Decimal | None = None
+    profit_margin: Decimal | None = None
+    operating_margin: Decimal | None = None
+    
+    # Liquidity
+    current_ratio: Decimal | None = None
+    quick_ratio: Decimal | None = None
+    
+    # Leverage
+    debt_to_equity: Decimal | None = None
+    debt_to_assets: Decimal | None = None
+    
+    # Efficiency
+    asset_turnover: Decimal | None = None
+    inventory_turnover: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TreasuryYield:
+    """Treasury yield data for a date."""
+    date: date
+    yield_1mo: Decimal | None = None
+    yield_3mo: Decimal | None = None
+    yield_6mo: Decimal | None = None
+    yield_1yr: Decimal | None = None
+    yield_2yr: Decimal | None = None
+    yield_5yr: Decimal | None = None
+    yield_10yr: Decimal | None = None
+    yield_30yr: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InflationData:
+    """Inflation indicator data."""
+    date: date
+    indicator: str  # CPI, PCE, etc.
+    value: Decimal
+    change_yoy: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LaborMarketData:
+    """Labor market indicator data."""
+    date: date
+    indicator: str  # unemployment, nonfarm_payrolls, etc.
+    value: Decimal
 ```
 
 ### Task 1.2: Create Exception Hierarchy
@@ -410,6 +495,58 @@ class CompanyRepository(Repository):
     @abstractmethod
     async def search_companies(self, query: str, limit: int = 20) -> list[CompanyInfo]:
         """Search companies by name or ticker."""
+        pass
+
+
+class RatiosRepository(Repository):
+    """Repository for financial ratios data."""
+    
+    @abstractmethod
+    async def get_ratios(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date
+    ) -> list[FinancialRatio]:
+        """Get financial ratios for a ticker."""
+        pass
+    
+    @abstractmethod
+    async def get_latest_ratios(self, ticker: str) -> FinancialRatio | None:
+        """Get most recent ratios for a ticker."""
+        pass
+
+
+class EconomyRepository(Repository):
+    """Repository for economic indicator data."""
+    
+    @abstractmethod
+    async def get_treasury_yields(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> list[TreasuryYield]:
+        """Get treasury yield data."""
+        pass
+    
+    @abstractmethod
+    async def get_inflation(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None = None
+    ) -> list[InflationData]:
+        """Get inflation data."""
+        pass
+    
+    @abstractmethod
+    async def get_labor_market(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None = None
+    ) -> list[LaborMarketData]:
+        """Get labor market data."""
         pass
 ```
 
@@ -976,48 +1113,22 @@ class MassiveFundamentalRepository(FundamentalRepository):
         pass
 ```
 
-### Task 2.3: Create Repository Factory
+### Task 2.3: Create Repository Factory (REVISED - with database support)
 
 **Files:** `sp500_tools/repositories/factory.py`
 
 ```python
 """Factory for creating repository instances."""
 
-from dataclasses import dataclass
-from typing import TypeVar
-
 from sp500_tools.repositories.base import (
     StockPriceRepository,
-    NewsRepository,
     FundamentalRepository,
     CompanyRepository,
+    RatiosRepository,
+    EconomyRepository,
 )
 from sp500_tools.repositories.cache import InMemoryCache
-
-
-@dataclass
-class RepositoryConfig:
-    """Configuration for repositories."""
-    
-    # API Keys
-    polygon_api_key: str | None = None
-    polygon_s3_access_key: str | None = None
-    polygon_s3_secret_key: str | None = None
-    massive_api_key: str | None = None
-    
-    # Provider selection
-    default_price_provider: str = "polygon"
-    default_news_provider: str = "polygon"
-    default_fundamental_provider: str = "massive"
-    
-    # Cache settings
-    cache_enabled: bool = True
-    cache_max_size: int = 1000
-    cache_ttl_seconds: float = 300
-    
-    # Rate limits
-    polygon_rate_limit: float = 5.0
-    massive_rate_limit: float = 2.0
+from sp500_tools.repositories.config import RepositoryConfig
 
 
 class RepositoryFactory:
@@ -1037,7 +1148,16 @@ class RepositoryFactory:
         cache_key = f"price:{provider}"
         
         if cache_key not in self._instances:
-            if provider == "polygon":
+            if provider == "database":
+                from sp500_tools.repositories.database import DatabasePriceRepository
+                
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
+                
+                self._instances[cache_key] = DatabasePriceRepository(
+                    database_url=self.config.database_url
+                )
+            elif provider == "polygon":
                 from sp500_tools.repositories.polygon_prices import PolygonPriceRepository
                 
                 if not self.config.polygon_api_key:
@@ -1061,19 +1181,77 @@ class RepositoryFactory:
         cache_key = f"fundamental:{provider}"
         
         if cache_key not in self._instances:
-            if provider == "massive":
-                from sp500_tools.repositories.massive_fundamentals import MassiveFundamentalRepository
+            if provider == "database":
+                from sp500_tools.repositories.database import DatabaseFundamentalRepository
                 
-                if not self.config.massive_api_key:
-                    raise ValueError("Massive API key not configured")
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
                 
-                self._instances[cache_key] = MassiveFundamentalRepository(
-                    api_key=self.config.massive_api_key,
-                    cache=self._cache,
-                    rate_limit=self.config.massive_rate_limit
+                self._instances[cache_key] = DatabaseFundamentalRepository(
+                    database_url=self.config.database_url
                 )
             else:
                 raise ValueError(f"Unknown fundamental provider: {provider}")
+        
+        return self._instances[cache_key]
+    
+    def get_company_repository(self, provider: str | None = None) -> CompanyRepository:
+        """Get company repository instance."""
+        provider = provider or self.config.default_company_provider
+        cache_key = f"company:{provider}"
+        
+        if cache_key not in self._instances:
+            if provider == "database":
+                from sp500_tools.repositories.database import DatabaseCompanyRepository
+                
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
+                
+                self._instances[cache_key] = DatabaseCompanyRepository(
+                    database_url=self.config.database_url
+                )
+            else:
+                raise ValueError(f"Unknown company provider: {provider}")
+        
+        return self._instances[cache_key]
+    
+    def get_ratios_repository(self, provider: str | None = None) -> RatiosRepository:
+        """Get ratios repository instance."""
+        provider = provider or self.config.default_ratios_provider
+        cache_key = f"ratios:{provider}"
+        
+        if cache_key not in self._instances:
+            if provider == "database":
+                from sp500_tools.repositories.database import DatabaseRatiosRepository
+                
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
+                
+                self._instances[cache_key] = DatabaseRatiosRepository(
+                    database_url=self.config.database_url
+                )
+            else:
+                raise ValueError(f"Unknown ratios provider: {provider}")
+        
+        return self._instances[cache_key]
+    
+    def get_economy_repository(self, provider: str | None = None) -> EconomyRepository:
+        """Get economy repository instance."""
+        provider = provider or self.config.default_economy_provider
+        cache_key = f"economy:{provider}"
+        
+        if cache_key not in self._instances:
+            if provider == "database":
+                from sp500_tools.repositories.database import DatabaseEconomyRepository
+                
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
+                
+                self._instances[cache_key] = DatabaseEconomyRepository(
+                    database_url=self.config.database_url
+                )
+            else:
+                raise ValueError(f"Unknown economy provider: {provider}")
         
         return self._instances[cache_key]
     
@@ -1083,7 +1261,7 @@ class RepositoryFactory:
             self._cache.clear()
 
 
-# Singleton factory instance (optional)
+# Singleton factory instance
 _factory: RepositoryFactory | None = None
 
 
@@ -1091,7 +1269,7 @@ def get_factory() -> RepositoryFactory:
     """Get or create the global factory instance."""
     global _factory
     if _factory is None:
-        from sp500_tools.utils.config import get_config
+        from sp500_tools.repositories.config import get_config
         config = get_config()
         _factory = RepositoryFactory(config)
     return _factory
@@ -1101,23 +1279,386 @@ def set_factory(factory: RepositoryFactory) -> None:
     """Set the global factory instance (for testing)."""
     global _factory
     _factory = factory
+
+
+def reset_factory() -> None:
+    """Reset factory instance (for testing)."""
+    global _factory
+    _factory = None
+```
+
+### Task 2.4: Implement Database Repositories (NEW - from Design Review)
+
+**Files:** `sp500_tools/repositories/database.py`
+
+This is the **critical addition** identified in design review. TUI and MCP need to read
+from the database (already-loaded data), not call external APIs.
+
+```python
+"""Database repositories - read data from PostgreSQL."""
+
+import asyncio
+from datetime import date
+from decimal import Decimal
+from typing import Literal, Any
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from sp500_tools.domain.models import (
+    StockPrice,
+    IncomeStatement,
+    BalanceSheet,
+    CashFlow,
+    CompanyInfo,
+    FinancialRatio,
+    TreasuryYield,
+    InflationData,
+    LaborMarketData,
+)
+from sp500_tools.domain.exceptions import NotFoundError
+from sp500_tools.repositories.base import (
+    StockPriceRepository,
+    FundamentalRepository,
+    CompanyRepository,
+    RatiosRepository,
+    EconomyRepository,
+)
+
+
+def _get_connection(database_url: str):
+    """Get database connection."""
+    return psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+
+
+class DatabasePriceRepository(StockPriceRepository):
+    """Read stock prices from PostgreSQL."""
+    
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+    
+    @property
+    def provider_name(self) -> str:
+        return "database"
+    
+    @property
+    def supports_historical_bulk(self) -> bool:
+        return True
+    
+    async def get_prices(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date
+    ) -> list[StockPrice]:
+        """Query stock_prices table."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_prices_sync, ticker, start_date, end_date
+        )
+    
+    def _get_prices_sync(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date
+    ) -> list[StockPrice]:
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = %s AND date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), start_date, end_date))
+                rows = cur.fetchall()
+        
+        return [self._row_to_price(row) for row in rows]
+    
+    def _row_to_price(self, row: dict) -> StockPrice:
+        return StockPrice(
+            ticker=row["ticker"],
+            date=row["date"],
+            open=Decimal(str(row["open"])),
+            high=Decimal(str(row["high"])),
+            low=Decimal(str(row["low"])),
+            close=Decimal(str(row["close"])),
+            volume=int(row["volume"]),
+        )
+    
+    async def get_prices_stream(self, tickers, start_date, end_date):
+        """Stream is not needed for DB - just yield from get_prices."""
+        for ticker in tickers:
+            prices = await self.get_prices(ticker, start_date, end_date)
+            for price in prices:
+                yield price
+    
+    async def get_latest_price(self, ticker: str) -> StockPrice | None:
+        """Get most recent price from database."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_latest_sync, ticker
+        )
+    
+    def _get_latest_sync(self, ticker: str) -> StockPrice | None:
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = %s
+            ORDER BY date DESC
+            LIMIT 1
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(),))
+                row = cur.fetchone()
+        
+        return self._row_to_price(row) if row else None
+    
+    async def get_prices_for_date(self, tickers, target_date):
+        """Get prices for multiple tickers on a date."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_for_date_sync, tickers, target_date
+        )
+    
+    def _get_for_date_sync(self, tickers: list[str], target_date: date) -> list[StockPrice]:
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = ANY(%s) AND date = %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, ([t.upper() for t in tickers], target_date))
+                rows = cur.fetchall()
+        
+        return [self._row_to_price(row) for row in rows]
+
+
+class DatabaseFundamentalRepository(FundamentalRepository):
+    """Read fundamentals from PostgreSQL."""
+    
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+    
+    @property
+    def provider_name(self) -> str:
+        return "database"
+    
+    async def get_income_statements(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int = 4
+    ) -> list[IncomeStatement]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_income_sync, ticker, timeframe, limit
+        )
+    
+    def _get_income_sync(self, ticker, timeframe, limit) -> list[IncomeStatement]:
+        query = """
+            SELECT * FROM income_statements
+            WHERE ticker = %s AND timeframe = %s
+            ORDER BY period_end DESC
+            LIMIT %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), timeframe, limit))
+                rows = cur.fetchall()
+        
+        return [self._row_to_income(row) for row in rows]
+    
+    def _row_to_income(self, row: dict) -> IncomeStatement:
+        return IncomeStatement(
+            ticker=row["ticker"],
+            period_end=row["period_end"],
+            timeframe=row["timeframe"],
+            fiscal_year=row.get("fiscal_year", 2024),
+            fiscal_quarter=row.get("fiscal_quarter"),
+            revenue=self._to_decimal(row.get("revenue")),
+            cost_of_revenue=self._to_decimal(row.get("cost_of_revenue")),
+            gross_profit=self._to_decimal(row.get("gross_profit")),
+            operating_income=self._to_decimal(row.get("operating_income")),
+            net_income=self._to_decimal(row.get("net_income")),
+            basic_eps=self._to_decimal(row.get("basic_eps")),
+            diluted_eps=self._to_decimal(row.get("diluted_eps")),
+        )
+    
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        return Decimal(str(value))
+    
+    async def get_balance_sheets(self, ticker, timeframe, limit=4):
+        # Similar implementation for balance_sheets table
+        pass
+    
+    async def get_cash_flows(self, ticker, timeframe, limit=4):
+        # Similar implementation for cash_flows table
+        pass
+
+
+class DatabaseCompanyRepository(CompanyRepository):
+    """Read company info from PostgreSQL."""
+    
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+    
+    @property
+    def provider_name(self) -> str:
+        return "database"
+    
+    async def get_company_info(self, ticker: str) -> CompanyInfo | None:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_company_sync, ticker)
+    
+    def _get_company_sync(self, ticker: str) -> CompanyInfo | None:
+        query = "SELECT * FROM companies WHERE ticker = %s"
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(),))
+                row = cur.fetchone()
+        
+        if not row:
+            return None
+        
+        return CompanyInfo(
+            ticker=row["ticker"],
+            name=row["name"],
+            description=row.get("description"),
+            sector=row.get("sector"),
+            industry=row.get("industry"),
+            market_cap=self._to_decimal(row.get("market_cap")),
+            employees=row.get("employees"),
+            website=row.get("website"),
+        )
+    
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        return Decimal(str(value))
+    
+    async def search_companies(self, query: str, limit: int = 20) -> list[CompanyInfo]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._search_sync, query, limit)
+    
+    def _search_sync(self, query: str, limit: int) -> list[CompanyInfo]:
+        sql = """
+            SELECT * FROM companies
+            WHERE ticker ILIKE %s OR name ILIKE %s
+            ORDER BY ticker
+            LIMIT %s
+        """
+        pattern = f"%{query}%"
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (pattern, pattern, limit))
+                rows = cur.fetchall()
+        
+        return [
+            CompanyInfo(
+                ticker=r["ticker"],
+                name=r["name"],
+                sector=r.get("sector"),
+                industry=r.get("industry"),
+            )
+            for r in rows
+        ]
+
+
+class DatabaseRatiosRepository(RatiosRepository):
+    """Read financial ratios from PostgreSQL."""
+    
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+    
+    @property
+    def provider_name(self) -> str:
+        return "database"
+    
+    async def get_ratios(self, ticker, start_date, end_date) -> list[FinancialRatio]:
+        # Query financial_ratios table
+        pass
+    
+    async def get_latest_ratios(self, ticker: str) -> FinancialRatio | None:
+        # Query latest from financial_ratios table
+        pass
+
+
+class DatabaseEconomyRepository(EconomyRepository):
+    """Read economy data from PostgreSQL."""
+    
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+    
+    @property
+    def provider_name(self) -> str:
+        return "database"
+    
+    async def get_treasury_yields(self, start_date, end_date) -> list[TreasuryYield]:
+        # Query treasury_yields table
+        pass
+    
+    async def get_inflation(self, start_date, end_date, indicator=None) -> list[InflationData]:
+        # Query inflation table
+        pass
+    
+    async def get_labor_market(self, start_date, end_date, indicator=None) -> list[LaborMarketData]:
+        # Query labor_market table
+        pass
 ```
 
 ---
 
 ## Phase 3: Configuration (Week 2)
 
-### Task 3.1: Update Configuration Module
+### Task 3.1: Update Configuration Module (REVISED - circular import fix)
 
-**Files:** `sp500_tools/utils/config.py`
+**Files:** `sp500_tools/repositories/config.py` (NEW location to avoid circular imports)
+
+The `RepositoryConfig` dataclass is now defined in `repositories/config.py` instead of
+`factory.py` to prevent circular imports between config and factory modules.
 
 ```python
-"""Configuration management with repository support."""
+"""Repository configuration - defines RepositoryConfig dataclass."""
 
 import os
 from dataclasses import dataclass
 
-from sp500_tools.repositories.factory import RepositoryConfig
+
+@dataclass
+class RepositoryConfig:
+    """Configuration for repositories."""
+    
+    # Database (for TUI/MCP - reading loaded data)
+    database_url: str | None = None
+    
+    # API Keys (for CLI - fetching data)
+    polygon_api_key: str | None = None
+    polygon_s3_access_key: str | None = None
+    polygon_s3_secret_key: str | None = None
+    massive_api_key: str | None = None
+    
+    # Provider selection
+    # "database" for TUI/MCP (default), "polygon" for CLI downloads
+    default_price_provider: str = "database"
+    default_fundamental_provider: str = "database"
+    default_company_provider: str = "database"
+    default_ratios_provider: str = "database"
+    default_economy_provider: str = "database"
+    
+    # Cache settings (for API providers)
+    cache_enabled: bool = True
+    cache_max_size: int = 1000
+    cache_ttl_seconds: float = 300
+    
+    # Rate limits (for API providers)
+    polygon_rate_limit: float = 5.0
+    massive_rate_limit: float = 2.0
 
 
 def get_env(key: str, default: str | None = None, required: bool = False) -> str | None:
@@ -1130,17 +1671,38 @@ def get_env(key: str, default: str | None = None, required: bool = False) -> str
     return value
 
 
+def get_database_url() -> str | None:
+    """Get database URL from environment."""
+    # Try DATABASE_URL first, then construct from PG* vars
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    
+    host = os.environ.get("PGHOST")
+    port = os.environ.get("PGPORT", "5432")
+    database = os.environ.get("PGDATABASE")
+    user = os.environ.get("PGUSER")
+    password = os.environ.get("PGPASSWORD")
+    
+    if all([host, database, user, password]):
+        return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    
+    return None
+
+
 def get_config() -> RepositoryConfig:
     """Create repository configuration from environment."""
     return RepositoryConfig(
+        database_url=get_database_url(),
         polygon_api_key=get_env("POLYGON_API_KEY"),
         polygon_s3_access_key=get_env("POLYGON_S3_ACCESS_KEY"),
         polygon_s3_secret_key=get_env("POLYGON_S3_SECRET_KEY"),
         massive_api_key=get_env("MASSIVE_API_KEY"),
         
-        # Can override defaults via env vars
-        default_price_provider=get_env("DEFAULT_PRICE_PROVIDER", "polygon"),
-        default_fundamental_provider=get_env("DEFAULT_FUNDAMENTAL_PROVIDER", "massive"),
+        # Default to database for reading, can override for API access
+        default_price_provider=get_env("DEFAULT_PRICE_PROVIDER", "database"),
+        default_fundamental_provider=get_env("DEFAULT_FUNDAMENTAL_PROVIDER", "database"),
+        default_company_provider=get_env("DEFAULT_COMPANY_PROVIDER", "database"),
         
         cache_enabled=get_env("CACHE_ENABLED", "true").lower() == "true",
         cache_ttl_seconds=float(get_env("CACHE_TTL_SECONDS", "300")),
