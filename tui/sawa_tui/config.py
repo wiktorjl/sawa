@@ -74,6 +74,6 @@ def get_tui_log_file():
     """Get log file path for compatibility."""
     from pathlib import Path
 
-    log_dir = Path.home() / ".local" / "state" / "sp500-tui"
+    log_dir = Path.home() / ".local" / "state" / "sawa-tui"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "app.log"
