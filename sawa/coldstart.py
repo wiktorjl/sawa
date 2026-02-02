@@ -38,11 +38,9 @@ from sawa.database.load import (
 from sawa.database.schema import drop_all_tables, execute_sql_file, get_sql_files
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import calculate_date_range, setup_logging
+from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
-
-# Default rate limit for API calls (requests per second)
-DEFAULT_API_RATE_LIMIT = 5.0
 
 # Wikipedia URL for S&P 500 constituents
 WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -575,7 +573,9 @@ def run_coldstart(
                     stats["news"] = 0
                 else:
                     logger.info("\n[9/9] Downloading news articles...")
-                    news_count = load_news(conn, client, symbols, days=30, logger=logger)
+                    news_count = load_news(
+                        conn, client, symbols, days=DEFAULT_NEWS_DAYS, logger=logger
+                    )
                     stats["news"] = news_count
 
         stats["success"] = True

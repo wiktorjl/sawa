@@ -7,7 +7,7 @@ from typing import Any
 from sawa_tui.database import execute_query, execute_write, execute_write_returning
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Watchlist:
     """Represents a watchlist."""
 
@@ -29,7 +29,7 @@ class Watchlist:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class WatchlistStock:
     """Represents a stock in a watchlist with current data."""
 

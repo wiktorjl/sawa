@@ -8,7 +8,7 @@ from typing import Any
 from sawa_tui.database import execute_query
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Company:
     """Company details."""
 
@@ -52,7 +52,7 @@ class Company:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class StockPrice:
     """Daily stock price data."""
 
@@ -76,7 +76,7 @@ class StockPrice:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class FinancialRatios:
     """Financial ratios and metrics."""
 
@@ -130,7 +130,7 @@ class FinancialRatios:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class IncomeStatement:
     """Income statement data."""
 
@@ -170,7 +170,7 @@ class IncomeStatement:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class BalanceSheet:
     """Balance sheet data."""
 
@@ -216,7 +216,7 @@ class BalanceSheet:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class CashFlow:
     """Cash flow statement data."""
 
@@ -254,7 +254,7 @@ class CashFlow:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TreasuryYields:
     """Treasury yield curve data."""
 
@@ -290,7 +290,7 @@ class TreasuryYields:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Inflation:
     """Inflation data."""
 
@@ -320,7 +320,7 @@ class Inflation:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class LaborMarket:
     """Labor market data."""
 
@@ -348,7 +348,7 @@ class LaborMarket:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class NewsArticle:
     """News article with sentiment."""
 
@@ -378,7 +378,7 @@ class NewsArticle:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ScreenerResult:
     """Unified data for screening."""
 
