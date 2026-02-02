@@ -97,11 +97,51 @@ def execute_write_returning(
             return dict(result) if result else None
 
 
-def init_schema() -> None:
+def init_schema(schema_dir: str = "sqlschema") -> None:
     """
-    Initialize the watchlist and glossary schema if tables don't exist.
+    Initialize the TUI-specific schema (watchlists, glossary, users).
 
-    This runs the 08_watchlists.sql and 09_glossary.sql schema file contents.
+    Executes schema files: 08_watchlists.sql, 09_glossary.sql, 10_news.sql, 11_users.sql
+
+    Args:
+        schema_dir: Directory containing SQL schema files (default: sqlschema)
+    """
+    import os
+    from pathlib import Path
+
+    # Get project root (assuming this file is in tui/sp500_tui/)
+    project_root = Path(__file__).parent.parent.parent
+    schema_path = project_root / schema_dir
+
+    # Schema files to execute in order
+    schema_files = [
+        "08_watchlists.sql",
+        "09_glossary.sql",
+        "10_news.sql",
+        "11_users.sql",
+    ]
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for schema_file in schema_files:
+                file_path = schema_path / schema_file
+                if file_path.exists():
+                    logger.info(f"Executing schema file: {schema_file}")
+                    with open(file_path) as f:
+                        sql = f.read()
+                        cur.execute(sql)
+                else:
+                    logger.warning(f"Schema file not found: {file_path}")
+            conn.commit()
+
+    logger.info("TUI schema initialized")
+
+
+def init_schema_legacy() -> None:
+    """
+    Legacy init_schema with hardcoded SQL.
+
+    Deprecated: Use init_schema() which reads from SQL files.
     """
     schema_sql = """
     -- Watchlists table

@@ -6,9 +6,19 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from sp500_tui.components import (
+    COLORS,
+    SIDEBAR_WIDTH,
+    TAB_HEADER_HEIGHT,
+    panel_title,
+    render_empty_state,
+    render_scroll_indicator,
+    render_tabs,
+)
 from sp500_tui.config import get_tui_config
 from sp500_tui.state import AppState, EconomyTab, FundamentalsTab, SettingsCategory, View
 from sp500_tui.themes import get_theme
+from sp500_tui.views_screener import render_screener_view
 
 # Sparkline characters (8 levels)
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -152,6 +162,7 @@ def render_header(state: AppState) -> Panel:
         ("F3", "Economy", View.ECONOMY),
         ("F4", "Settings", View.SETTINGS),
         ("F5", "Glossary", View.GLOSSARY),
+        ("F6", "Screener", View.SCREENER),
     ]
 
     parts = [Text(" S&P 500 ", style=f"bold {theme.primary}"), Text(" | ")]
@@ -162,12 +173,26 @@ def render_header(state: AppState) -> Panel:
             view == View.STOCKS and state.current_view in (View.STOCK_DETAIL, View.NEWS_FULLSCREEN)
         )
         if is_current:
-            parts.append(Text(f" {key}:{name} ", style=f"bold black on {theme.primary}"))
+            parts.append(Text(f" {key}:{name}", style=COLORS["tab_active"]))
+
+            # Add breadcrumb for sub-views
+            if state.current_view == View.STOCK_DETAIL:
+                parts.append(Text(" > ", style=COLORS["tab_active"]))
+                parts.append(Text(f"{state.detail_ticker}", style=COLORS["tab_active"]))
+            elif state.current_view == View.NEWS_FULLSCREEN:
+                parts.append(Text(" > ", style=COLORS["tab_active"]))
+                parts.append(Text(f"{state.detail_ticker} > News", style=COLORS["tab_active"]))
+
+            parts.append(Text(" ", style=""))
         else:
             parts.append(Text(f" {key}:{name} ", style=theme.text_muted))
 
     parts.append(Text(" | ", style=theme.text_muted))
-    parts.append(Text("q:Quit  r:Refresh", style=theme.text_muted))
+
+    # Context-sensitive global keys
+    if state.current_view in (View.STOCK_DETAIL, View.NEWS_FULLSCREEN):
+        parts.append(Text("Esc:Back  ", style=theme.text_muted))
+    parts.append(Text("q:Quit  r:Refresh  ?:Help", style=theme.text_muted))
 
     header_text = Text()
     for part in parts:
@@ -204,29 +229,53 @@ def _get_view_help(state: AppState) -> Text:
     theme = get_theme()
     text = Text()
 
-    if state.current_view == View.STOCKS:
-        text.append("Enter", style=theme.warning)
-        text.append(":View  ", style=theme.text_muted)
-        text.append("Tab", style=theme.warning)
+    # User info (always show)
+    if state.current_user:
+        text.append(f"{state.current_user.name}", style=theme.info)
+        if state.current_user.is_admin:
+            text.append(" [Admin]", style=theme.warning)
+        text.append("  ", style="")
+        text.append("Ctrl+U", style=theme.warning)
         text.append(":Switch  ", style=theme.text_muted)
-        text.append("n", style=theme.warning)
-        text.append(":New WL  ", style=theme.text_muted)
-        text.append("d", style=theme.warning)
-        text.append(":Delete WL  ", style=theme.text_muted)
-        text.append("a", style=theme.warning)
-        text.append(":Add Stock  ", style=theme.text_muted)
-        text.append("x", style=theme.warning)
-        text.append(":Remove Stock", style=theme.text_muted)
+        if state.current_user.is_admin:
+            text.append("Ctrl+P", style=theme.warning)
+            text.append(":Manage  ", style=theme.text_muted)
+
+    if state.current_view == View.STOCKS:
+        if state.focus_sidebar:
+            text.append("Tab", style=theme.warning)
+            text.append(":Focus Stocks  ", style=theme.text_muted)
+            text.append("Enter", style=theme.warning)
+            text.append(":Select  ", style=theme.text_muted)
+            text.append("n", style=theme.warning)
+            text.append(":New  ", style=theme.text_muted)
+            text.append("d", style=theme.warning)
+            text.append(":Delete  ", style=theme.text_muted)
+        else:
+            text.append("Tab", style=theme.warning)
+            text.append(":Focus Lists  ", style=theme.text_muted)
+            text.append("Enter", style=theme.warning)
+            text.append(":View Detail  ", style=theme.text_muted)
+            text.append("/", style=theme.warning)
+            text.append(":Filter  ", style=theme.text_muted)
+            text.append("a", style=theme.warning)
+            text.append(":Add  ", style=theme.text_muted)
+            text.append("x", style=theme.warning)
+            text.append(":Remove  ", style=theme.text_muted)
+        text.append("?", style=theme.warning)
+        text.append(":Help", style=theme.text_muted)
 
     elif state.current_view == View.STOCK_DETAIL:
         text.append("Esc", style=theme.warning)
         text.append(":Back  ", style=theme.text_muted)
         text.append("a", style=theme.warning)
         text.append(":Add to Watchlist  ", style=theme.text_muted)
-        text.append("n", style=theme.warning)
+        text.append("v", style=theme.warning)
         text.append(":Toggle News  ", style=theme.text_muted)
-        text.append("N", style=theme.warning)
-        text.append(":Fullscreen News", style=theme.text_muted)
+        text.append("V", style=theme.warning)
+        text.append(":Fullscreen News  ", style=theme.text_muted)
+        text.append("?", style=theme.warning)
+        text.append(":Help", style=theme.text_muted)
 
     elif state.current_view == View.NEWS_FULLSCREEN:
         text.append("Esc", style=theme.warning)
@@ -257,12 +306,14 @@ def _get_view_help(state: AppState) -> Text:
         text.append(":Labor", style=theme.text_muted)
 
     elif state.current_view == View.SETTINGS:
-        text.append("1-4", style=theme.warning)
-        text.append(":Category  ", style=theme.text_muted)
+        text.append("1-5", style=theme.warning)
+        text.append(":Switch Tab  ", style=theme.text_muted)
         text.append("Up/Down", style=theme.warning)
         text.append(":Navigate  ", style=theme.text_muted)
         text.append("Enter", style=theme.warning)
-        text.append(":Select", style=theme.text_muted)
+        text.append(":Select  ", style=theme.text_muted)
+        text.append("?", style=theme.warning)
+        text.append(":Help", style=theme.text_muted)
 
     elif state.current_view == View.GLOSSARY:
         if state.glossary_show_regen_menu:
@@ -288,6 +339,37 @@ def _get_view_help(state: AppState) -> Text:
             text.append("1-5", style=theme.warning)
             text.append(":Related", style=theme.text_muted)
 
+    elif state.current_view == View.SCREENER:
+        text.append("/", style=theme.warning)
+        text.append(":Filter  ", style=theme.text_muted)
+        text.append("Enter", style=theme.warning)
+        text.append(":Detail  ", style=theme.text_muted)
+        text.append("Up/Down", style=theme.warning)
+        text.append(":Nav", style=theme.text_muted)
+        text.append("  Vars: pe, pb, cap, yield, sector, roe, eps", style=theme.info)
+
+    elif state.current_view == View.USER_SWITCHER:
+        text.append("Up/Down", style=theme.warning)
+        text.append(":Navigate  ", style=theme.text_muted)
+        text.append("Enter", style=theme.warning)
+        text.append(":Switch  ", style=theme.text_muted)
+        text.append("Esc", style=theme.warning)
+        text.append(":Cancel", style=theme.text_muted)
+
+    elif state.current_view == View.USER_MANAGEMENT:
+        text.append("Enter", style=theme.warning)
+        text.append(":Switch  ", style=theme.text_muted)
+        text.append("n", style=theme.warning)
+        text.append(":New  ", style=theme.text_muted)
+        text.append("d", style=theme.warning)
+        text.append(":Delete  ", style=theme.text_muted)
+        text.append("r", style=theme.warning)
+        text.append(":Rename  ", style=theme.text_muted)
+        text.append("t", style=theme.warning)
+        text.append(":Toggle Admin  ", style=theme.text_muted)
+        text.append("Esc", style=theme.warning)
+        text.append(":Close", style=theme.text_muted)
+
     return text
 
 
@@ -301,7 +383,7 @@ def render_stocks_view(state: AppState) -> Layout:
     layout = Layout()
 
     layout.split_row(
-        Layout(name="sidebar", size=28),
+        Layout(name="sidebar", size=SIDEBAR_WIDTH),
         Layout(name="main"),
     )
 
@@ -333,25 +415,21 @@ def _render_watchlist_sidebar(state: AppState) -> Panel:
         else:
             lines.append(Text(name, style=theme.text_muted))
 
-    content = Text("\n").join(lines) if lines else Text("No watchlists", style=theme.text_muted)
+    content = (
+        Text("\n").join(lines)
+        if lines
+        else render_empty_state("No watchlists", "Press n to create one")
+    )
 
-    # Scroll indicators
-    scroll_info = ""
+    # Calculate scroll info
     total = len(state.watchlists)
-    if total > visible_rows:
-        if start > 0:
-            scroll_info += f" [{theme.text_muted}]^[/]"
-        if end < total:
-            scroll_info += f" [{theme.text_muted}]v[/]"
+    scroll_info = render_scroll_indicator(start, total, visible_rows) if total > 0 else ""
 
-    help_text = Text("\n\n[n] New  [d] Delete", style=theme.text_muted)
-    full_content = Text()
-    full_content.append_text(content)
-    full_content.append_text(help_text)
+    # Use focused panel title
+    title = panel_title("WATCHLISTS", state.focus_sidebar, scroll_info)
 
-    title = f"[{theme.header}]WATCHLISTS[/]{scroll_info}"
     return Panel(
-        full_content,
+        content,
         title=title,
         title_align="left",
         border_style=theme.border_focus if state.focus_sidebar else theme.text_muted,
@@ -363,7 +441,15 @@ def _render_stock_table(state: AppState) -> Panel:
     """Render the stock table."""
     theme = get_theme()
     wl = state.current_watchlist()
-    title = wl.name if wl else "No Watchlist"
+
+    # Get filtered stocks
+    stocks = state.get_filtered_stocks()
+
+    # Build title with filter indicator
+    title_parts = [wl.name if wl else "No Watchlist"]
+    if state.stock_filter:
+        title_parts.append(f"(filtered: {state.stock_filter})")
+    title = " ".join(title_parts)
 
     table = Table(
         show_header=True,
@@ -385,7 +471,7 @@ def _render_stock_table(state: AppState) -> Panel:
     start = state.stock_scroll_offset
     end = start + visible_rows
 
-    for i, stock in enumerate(state.watchlist_stocks[start:end], start=start):
+    for i, stock in enumerate(stocks[start:end], start=start):
         ticker = stock.ticker
         name = (stock.name or "")[:24]
         price = stock.price
@@ -412,20 +498,15 @@ def _render_stock_table(state: AppState) -> Panel:
             Text(format_number(volume, decimals=0) if volume else "-", style=style),
         )
 
-    # Scroll indicators
-    total = len(state.watchlist_stocks)
-    scroll_info = ""
-    if total > visible_rows:
-        if start > 0:
-            scroll_info += " ^"
-        if end < total:
-            scroll_info += " v"
+    # Scroll indicators using shared component
+    total = len(stocks)
+    scroll_info = render_scroll_indicator(start, total, visible_rows) if total > 0 else ""
 
     return Panel(
         table,
-        title=f"[{theme.header}]{title}[/] ({len(state.watchlist_stocks)} stocks){scroll_info}",
+        title=f"[{theme.header}]{title}[/] ({len(stocks)} stocks) {scroll_info}",
         title_align="left",
-        border_style=theme.border if not state.focus_sidebar else theme.text_muted,
+        border_style=theme.border_focus if not state.focus_sidebar else theme.text_muted,
     )
 
 
@@ -1581,28 +1662,48 @@ def _render_econ_table(state: AppState) -> Panel:
 
 
 def render_settings_view(state: AppState) -> Layout:
-    """Render the settings view."""
+    """Render the settings view with horizontal tabs."""
     layout = Layout()
 
-    layout.split_row(
-        Layout(name="categories", size=25),
-        Layout(name="settings"),
+    layout.split_column(
+        Layout(name="tabs", size=TAB_HEADER_HEIGHT),
+        Layout(name="content"),
     )
 
-    # Left panel: categories
-    layout["categories"].update(_render_settings_categories(state))
+    # Tab header
+    layout["tabs"].update(_render_settings_tabs(state))
 
-    # Right panel: settings items
-    layout["settings"].update(_render_settings_items(state))
+    # Settings content (single panel, no sidebar)
+    layout["content"].update(_render_settings_content(state))
 
     return layout
+
+
+def _render_settings_tabs(state: AppState) -> Panel:
+    """Render settings category tabs."""
+    theme = get_theme()
+
+    tabs = [
+        ("1", "Display", state.settings_category == SettingsCategory.DISPLAY),
+        ("2", "Charts", state.settings_category == SettingsCategory.CHARTS),
+        ("3", "Behavior", state.settings_category == SettingsCategory.BEHAVIOR),
+        ("4", "API Keys", state.settings_category == SettingsCategory.API),
+        ("5", "Users", state.settings_category == SettingsCategory.USERS),
+    ]
+
+    text = Text()
+    text.append(" SETTINGS ", style=f"bold {theme.header}")
+    text.append("  ")
+    text.append_text(render_tabs(tabs))
+
+    return Panel(text, border_style=theme.border, height=TAB_HEADER_HEIGHT)
 
 
 # Settings definitions per category
 SETTINGS_ITEMS = {
     SettingsCategory.DISPLAY: [
         (
-            "theme_name",
+            "theme",
             "Theme",
             "choice",
             [
@@ -1621,94 +1722,105 @@ SETTINGS_ITEMS = {
         ),
         ("chart_period_days", "Chart Period (days)", "int", [30, 60, 90, 180, 365]),
         ("number_format", "Number Format", "choice", ["compact", "full"]),
-        ("table_rows", "Table Rows", "int", [15, 20, 25, 30, 50]),
         ("logo_enabled", "Show Company Logos", "bool", None),
-        ("logo_width", "Logo Width (chars)", "int", [20, 24, 28, 32, 36, 40]),
-        ("logo_height", "Logo Height (lines)", "int", [6, 8, 10, 12, 15, 18]),
+        ("logo_width", "Logo Width (chars)", "int", [10, 20, 24, 28, 32, 36, 40]),
+        ("logo_height", "Logo Height (lines)", "int", [5, 6, 8, 10, 12, 15, 18]),
     ],
     SettingsCategory.CHARTS: [
         ("chart_detail", "Chart Detail Level", "choice", ["compact", "normal", "detailed"]),
-        ("colors_enabled", "Colors Enabled", "bool", None),
     ],
     SettingsCategory.BEHAVIOR: [
         ("fundamentals_timeframe", "Default Timeframe", "choice", ["quarterly", "annual"]),
-        ("auto_refresh", "Auto Refresh", "bool", None),
-        ("refresh_interval_seconds", "Refresh Interval (sec)", "int", [30, 60, 120, 300]),
     ],
     SettingsCategory.API: [
-        ("polygon_api_key", "Polygon API Key", "secret", None),
+        ("zai_api_key", "Z.AI API Key", "secret", None),
     ],
+    SettingsCategory.USERS: [],  # Handled specially in _render_settings_content
 }
 
 
-def _render_settings_categories(state: AppState) -> Panel:
-    """Render the settings category sidebar."""
+def _render_users_settings_panel(state: AppState) -> Panel:
+    """Render user management info in the settings panel."""
     theme = get_theme()
     content = Text()
 
-    categories = [
-        (SettingsCategory.DISPLAY, "Display"),
-        (SettingsCategory.CHARTS, "Charts"),
-        (SettingsCategory.BEHAVIOR, "Behavior"),
-        (SettingsCategory.API, "API Keys"),
-    ]
+    # Current user info
+    state.ensure_user()
+    if state.current_user:
+        content.append("\n Current User\n", style=f"bold {theme.info}")
+        content.append(" " + "─" * 50 + "\n", style=theme.border)
+        content.append(f"  Name: {state.current_user.name}\n", style=theme.text_bright)
+        content.append(
+            f"  Admin: {'Yes' if state.current_user.is_admin else 'No'}\n", style=theme.text_bright
+        )
+        content.append("\n")
 
-    for cat, name in categories:
-        if cat == state.settings_category:
-            content.append(f" > {name}\n", style=f"{theme.selected_text} {theme.selected}")
-        else:
-            content.append(f"   {name}\n", style=theme.text_muted)
+    # Instructions
+    content.append(" User Management\n", style=f"bold {theme.warning}")
+    content.append(" " + "─" * 50 + "\n", style=theme.border)
+    content.append("\n")
+    content.append("  Press ", style=theme.text_muted)
+    content.append("Ctrl+U", style=theme.warning)
+    content.append(" to quickly switch between users\n", style=theme.text_muted)
+    content.append("\n")
 
-    content.append("\n\n", style=theme.text_muted)
-    content.append(" [1] Display\n", style=theme.text_muted)
-    content.append(" [2] Charts\n", style=theme.text_muted)
-    content.append(" [3] Behavior\n", style=theme.text_muted)
-    content.append(" [4] API Keys\n", style=theme.text_muted)
+    if state.current_user and state.current_user.is_admin:
+        content.append("  Press ", style=theme.text_muted)
+        content.append("Ctrl+P", style=theme.warning)
+        content.append(" to manage users (create, delete, rename)\n", style=theme.text_muted)
+    else:
+        content.append("  User management requires admin privileges\n", style=theme.text_muted)
+
+    content.append("\n")
+    content.append(" Features\n", style=f"bold {theme.info}")
+    content.append(" " + "─" * 50 + "\n", style=theme.border)
+    content.append("  • Each user has their own settings and watchlists\n", style=theme.text_bright)
+    content.append("  • Admins can manage users and access all features\n", style=theme.text_bright)
+    content.append("  • Switch users anytime without logging out\n", style=theme.text_bright)
 
     return Panel(
         content,
-        title=f"[{theme.header}]CATEGORIES[/]",
-        title_align="left",
+        title=f"[{theme.header}]User Management[/]",
         border_style=theme.border,
+        padding=(0, 2),
     )
 
 
-def _render_settings_items(state: AppState) -> Panel:
-    """Render the settings items for current category."""
+def _render_settings_content(state: AppState) -> Panel:
+    """Render settings items for current category."""
+    from sp500_tui.models.settings import SettingsManager
+
     theme = get_theme()
-    config = get_tui_config()
+
+    # Special handling for USERS category
+    if state.settings_category == SettingsCategory.USERS:
+        return _render_users_settings_panel(state)
+
     items = SETTINGS_ITEMS.get(state.settings_category, [])
 
     content = Text()
 
     if not items:
-        content.append(" No settings in this category.\n", style=theme.text_muted)
-        return Panel(content, title=f"[{theme.header}]SETTINGS[/]", border_style=theme.text_muted)
+        content.append_text(
+            render_empty_state("No settings in this category.", "Use 1-5 to switch categories")
+        )
+        return Panel(content, title=f"[{theme.header}]Settings[/]", border_style=theme.text_muted)
 
     # If popup is open, show it instead
     if state.settings_popup_open:
         return _render_settings_popup(state)
 
+    # Ensure user is loaded
+    state.ensure_user()
+    if not state.current_user:
+        content.append_text(render_empty_state("No active user", "Cannot load settings"))
+        return Panel(content, title=f"[{theme.header}]Settings[/]", border_style=theme.text_muted)
+
+    content.append("\n")
+
     for i, (key, label, value_type, choices) in enumerate(items):
-        # Get current value
-        section = {
-            SettingsCategory.DISPLAY: "display",
-            SettingsCategory.CHARTS: "charts",
-            SettingsCategory.BEHAVIOR: "behavior",
-            SettingsCategory.API: "api",
-        }[state.settings_category]
-
-        # Map key to config property
-        if key == "fundamentals_timeframe":
-            section = "fundamentals"
-            config_key = "default_timeframe"
-        elif key == "theme_name":
-            section = "theme"
-            config_key = "name"
-        else:
-            config_key = key
-
-        current_value = config.get(section, config_key)
+        # Get current value from database
+        current_value = SettingsManager.get(state.current_user.id, key)
 
         # Format value for display
         if value_type == "bool":
@@ -1724,36 +1836,40 @@ def _render_settings_items(state: AppState) -> Panel:
         else:
             value_str = str(current_value) if current_value else "(not set)"
 
-        # Highlight selected item
         is_selected = i == state.settings_selected_idx
         is_editing = is_selected and state.settings_editing
 
         if is_editing:
-            # Show edit mode (only for secret/free-form)
-            content.append(f" > {label}: ", style=f"bold {theme.warning}")
+            content.append(f"  > {label}: ", style=f"bold {theme.warning}")
             content.append(
-                f"[{state.settings_edit_value}]", style=f"{theme.selected_text} {theme.selected}"
+                f"[{state.settings_edit_value}]",
+                style=f"bold {theme.selected_text} on {theme.selected}",
             )
             content.append("_", style="blink")
-            content.append("\n", style=theme.text_muted)
+            content.append("\n")
         elif is_selected:
-            content.append(f" > {label}: ", style=f"bold {theme.primary}")
-            content.append(f"{value_str}", style=theme.text_bright)
-            content.append("  [Enter to select]", style=f"{theme.text_muted} {theme.info}")
-            content.append("\n", style=theme.text_muted)
+            content.append(f"  > {label}: ", style=COLORS["selected"])
+            if choices and (value_type == "choice" or value_type == "int"):
+                content.append("< ", style=f"{theme.info}")
+                content.append(f"{value_str}", style=theme.text_bright)
+                content.append(" >", style=f"{theme.info}")
+            else:
+                content.append(f"{value_str}", style=theme.text_bright)
+            content.append("  [Enter to select]", style=theme.text_muted)
+            content.append("\n")
         else:
-            content.append(f"   {label}: ", style=theme.text_muted)
+            content.append(f"    {label}: ", style=theme.text_muted)
             content.append(f"{value_str}", style=theme.text)
-            content.append("\n", style=theme.text_muted)
+            content.append("\n")
 
-    content.append("\n", style=theme.text_muted)
-    content.append(" [Enter] Select  [Up/Down] Navigate\n", style=theme.text_muted)
+    content.append("\n")
 
     category_name = {
         SettingsCategory.DISPLAY: "Display Settings",
         SettingsCategory.CHARTS: "Chart Settings",
         SettingsCategory.BEHAVIOR: "Behavior Settings",
         SettingsCategory.API: "API Keys",
+        SettingsCategory.USERS: "User Management",
     }[state.settings_category]
 
     return Panel(
@@ -1789,6 +1905,58 @@ def _render_settings_popup(state: AppState) -> Panel:
 
 
 # =============================================================================
+# USERS SETTINGS PANEL
+# =============================================================================
+
+
+def _render_users_settings_panel(state: AppState) -> Panel:
+    """Render user management info in the settings panel."""
+    theme = get_theme()
+    content = Text()
+
+    # Current user info
+    state.ensure_user()
+    if state.current_user:
+        content.append("\n Current User\n", style=f"bold {theme.info}")
+        content.append(" " + "─" * 50 + "\n", style=theme.border)
+        content.append(f"  Name: {state.current_user.name}\n", style=theme.text_bright)
+        content.append(
+            f"  Admin: {'Yes' if state.current_user.is_admin else 'No'}\n", style=theme.text_bright
+        )
+        content.append("\n")
+
+    # Instructions
+    content.append(" User Management\n", style=f"bold {theme.warning}")
+    content.append(" " + "─" * 50 + "\n", style=theme.border)
+    content.append("\n")
+    content.append("  Press ", style=theme.text_muted)
+    content.append("Ctrl+U", style=theme.warning)
+    content.append(" to quickly switch between users\n", style=theme.text_muted)
+    content.append("\n")
+
+    if state.current_user and state.current_user.is_admin:
+        content.append("  Press ", style=theme.text_muted)
+        content.append("Ctrl+P", style=theme.warning)
+        content.append(" to manage users (create, delete, rename)\n", style=theme.text_muted)
+    else:
+        content.append("  User management requires admin privileges\n", style=theme.text_muted)
+
+    content.append("\n")
+    content.append(" Features\n", style=f"bold {theme.info}")
+    content.append(" " + "─" * 50 + "\n", style=theme.border)
+    content.append("  • Each user has their own settings and watchlists\n", style=theme.text_bright)
+    content.append("  • Admins can manage users and access all features\n", style=theme.text_bright)
+    content.append("  • Switch users anytime without logging out\n", style=theme.text_bright)
+
+    return Panel(
+        content,
+        title=f"[{theme.header}]User Management[/]",
+        border_style=theme.border,
+        padding=(0, 2),
+    )
+
+
+# =============================================================================
 # GLOSSARY VIEW
 # =============================================================================
 
@@ -1798,7 +1966,7 @@ def render_glossary_view(state: AppState) -> Layout:
     layout = Layout()
 
     layout.split_row(
-        Layout(name="sidebar", size=30),
+        Layout(name="sidebar", size=SIDEBAR_WIDTH),
         Layout(name="main"),
     )
 
@@ -1860,27 +2028,18 @@ def _render_glossary_sidebar(state: AppState) -> Panel:
                 line + "\n", style=theme.text_muted if not term.has_definition else theme.text
             )
 
-    # Scroll indicators
+    # Calculate scroll info using shared component
     total = len(state.glossary_filtered)
-    scroll_info = ""
-    if total > visible_rows:
-        if start > 0:
-            scroll_info += " ^"
-        if end < total:
-            scroll_info += " v"
+    scroll_info = render_scroll_indicator(start, total, visible_rows) if total > 0 else ""
 
-    # Help text
-    content.append("\n", style=theme.text_muted)
-    content.append("[n] Add term  [d] Delete", style=theme.text_muted)
-    content.append("\n", style=theme.text_muted)
-    content.append("* = cached definition", style=theme.text_muted)
+    # Use focused panel title
+    title = panel_title("TERMS", state.glossary_focus_sidebar, scroll_info)
 
-    title = f"[{theme.header}]TERMS ({len(state.glossary_filtered)})[/]{scroll_info}"
     return Panel(
         content,
         title=title,
         title_align="left",
-        border_style=theme.border if state.glossary_focus_sidebar else theme.text_muted,
+        border_style=theme.border_focus if state.glossary_focus_sidebar else theme.text_muted,
     )
 
 
@@ -2037,6 +2196,120 @@ def _render_regen_menu(state: AppState) -> Panel:
 
 
 # =============================================================================
+# USER MANAGEMENT VIEWS
+# =============================================================================
+
+
+def render_user_management_view(state: AppState) -> Panel:
+    """Render user management view (admin only)."""
+    theme = get_theme()
+    content = Text()
+
+    if not state.current_user or not state.current_user.is_admin:
+        content.append_text(
+            render_empty_state("Admin access required", "Only admins can manage users")
+        )
+        return Panel(
+            content, title=f"[{theme.header}]User Management[/]", border_style=theme.border
+        )
+
+    if not state.user_mgmt_users:
+        content.append_text(render_empty_state("No users found", "Press 'n' to create a user"))
+        return Panel(
+            content, title=f"[{theme.header}]User Management[/]", border_style=theme.border
+        )
+
+    content.append("\n")
+    content.append(f"  Total Users: {len(state.user_mgmt_users)}\n", style=theme.text_muted)
+    content.append(f"  Current User: {state.current_user.name}\n\n", style=theme.info)
+
+    for i, user in enumerate(state.user_mgmt_users):
+        is_selected = i == state.user_mgmt_selected_idx
+        is_current = user.id == state.current_user.id
+
+        # User indicator
+        if is_current:
+            indicator = "→ "
+            style = theme.positive
+        else:
+            indicator = "  "
+            style = theme.text if not is_selected else COLORS["selected"]
+
+        # Selection marker
+        if is_selected:
+            prefix = "> "
+            name_style = f"bold {COLORS['selected']}"
+        else:
+            prefix = "  "
+            name_style = style
+
+        # Admin badge
+        admin_badge = " [ADMIN]" if user.is_admin else ""
+
+        content.append(f"{prefix}{indicator}{user.name}{admin_badge}", style=name_style)
+        content.append(f"  (ID: {user.id})\n", style=theme.text_muted)
+
+    content.append("\n")
+
+    if state.user_mgmt_confirm_delete and state.user_mgmt_users:
+        user = state.user_mgmt_users[state.user_mgmt_selected_idx]
+        content.append(f"  ⚠ Delete user '{user.name}'? (y/n)\n", style=f"bold {theme.warning}")
+
+    return Panel(
+        content,
+        title=f"[{theme.header}]User Management[/]",
+        border_style=theme.border,
+        subtitle=f"[{theme.text_muted}]↑↓:Select  Enter:Switch  n:New  d:Delete  t:Toggle Admin  r:Rename  Esc:Back[/]",
+        subtitle_align="left",
+    )
+
+
+def render_user_switcher_view(state: AppState) -> Panel:
+    """Render user switcher popup."""
+    theme = get_theme()
+    content = Text()
+
+    if not state.user_switcher_users:
+        content.append_text(render_empty_state("No users found", ""))
+        return Panel(content, title=f"[{theme.header}]Switch User[/]", border_style=theme.border)
+
+    content.append("\n")
+    content.append("  Select a user to switch to:\n\n", style=f"bold {theme.header}")
+
+    for i, user in enumerate(state.user_switcher_users):
+        is_selected = i == state.user_switcher_selected_idx
+        is_current = state.current_user and user.id == state.current_user.id
+
+        if is_current:
+            indicator = "✓ "
+            style = theme.positive
+        else:
+            indicator = "  "
+            style = theme.text
+
+        if is_selected:
+            prefix = "> "
+            name_style = f"bold {COLORS['selected']}"
+        else:
+            prefix = "  "
+            name_style = style
+
+        admin_badge = " [ADMIN]" if user.is_admin else ""
+
+        content.append(f"{prefix}{indicator}{user.name}{admin_badge}\n", style=name_style)
+
+    content.append("\n")
+
+    return Panel(
+        content,
+        title=f"[{theme.header}]Switch User[/]",
+        border_style=theme.border,
+        subtitle=f"[{theme.text_muted}]↑↓:Select  Enter:Switch  Esc:Cancel[/]",
+        subtitle_align="left",
+    )
+
+
+# =============================================================================
 # MAIN RENDER
 # =============================================================================
 
@@ -2069,6 +2342,12 @@ def render_app(console: Console, state: AppState) -> None:
         layout["body"].update(render_settings_view(state))
     elif state.current_view == View.GLOSSARY:
         layout["body"].update(render_glossary_view(state))
+    elif state.current_view == View.SCREENER:
+        layout["body"].update(render_screener_view(state))
+    elif state.current_view == View.USER_MANAGEMENT:
+        layout["body"].update(render_user_management_view(state))
+    elif state.current_view == View.USER_SWITCHER:
+        layout["body"].update(render_user_switcher_view(state))
 
     # Footer
     layout["footer"].update(render_footer(state))
@@ -2076,4 +2355,24 @@ def render_app(console: Console, state: AppState) -> None:
     # Move cursor to home and overwrite (no flicker)
     # Using ANSI escape: \033[H moves cursor to row 1, col 1
     print("\033[H", end="")
-    console.print(layout)
+
+    # If help overlay is active, render it instead of the main layout
+    if state.show_help_overlay:
+        from sp500_tui.help import render_help_overlay
+        from rich.align import Align
+
+        # First render the main layout (background)
+        console.print(layout)
+
+        # Then overlay the centered help on top
+        help_panel = render_help_overlay(state.current_view, state.term_width, state.term_height)
+
+        # Create a layout for centered help
+        overlay_layout = Layout()
+        overlay_layout.update(Align.center(help_panel, vertical="middle"))
+
+        # Position cursor and render overlay
+        print("\033[H", end="")
+        console.print(overlay_layout)
+    else:
+        console.print(layout)

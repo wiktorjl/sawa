@@ -1,73 +1,64 @@
 """User settings management.
 
-Uses XDG-compliant configuration file for local settings.
-The TUIConfig singleton provides access to all user preferences.
+Database-backed user settings with admin-managed default template.
 """
 
-from sp500_tui.config import TUIConfig, get_tui_config
+from sp500_tui.database import execute_query, execute_write
 
 
 class SettingsManager:
     """
-    Manager for user settings.
+    Manager for user-specific settings stored in the database.
 
-    Provides a backwards-compatible interface while using XDG config files
-    instead of database storage. Local preferences (theme, chart settings,
-    display options) are now stored in ~/.config/sp500-tui/config.toml
+    Settings are stored per-user in the user_settings table.
+    New users inherit settings from the default_settings template.
     """
 
-    _config: TUIConfig | None = None
+    # Setting definitions with types and validation
+    SETTINGS_SCHEMA = {
+        "zai_api_key": {"type": "string", "default": ""},
+        "chart_period_days": {"type": "int", "default": "60", "min": 1, "max": 730},
+        "number_format": {"type": "enum", "default": "compact", "values": ["compact", "full"]},
+        "fundamentals_timeframe": {
+            "type": "enum",
+            "default": "quarterly",
+            "values": ["quarterly", "annual"],
+        },
+        "theme": {"type": "string", "default": "osaka-jade"},
+        "chart_detail": {"type": "string", "default": "normal"},
+        "logo_enabled": {"type": "bool", "default": "true"},
+        "logo_width": {"type": "int", "default": "28", "min": 10, "max": 100},
+        "logo_height": {"type": "int", "default": "10", "min": 5, "max": 50},
+    }
 
-    @classmethod
-    def _get_config(cls) -> TUIConfig:
-        """Get or create the TUI config instance."""
-        if cls._config is None:
-            cls._config = get_tui_config()
-        return cls._config
-
-    @classmethod
-    def invalidate_cache(cls) -> None:
-        """Reload configuration from file."""
-        config = cls._get_config()
-        config.reload()
-
-    @classmethod
-    def get(cls, key: str, default: str | None = None) -> str | None:
+    @staticmethod
+    def get(user_id: int, key: str, default: str | None = None) -> str | None:
         """
-        Get a setting value.
+        Get a setting value for a user.
 
         Args:
-            key: Setting key (legacy format)
+            user_id: User ID
+            key: Setting key
             default: Default value if not found
 
         Returns:
             Setting value or default
         """
-        config = cls._get_config()
+        sql = "SELECT value FROM user_settings WHERE user_id = %(user_id)s AND key = %(key)s"
+        rows = execute_query(sql, {"user_id": user_id, "key": key})
+        if rows:
+            return rows[0]["value"]
 
-        # Map legacy keys to new config structure
-        key_mapping = {
-            "chart_period_days": lambda: str(config.chart_period_days),
-            "auto_refresh": lambda: str(config.auto_refresh).lower(),
-            "refresh_interval_seconds": lambda: str(config.refresh_interval_seconds),
-            "number_format": lambda: config.number_format,
-            "fundamentals_timeframe": lambda: config.fundamentals_timeframe,
-            "table_rows": lambda: str(config.table_rows),
-            "theme": lambda: config.theme_name,
-            "chart_detail": lambda: config.chart_detail,
-            "logo_enabled": lambda: str(config.logo_enabled).lower(),
-            "logo_width": lambda: str(config.logo_width),
-            "logo_height": lambda: str(config.logo_height),
-        }
+        # Fall back to schema default
+        if key in SettingsManager.SETTINGS_SCHEMA:
+            return SettingsManager.SETTINGS_SCHEMA[key]["default"]
 
-        if key in key_mapping:
-            return key_mapping[key]()
         return default
 
-    @classmethod
-    def get_int(cls, key: str, default: int = 0) -> int:
+    @staticmethod
+    def get_int(user_id: int, key: str, default: int = 0) -> int:
         """Get a setting value as integer."""
-        value = cls.get(key)
+        value = SettingsManager.get(user_id, key)
         if value is None:
             return default
         try:
@@ -75,129 +66,233 @@ class SettingsManager:
         except ValueError:
             return default
 
-    @classmethod
-    def get_bool(cls, key: str, default: bool = False) -> bool:
+    @staticmethod
+    def get_bool(user_id: int, key: str, default: bool = False) -> bool:
         """Get a setting value as boolean."""
-        value = cls.get(key)
+        value = SettingsManager.get(user_id, key)
         if value is None:
             return default
         return value.lower() in ("true", "1", "yes", "on")
 
-    @classmethod
-    def set(cls, key: str, value: str) -> bool:
+    @staticmethod
+    def set(user_id: int, key: str, value: str) -> tuple[bool, str]:
         """
-        Set a setting value.
+        Set a setting value for a user.
 
         Args:
-            key: Setting key (legacy format)
+            user_id: User ID
+            key: Setting key
             value: Setting value
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        # Validate key exists in schema
+        if key not in SettingsManager.SETTINGS_SCHEMA:
+            return False, f"Invalid setting key: {key}"
+
+        # Validate value based on schema
+        schema = SettingsManager.SETTINGS_SCHEMA[key]
+        validation_result = SettingsManager._validate_value(key, value, schema)
+        if not validation_result[0]:
+            return validation_result
+
+        sql = """
+            INSERT INTO user_settings (user_id, key, value)
+            VALUES (%(user_id)s, %(key)s, %(value)s)
+            ON CONFLICT (user_id, key) DO UPDATE SET value = %(value)s, updated_at = NOW()
+        """
+        success = execute_write(sql, {"user_id": user_id, "key": key, "value": value}) > 0
+        return (True, "") if success else (False, "Failed to save setting")
+
+    @staticmethod
+    def _validate_value(key: str, value: str, schema: dict) -> tuple[bool, str]:
+        """Validate a setting value based on schema."""
+        setting_type = schema["type"]
+
+        if setting_type == "int":
+            try:
+                int_value = int(value)
+                if "min" in schema and int_value < schema["min"]:
+                    return False, f"{key} must be at least {schema['min']}"
+                if "max" in schema and int_value > schema["max"]:
+                    return False, f"{key} must be at most {schema['max']}"
+            except ValueError:
+                return False, f"{key} must be an integer"
+
+        elif setting_type == "bool":
+            if value.lower() not in ("true", "false", "1", "0", "yes", "no", "on", "off"):
+                return False, f"{key} must be a boolean (true/false)"
+
+        elif setting_type == "enum":
+            if value not in schema["values"]:
+                return False, f"{key} must be one of: {', '.join(schema['values'])}"
+
+        return True, ""
+
+    @staticmethod
+    def get_all(user_id: int) -> dict[str, str]:
+        """
+        Get all settings for a user.
+
+        Returns a dictionary with all settings, including defaults for unset values.
+        """
+        sql = "SELECT key, value FROM user_settings WHERE user_id = %(user_id)s"
+        rows = execute_query(sql, {"user_id": user_id})
+
+        # Start with all defaults
+        settings = {
+            key: schema["default"] for key, schema in SettingsManager.SETTINGS_SCHEMA.items()
+        }
+
+        # Override with user's actual settings
+        for row in rows:
+            settings[row["key"]] = row["value"]
+
+        return settings
+
+    @staticmethod
+    def initialize_user_settings(user_id: int) -> bool:
+        """
+        Initialize settings for a new user by copying from default_settings.
+
+        This is automatically called when creating a new user.
 
         Returns:
             True if successful
         """
-        config = cls._get_config()
+        sql = """
+            INSERT INTO user_settings (user_id, key, value)
+            SELECT %(user_id)s, key, value
+            FROM default_settings
+            ON CONFLICT DO NOTHING
+        """
+        return execute_write(sql, {"user_id": user_id}) >= 0
 
-        # Map legacy keys to new config structure
+    @staticmethod
+    def reset_to_defaults(user_id: int) -> bool:
+        """
+        Reset a user's settings to the default template.
+
+        Deletes all user settings and re-copies from default_settings.
+
+        Returns:
+            True if successful
+        """
+        # Delete all user settings
+        delete_sql = "DELETE FROM user_settings WHERE user_id = %(user_id)s"
+        execute_write(delete_sql, {"user_id": user_id})
+
+        # Re-initialize from defaults
+        return SettingsManager.initialize_user_settings(user_id)
+
+
+class DefaultSettingsManager:
+    """
+    Manager for the default settings template (admin-managed).
+
+    These settings are used as the starting point for new users.
+    Admins can edit this template to control default preferences.
+    """
+
+    @staticmethod
+    def get(key: str, default: str | None = None) -> str | None:
+        """Get a default setting value."""
+        sql = "SELECT value FROM default_settings WHERE key = %(key)s"
+        rows = execute_query(sql, {"key": key})
+        if rows:
+            return rows[0]["value"]
+
+        # Fall back to schema default
+        if key in SettingsManager.SETTINGS_SCHEMA:
+            return SettingsManager.SETTINGS_SCHEMA[key]["default"]
+
+        return default
+
+    @staticmethod
+    def get_int(key: str, default: int = 0) -> int:
+        """Get a default setting value as integer."""
+        value = DefaultSettingsManager.get(key)
+        if value is None:
+            return default
         try:
-            if key == "chart_period_days":
-                config.chart_period_days = int(value)
-            elif key == "auto_refresh":
-                config.auto_refresh = value.lower() in ("true", "1", "yes", "on")
-            elif key == "refresh_interval_seconds":
-                config.refresh_interval_seconds = int(value)
-            elif key == "number_format":
-                config.number_format = value
-            elif key == "fundamentals_timeframe":
-                config.fundamentals_timeframe = value
-            elif key == "table_rows":
-                config.table_rows = int(value)
-            elif key == "theme":
-                config.theme_name = value
-            elif key == "chart_detail":
-                config.chart_detail = value
-            elif key == "logo_enabled":
-                config.logo_enabled = value.lower() in ("true", "1", "yes", "on")
-            elif key == "logo_width":
-                config.logo_width = int(value)
-            elif key == "logo_height":
-                config.logo_height = int(value)
-            else:
-                return False
-            return True
-        except (ValueError, TypeError):
-            return False
+            return int(value)
+        except ValueError:
+            return default
 
-    @classmethod
-    def get_all(cls) -> dict[str, str]:
-        """Get all settings as a dictionary."""
-        config = cls._get_config()
-        return {
-            "chart_period_days": str(config.chart_period_days),
-            "auto_refresh": str(config.auto_refresh).lower(),
-            "refresh_interval_seconds": str(config.refresh_interval_seconds),
-            "number_format": config.number_format,
-            "fundamentals_timeframe": config.fundamentals_timeframe,
-            "table_rows": str(config.table_rows),
-            "theme": config.theme_name,
-            "chart_detail": config.chart_detail,
-            "logo_enabled": str(config.logo_enabled).lower(),
-            "logo_width": str(config.logo_width),
-            "logo_height": str(config.logo_height),
+    @staticmethod
+    def get_bool(key: str, default: bool = False) -> bool:
+        """Get a default setting value as boolean."""
+        value = DefaultSettingsManager.get(key)
+        if value is None:
+            return default
+        return value.lower() in ("true", "1", "yes", "on")
+
+    @staticmethod
+    def set(key: str, value: str) -> tuple[bool, str]:
+        """
+        Set a default setting value (admin only).
+
+        Args:
+            key: Setting key
+            value: Setting value
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        # Validate key exists in schema
+        if key not in SettingsManager.SETTINGS_SCHEMA:
+            return False, f"Invalid setting key: {key}"
+
+        # Validate value based on schema
+        schema = SettingsManager.SETTINGS_SCHEMA[key]
+        validation_result = SettingsManager._validate_value(key, value, schema)
+        if not validation_result[0]:
+            return validation_result
+
+        sql = """
+            INSERT INTO default_settings (key, value)
+            VALUES (%(key)s, %(value)s)
+            ON CONFLICT (key) DO UPDATE SET value = %(value)s, updated_at = NOW()
+        """
+        success = execute_write(sql, {"key": key, "value": value}) > 0
+        return (True, "") if success else (False, "Failed to save default setting")
+
+    @staticmethod
+    def get_all() -> dict[str, str]:
+        """
+        Get all default settings.
+
+        Returns a dictionary with all settings, including schema defaults for unset values.
+        """
+        sql = "SELECT key, value FROM default_settings"
+        rows = execute_query(sql)
+
+        # Start with all schema defaults
+        settings = {
+            key: schema["default"] for key, schema in SettingsManager.SETTINGS_SCHEMA.items()
         }
 
-    @classmethod
-    def reset_to_defaults(cls) -> None:
-        """Reset all settings to defaults."""
-        config = cls._get_config()
-        config.chart_period_days = 60
-        config.auto_refresh = False
-        config.refresh_interval_seconds = 60
-        config.number_format = "compact"
-        config.fundamentals_timeframe = "quarterly"
-        config.table_rows = 25
-        config.theme_name = "osaka-jade"
-        config.chart_detail = "normal"
-        config.logo_enabled = True
-        config.logo_width = 28
-        config.logo_height = 10
+        # Override with actual default_settings values
+        for row in rows:
+            settings[row["key"]] = row["value"]
 
-    # Convenience properties for common settings
-    @classmethod
-    def chart_period_days(cls) -> int:
-        """Get the chart period in days."""
-        return cls._get_config().chart_period_days
+        return settings
 
-    @classmethod
-    def auto_refresh(cls) -> bool:
-        """Get auto-refresh setting."""
-        return cls._get_config().auto_refresh
+    @staticmethod
+    def reset_to_schema_defaults() -> bool:
+        """
+        Reset all default settings to schema defaults.
 
-    @classmethod
-    def refresh_interval(cls) -> int:
-        """Get refresh interval in seconds."""
-        return cls._get_config().refresh_interval_seconds
+        Returns:
+            True if successful
+        """
+        # Delete all default settings
+        delete_sql = "DELETE FROM default_settings"
+        execute_write(delete_sql)
 
-    @classmethod
-    def number_format(cls) -> str:
-        """Get number format setting (compact or full)."""
-        return cls._get_config().number_format
+        # Re-insert schema defaults
+        for key, schema in SettingsManager.SETTINGS_SCHEMA.items():
+            DefaultSettingsManager.set(key, schema["default"])
 
-    @classmethod
-    def fundamentals_timeframe(cls) -> str:
-        """Get fundamentals timeframe (quarterly or annual)."""
-        return cls._get_config().fundamentals_timeframe
-
-    @classmethod
-    def table_rows(cls) -> int:
-        """Get number of rows to show in tables."""
-        return cls._get_config().table_rows
-
-    @classmethod
-    def theme_name(cls) -> str:
-        """Get current theme name."""
-        return cls._get_config().theme_name
-
-    @classmethod
-    def chart_detail(cls) -> str:
-        """Get chart detail level."""
-        return cls._get_config().chart_detail
+        return True
