@@ -134,7 +134,6 @@ class TestCompanyInfoConverter:
 
         assert result.exchange is None
         assert result.cik is None
-        assert result.logo_url is None
         assert result.active is True
 
 

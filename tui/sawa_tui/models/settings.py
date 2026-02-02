@@ -26,9 +26,6 @@ class SettingsManager:
         },
         "theme": {"type": "string", "default": "osaka-jade"},
         "chart_detail": {"type": "string", "default": "normal"},
-        "logo_enabled": {"type": "bool", "default": "true"},
-        "logo_width": {"type": "int", "default": "28", "min": 10, "max": 100},
-        "logo_height": {"type": "int", "default": "10", "min": 5, "max": 50},
     }
 
     @staticmethod

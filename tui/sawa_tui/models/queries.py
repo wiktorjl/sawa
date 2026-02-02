@@ -22,7 +22,6 @@ class Company:
     cik: str | None = None
     homepage_url: str | None = None
     address: str | None = None
-    logo_url: str | None = None
     active: bool = True
 
     @classmethod
@@ -47,7 +46,6 @@ class Company:
             cik=row.get("cik"),
             homepage_url=row.get("homepage_url"),
             address=address if address else None,
-            logo_url=row.get("branding_logo_url"),
             active=row.get("active", True),
         )
 

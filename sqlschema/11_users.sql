@@ -72,10 +72,7 @@ INSERT INTO default_settings (key, value) VALUES
     ('number_format', 'compact'),
     ('fundamentals_timeframe', 'quarterly'),
     ('theme', 'osaka-jade'),
-    ('chart_detail', 'normal'),
-    ('logo_enabled', 'true'),
-    ('logo_width', '28'),
-    ('logo_height', '10')
+    ('chart_detail', 'normal')
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================
