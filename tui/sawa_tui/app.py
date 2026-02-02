@@ -102,6 +102,11 @@ class SP500App:
             self._handle_input_mode(key)
             return
 
+        # Settings editing mode - handle before global keys
+        if self.state.settings_editing or self.state.settings_popup_open:
+            self._handle_settings_key(key)
+            return
+
         # Global keys (work in any view)
         if key == "q":
             self.state.running = False
@@ -279,9 +284,7 @@ class SP500App:
                 self.state.set_message(f"Created user: {value}")
                 self.state.load_users_for_management()
             else:
-                self.state.set_message(
-                    "Failed to create user (name may already exist)", error=True
-                )
+                self.state.set_message("Failed to create user (name may already exist)", error=True)
 
         elif callback == "rename_user":
             from sawa_tui.models.users import UserManager
