@@ -142,3 +142,30 @@ class FixedDelayRateLimiter:
             if elapsed < self.delay_seconds:
                 await asyncio.sleep(self.delay_seconds - elapsed)
             self._last_request = time.monotonic()
+
+
+class SyncRateLimiter:
+    """Synchronous rate limiter for non-async code.
+
+    Uses a simple delay between requests without async.
+
+    Attributes:
+        requests_per_second: Maximum requests per second
+    """
+
+    def __init__(self, requests_per_second: float = 5.0) -> None:
+        """Initialize with rate limit.
+
+        Args:
+            requests_per_second: Maximum requests per second
+        """
+        self.min_interval = 1.0 / requests_per_second
+        self._last_request: float = 0
+
+    def acquire(self) -> None:
+        """Wait until enough time has passed since last request."""
+        now = time.monotonic()
+        elapsed = now - self._last_request
+        if elapsed < self.min_interval:
+            time.sleep(self.min_interval - elapsed)
+        self._last_request = time.monotonic()
