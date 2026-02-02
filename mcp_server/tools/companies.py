@@ -8,6 +8,35 @@ from ..database import execute_query
 logger = logging.getLogger(__name__)
 
 
+# --- Async service-based implementations ---
+
+
+async def search_companies_async(
+    query: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Search companies via service layer (async)."""
+    from ..services import get_stock_service
+
+    service = get_stock_service()
+    return await service.search_companies(query, limit)
+
+
+async def get_company_details_async(ticker: str) -> dict[str, Any] | None:
+    """Get company details via service layer (async)."""
+    from ..services import get_stock_service
+
+    service = get_stock_service()
+    return await service.get_company_info(ticker)
+
+
+# Note: list_companies with sector filter and pagination not available
+# in repository layer, so no async version for that one.
+
+
+# --- Sync SQL-based implementations (original) ---
+
+
 def list_companies(
     limit: int = 100,
     offset: int = 0,

@@ -9,6 +9,46 @@ from ..database import execute_query
 logger = logging.getLogger(__name__)
 
 
+# --- Async service-based implementations ---
+
+
+async def get_stock_prices_async(
+    ticker: str,
+    start_date: str,
+    end_date: str | None = None,
+    limit: int = 252,
+) -> list[dict[str, Any]]:
+    """Get stock prices via service layer (async)."""
+    from ..services import get_stock_service
+
+    service = get_stock_service()
+    return await service.get_prices(ticker, start_date, end_date, limit)
+
+
+async def get_financial_ratios_async(
+    ticker: str,
+    start_date: str,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Get financial ratios via service layer (async)."""
+    from ..services import get_stock_service
+
+    service = get_stock_service()
+    return await service.get_financial_ratios(ticker, start_date, end_date, limit)
+
+
+async def get_latest_price_async(ticker: str) -> dict[str, Any] | None:
+    """Get latest price via service layer (async)."""
+    from ..services import get_stock_service
+
+    service = get_stock_service()
+    return await service.get_latest_price(ticker)
+
+
+# --- Sync SQL-based implementations (original) ---
+
+
 def get_stock_prices(
     ticker: str,
     start_date: str,

@@ -1,0 +1,806 @@
+"""Database repositories - read data from PostgreSQL.
+
+This module provides repository implementations that read data from
+the PostgreSQL database. These are the primary repositories used by
+TUI and MCP server to access already-loaded data.
+
+The database repositories are designed to be efficient for reading
+and don't support writes (data is loaded via the CLI tools).
+
+Usage:
+    from sp500_tools.repositories.database import DatabasePriceRepository
+
+    repo = DatabasePriceRepository(database_url="postgresql://...")
+    prices = await repo.get_prices("AAPL", start_date, end_date)
+"""
+
+import asyncio
+from collections.abc import AsyncIterator
+from datetime import date
+from decimal import Decimal
+from typing import Any, Literal
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from sp500_tools.domain.models import (
+    BalanceSheet,
+    CashFlow,
+    CompanyInfo,
+    FinancialRatio,
+    IncomeStatement,
+    InflationData,
+    LaborMarketData,
+    StockPrice,
+    TreasuryYield,
+)
+from sp500_tools.repositories.base import (
+    CompanyRepository,
+    EconomyRepository,
+    FundamentalRepository,
+    RatiosRepository,
+    StockPriceRepository,
+)
+
+
+def _get_connection(database_url: str) -> psycopg2.extensions.connection:
+    """Get database connection with RealDictCursor.
+
+    Args:
+        database_url: PostgreSQL connection URL
+
+    Returns:
+        psycopg2 connection object
+    """
+    return psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    """Convert value to Decimal, returning None for null values.
+
+    Args:
+        value: Value to convert (can be str, float, int, Decimal, or None)
+
+    Returns:
+        Decimal value or None
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+class DatabasePriceRepository(StockPriceRepository):
+    """Read stock prices from PostgreSQL.
+
+    This repository queries the stock_prices table which contains
+    historical OHLCV data loaded by the coldstart process.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL.
+
+        Args:
+            database_url: PostgreSQL connection URL
+        """
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    @property
+    def supports_historical_bulk(self) -> bool:
+        """Database supports efficient bulk queries."""
+        return True
+
+    async def get_prices(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockPrice]:
+        """Query stock_prices table for a date range.
+
+        Args:
+            ticker: Stock symbol
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            List of StockPrice objects, sorted by date ascending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_prices_sync, ticker, start_date, end_date)
+
+    def _get_prices_sync(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockPrice]:
+        """Synchronous implementation of get_prices."""
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = %s AND date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), start_date, end_date))
+                rows = cur.fetchall()
+
+        return [self._row_to_price(row) for row in rows]
+
+    def _row_to_price(self, row: dict[str, Any]) -> StockPrice:
+        """Convert database row to StockPrice domain model."""
+        return StockPrice(
+            ticker=row["ticker"],
+            date=row["date"],
+            open=Decimal(str(row["open"])),
+            high=Decimal(str(row["high"])),
+            low=Decimal(str(row["low"])),
+            close=Decimal(str(row["close"])),
+            volume=int(row["volume"]),
+        )
+
+    async def get_prices_stream(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+    ) -> AsyncIterator[StockPrice]:
+        """Stream prices for multiple tickers.
+
+        For database, this just yields from get_prices since DB queries
+        are already efficient.
+        """
+        for ticker in tickers:
+            prices = await self.get_prices(ticker, start_date, end_date)
+            for price in prices:
+                yield price
+
+    async def get_latest_price(self, ticker: str) -> StockPrice | None:
+        """Get most recent price from database.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            Most recent StockPrice, or None if not found
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_latest_sync, ticker)
+
+    def _get_latest_sync(self, ticker: str) -> StockPrice | None:
+        """Synchronous implementation of get_latest_price."""
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = %s
+            ORDER BY date DESC
+            LIMIT 1
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(),))
+                row = cur.fetchone()
+
+        return self._row_to_price(row) if row else None
+
+    async def get_prices_for_date(
+        self,
+        tickers: list[str],
+        target_date: date,
+    ) -> list[StockPrice]:
+        """Get prices for multiple tickers on a date.
+
+        Args:
+            tickers: List of stock symbols
+            target_date: The date to fetch prices for
+
+        Returns:
+            List of StockPrice objects
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_for_date_sync, tickers, target_date)
+
+    def _get_for_date_sync(
+        self,
+        tickers: list[str],
+        target_date: date,
+    ) -> list[StockPrice]:
+        """Synchronous implementation of get_prices_for_date."""
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = ANY(%s) AND date = %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, ([t.upper() for t in tickers], target_date))
+                rows = cur.fetchall()
+
+        return [self._row_to_price(row) for row in rows]
+
+
+class DatabaseFundamentalRepository(FundamentalRepository):
+    """Read fundamentals from PostgreSQL.
+
+    This repository queries the income_statements, balance_sheets,
+    and cash_flows tables.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    async def get_income_statements(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int = 4,
+    ) -> list[IncomeStatement]:
+        """Get income statements from database.
+
+        Args:
+            ticker: Stock symbol
+            timeframe: "quarterly" or "annual"
+            limit: Maximum number of periods
+
+        Returns:
+            List of IncomeStatement objects, sorted by period_end descending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_income_sync, ticker, timeframe, limit)
+
+    def _get_income_sync(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int,
+    ) -> list[IncomeStatement]:
+        """Synchronous implementation of get_income_statements."""
+        query = """
+            SELECT *
+            FROM income_statements
+            WHERE ticker = %s AND timeframe = %s
+            ORDER BY period_end DESC
+            LIMIT %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), timeframe, limit))
+                rows = cur.fetchall()
+
+        return [self._row_to_income(row) for row in rows]
+
+    def _row_to_income(self, row: dict[str, Any]) -> IncomeStatement:
+        """Convert database row to IncomeStatement domain model."""
+        return IncomeStatement(
+            ticker=row["ticker"],
+            period_end=row["period_end"],
+            timeframe=row.get("timeframe", "quarterly"),
+            fiscal_year=row.get("fiscal_year") or 2024,
+            fiscal_quarter=row.get("fiscal_quarter"),
+            revenue=_to_decimal(row.get("revenue")),
+            cost_of_revenue=_to_decimal(row.get("cost_of_revenue")),
+            gross_profit=_to_decimal(row.get("gross_profit")),
+            research_development=_to_decimal(row.get("research_development")),
+            selling_general_administrative=_to_decimal(row.get("selling_general_administrative")),
+            operating_income=_to_decimal(row.get("operating_income")),
+            net_income=_to_decimal(row.get("net_income")),
+            basic_eps=_to_decimal(row.get("basic_eps")),
+            diluted_eps=_to_decimal(row.get("diluted_eps")),
+        )
+
+    async def get_balance_sheets(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int = 4,
+    ) -> list[BalanceSheet]:
+        """Get balance sheets from database.
+
+        Args:
+            ticker: Stock symbol
+            timeframe: "quarterly" or "annual"
+            limit: Maximum number of periods
+
+        Returns:
+            List of BalanceSheet objects, sorted by period_end descending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_balance_sync, ticker, timeframe, limit)
+
+    def _get_balance_sync(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int,
+    ) -> list[BalanceSheet]:
+        """Synchronous implementation of get_balance_sheets."""
+        query = """
+            SELECT *
+            FROM balance_sheets
+            WHERE ticker = %s AND timeframe = %s
+            ORDER BY period_end DESC
+            LIMIT %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), timeframe, limit))
+                rows = cur.fetchall()
+
+        return [self._row_to_balance(row) for row in rows]
+
+    def _row_to_balance(self, row: dict[str, Any]) -> BalanceSheet:
+        """Convert database row to BalanceSheet domain model."""
+        return BalanceSheet(
+            ticker=row["ticker"],
+            period_end=row["period_end"],
+            timeframe=row.get("timeframe", "quarterly"),
+            fiscal_year=row.get("fiscal_year"),
+            fiscal_quarter=row.get("fiscal_quarter"),
+            total_assets=_to_decimal(row.get("total_assets")),
+            total_current_assets=_to_decimal(row.get("total_current_assets")),
+            cash_and_equivalents=_to_decimal(row.get("cash_and_equivalents")),
+            total_liabilities=_to_decimal(row.get("total_liabilities")),
+            total_current_liabilities=_to_decimal(row.get("total_current_liabilities")),
+            long_term_debt=_to_decimal(row.get("long_term_debt")),
+            total_equity=_to_decimal(row.get("total_equity")),
+            retained_earnings=_to_decimal(row.get("retained_earnings")),
+        )
+
+    async def get_cash_flows(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int = 4,
+    ) -> list[CashFlow]:
+        """Get cash flow statements from database.
+
+        Args:
+            ticker: Stock symbol
+            timeframe: "quarterly" or "annual"
+            limit: Maximum number of periods
+
+        Returns:
+            List of CashFlow objects, sorted by period_end descending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_cashflow_sync, ticker, timeframe, limit)
+
+    def _get_cashflow_sync(
+        self,
+        ticker: str,
+        timeframe: Literal["quarterly", "annual"],
+        limit: int,
+    ) -> list[CashFlow]:
+        """Synchronous implementation of get_cash_flows."""
+        query = """
+            SELECT *
+            FROM cash_flows
+            WHERE ticker = %s AND timeframe = %s
+            ORDER BY period_end DESC
+            LIMIT %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), timeframe, limit))
+                rows = cur.fetchall()
+
+        return [self._row_to_cashflow(row) for row in rows]
+
+    def _row_to_cashflow(self, row: dict[str, Any]) -> CashFlow:
+        """Convert database row to CashFlow domain model."""
+        return CashFlow(
+            ticker=row["ticker"],
+            period_end=row["period_end"],
+            timeframe=row.get("timeframe", "quarterly"),
+            fiscal_year=row.get("fiscal_year"),
+            fiscal_quarter=row.get("fiscal_quarter"),
+            operating_cash_flow=_to_decimal(row.get("operating_cash_flow")),
+            capital_expenditure=_to_decimal(row.get("capital_expenditure")),
+            dividends_paid=_to_decimal(row.get("dividends_paid")),
+            free_cash_flow=_to_decimal(row.get("free_cash_flow")),
+        )
+
+
+class DatabaseCompanyRepository(CompanyRepository):
+    """Read company info from PostgreSQL.
+
+    This repository queries the companies table which contains
+    company metadata loaded during coldstart.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    async def get_company_info(self, ticker: str) -> CompanyInfo | None:
+        """Get company overview.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            CompanyInfo object, or None if not found
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_company_sync, ticker)
+
+    def _get_company_sync(self, ticker: str) -> CompanyInfo | None:
+        """Synchronous implementation of get_company_info."""
+        query = "SELECT * FROM companies WHERE ticker = %s"
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(),))
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return CompanyInfo(
+            ticker=row["ticker"],
+            name=row["name"],
+            description=row.get("description"),
+            sector=row.get("sector"),
+            industry=row.get("industry"),
+            market_cap=_to_decimal(row.get("market_cap")),
+            employees=row.get("employees"),
+            website=row.get("website"),
+            ceo=row.get("ceo"),
+            headquarters=row.get("headquarters"),
+        )
+
+    async def search_companies(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> list[CompanyInfo]:
+        """Search companies by name or ticker.
+
+        Args:
+            query: Search query (matches ticker or name)
+            limit: Maximum number of results
+
+        Returns:
+            List of matching CompanyInfo objects
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._search_sync, query, limit)
+
+    def _search_sync(self, query: str, limit: int) -> list[CompanyInfo]:
+        """Synchronous implementation of search_companies."""
+        sql = """
+            SELECT * FROM companies
+            WHERE ticker ILIKE %s OR name ILIKE %s
+            ORDER BY ticker
+            LIMIT %s
+        """
+        pattern = f"%{query}%"
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (pattern, pattern, limit))
+                rows = cur.fetchall()
+
+        return [
+            CompanyInfo(
+                ticker=r["ticker"],
+                name=r["name"],
+                description=r.get("description"),
+                sector=r.get("sector"),
+                industry=r.get("industry"),
+                market_cap=_to_decimal(r.get("market_cap")),
+                employees=r.get("employees"),
+                website=r.get("website"),
+            )
+            for r in rows
+        ]
+
+
+class DatabaseRatiosRepository(RatiosRepository):
+    """Read financial ratios from PostgreSQL.
+
+    This repository queries the financial_ratios table.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    async def get_ratios(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[FinancialRatio]:
+        """Get financial ratios for a ticker.
+
+        Args:
+            ticker: Stock symbol
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            List of FinancialRatio objects, sorted by date ascending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_ratios_sync, ticker, start_date, end_date)
+
+    def _get_ratios_sync(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[FinancialRatio]:
+        """Synchronous implementation of get_ratios."""
+        query = """
+            SELECT *
+            FROM financial_ratios
+            WHERE ticker = %s AND date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(), start_date, end_date))
+                rows = cur.fetchall()
+
+        return [self._row_to_ratio(row) for row in rows]
+
+    def _row_to_ratio(self, row: dict[str, Any]) -> FinancialRatio:
+        """Convert database row to FinancialRatio domain model."""
+        return FinancialRatio(
+            ticker=row["ticker"],
+            date=row["date"],
+            pe_ratio=_to_decimal(row.get("pe_ratio")),
+            pb_ratio=_to_decimal(row.get("pb_ratio")),
+            ps_ratio=_to_decimal(row.get("ps_ratio")),
+            peg_ratio=_to_decimal(row.get("peg_ratio")),
+            roe=_to_decimal(row.get("roe")),
+            roa=_to_decimal(row.get("roa")),
+            profit_margin=_to_decimal(row.get("profit_margin")),
+            operating_margin=_to_decimal(row.get("operating_margin")),
+            current_ratio=_to_decimal(row.get("current_ratio")),
+            quick_ratio=_to_decimal(row.get("quick_ratio")),
+            debt_to_equity=_to_decimal(row.get("debt_to_equity")),
+            debt_to_assets=_to_decimal(row.get("debt_to_assets")),
+            asset_turnover=_to_decimal(row.get("asset_turnover")),
+            inventory_turnover=_to_decimal(row.get("inventory_turnover")),
+        )
+
+    async def get_latest_ratios(self, ticker: str) -> FinancialRatio | None:
+        """Get most recent ratios for a ticker.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            Most recent FinancialRatio, or None if not found
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_latest_sync, ticker)
+
+    def _get_latest_sync(self, ticker: str) -> FinancialRatio | None:
+        """Synchronous implementation of get_latest_ratios."""
+        query = """
+            SELECT *
+            FROM financial_ratios
+            WHERE ticker = %s
+            ORDER BY date DESC
+            LIMIT 1
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (ticker.upper(),))
+                row = cur.fetchone()
+
+        return self._row_to_ratio(row) if row else None
+
+
+class DatabaseEconomyRepository(EconomyRepository):
+    """Read economy data from PostgreSQL.
+
+    This repository queries the treasury_yields, inflation,
+    and labor_market tables.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    async def get_treasury_yields(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[TreasuryYield]:
+        """Get treasury yield data.
+
+        Args:
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            List of TreasuryYield objects, sorted by date ascending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_yields_sync, start_date, end_date)
+
+    def _get_yields_sync(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[TreasuryYield]:
+        """Synchronous implementation of get_treasury_yields."""
+        query = """
+            SELECT *
+            FROM treasury_yields
+            WHERE date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (start_date, end_date))
+                rows = cur.fetchall()
+
+        return [self._row_to_yield(row) for row in rows]
+
+    def _row_to_yield(self, row: dict[str, Any]) -> TreasuryYield:
+        """Convert database row to TreasuryYield domain model."""
+        return TreasuryYield(
+            date=row["date"],
+            yield_1mo=_to_decimal(row.get("yield_1mo")),
+            yield_3mo=_to_decimal(row.get("yield_3mo")),
+            yield_6mo=_to_decimal(row.get("yield_6mo")),
+            yield_1yr=_to_decimal(row.get("yield_1yr")),
+            yield_2yr=_to_decimal(row.get("yield_2yr")),
+            yield_5yr=_to_decimal(row.get("yield_5yr")),
+            yield_10yr=_to_decimal(row.get("yield_10yr")),
+            yield_30yr=_to_decimal(row.get("yield_30yr")),
+        )
+
+    async def get_inflation(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None = None,
+    ) -> list[InflationData]:
+        """Get inflation data.
+
+        Args:
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+            indicator: Optional filter for specific indicator
+
+        Returns:
+            List of InflationData objects, sorted by date ascending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_inflation_sync, start_date, end_date, indicator
+        )
+
+    def _get_inflation_sync(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None,
+    ) -> list[InflationData]:
+        """Synchronous implementation of get_inflation."""
+        if indicator:
+            query = """
+                SELECT *
+                FROM inflation
+                WHERE date BETWEEN %s AND %s AND indicator = %s
+                ORDER BY date
+            """
+            params = (start_date, end_date, indicator)
+        else:
+            query = """
+                SELECT *
+                FROM inflation
+                WHERE date BETWEEN %s AND %s
+                ORDER BY date, indicator
+            """
+            params = (start_date, end_date)
+
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_inflation(row) for row in rows]
+
+    def _row_to_inflation(self, row: dict[str, Any]) -> InflationData:
+        """Convert database row to InflationData domain model."""
+        return InflationData(
+            date=row["date"],
+            indicator=row["indicator"],
+            value=Decimal(str(row["value"])),
+            change_yoy=_to_decimal(row.get("change_yoy")),
+        )
+
+    async def get_labor_market(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None = None,
+    ) -> list[LaborMarketData]:
+        """Get labor market data.
+
+        Args:
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+            indicator: Optional filter for specific indicator
+
+        Returns:
+            List of LaborMarketData objects, sorted by date ascending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_labor_sync, start_date, end_date, indicator
+        )
+
+    def _get_labor_sync(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None,
+    ) -> list[LaborMarketData]:
+        """Synchronous implementation of get_labor_market."""
+        if indicator:
+            query = """
+                SELECT *
+                FROM labor_market
+                WHERE date BETWEEN %s AND %s AND indicator = %s
+                ORDER BY date
+            """
+            params = (start_date, end_date, indicator)
+        else:
+            query = """
+                SELECT *
+                FROM labor_market
+                WHERE date BETWEEN %s AND %s
+                ORDER BY date, indicator
+            """
+            params = (start_date, end_date)
+
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_labor(row) for row in rows]
+
+    def _row_to_labor(self, row: dict[str, Any]) -> LaborMarketData:
+        """Convert database row to LaborMarketData domain model."""
+        return LaborMarketData(
+            date=row["date"],
+            indicator=row["indicator"],
+            value=Decimal(str(row["value"])),
+        )

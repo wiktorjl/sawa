@@ -8,6 +8,27 @@ from ..database import execute_query
 logger = logging.getLogger(__name__)
 
 
+# --- Async service-based implementations ---
+
+
+async def get_fundamentals_async(
+    ticker: str,
+    timeframe: str = "quarterly",
+    limit: int = 4,
+) -> dict[str, Any]:
+    """Get fundamentals via service layer (async)."""
+    from ..services import get_stock_service
+
+    if timeframe not in ("quarterly", "annual"):
+        raise ValueError("timeframe must be 'quarterly' or 'annual'")
+
+    service = get_stock_service()
+    return await service.get_fundamentals(ticker, timeframe, min(limit, 20))
+
+
+# --- Sync SQL-based implementations (original) ---
+
+
 def get_fundamentals(
     ticker: str,
     timeframe: str = "quarterly",

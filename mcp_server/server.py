@@ -28,10 +28,22 @@ from .charts.renderers import (
 )
 from .charts.themes import get_theme
 from .database import execute_query
-from .tools.companies import get_company_details, list_companies, search_companies
-from .tools.economy import get_economy_dashboard, get_economy_data
-from .tools.fundamentals import get_fundamentals
-from .tools.market_data import get_financial_ratios, get_stock_prices
+from .services import use_service_layer
+from .tools.companies import (
+    get_company_details,
+    get_company_details_async,
+    list_companies,
+    search_companies,
+    search_companies_async,
+)
+from .tools.economy import get_economy_dashboard, get_economy_data, get_economy_data_async
+from .tools.fundamentals import get_fundamentals, get_fundamentals_async
+from .tools.market_data import (
+    get_financial_ratios,
+    get_financial_ratios_async,
+    get_stock_prices,
+    get_stock_prices_async,
+)
 
 # Setup logging
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
@@ -319,57 +331,102 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         chart = None
         result = None
 
+        # Check if we should use the service layer
+        use_services = use_service_layer()
+
         if name == "list_companies":
+            # list_companies not available in service layer (no async version)
             result = list_companies(
                 limit=arguments.get("limit", 100),
                 offset=arguments.get("offset", 0),
                 sector=arguments.get("sector"),
             )
         elif name == "get_company_details":
-            result = get_company_details(arguments["ticker"])
+            if use_services:
+                result = await get_company_details_async(arguments["ticker"])
+            else:
+                result = get_company_details(arguments["ticker"])
             if result is None:
                 return [TextContent(type="text", text=f"Company {arguments['ticker']} not found")]
         elif name == "search_companies":
-            result = search_companies(
-                query=arguments["query"],
-                limit=arguments.get("limit", 20),
-            )
+            if use_services:
+                result = await search_companies_async(
+                    query=arguments["query"],
+                    limit=arguments.get("limit", 20),
+                )
+            else:
+                result = search_companies(
+                    query=arguments["query"],
+                    limit=arguments.get("limit", 20),
+                )
         elif name == "get_stock_prices":
-            result = get_stock_prices(
-                ticker=arguments["ticker"],
-                start_date=arguments["start_date"],
-                end_date=arguments.get("end_date"),
-                limit=arguments.get("limit", 252),
-            )
+            if use_services:
+                result = await get_stock_prices_async(
+                    ticker=arguments["ticker"],
+                    start_date=arguments["start_date"],
+                    end_date=arguments.get("end_date"),
+                    limit=arguments.get("limit", 252),
+                )
+            else:
+                result = get_stock_prices(
+                    ticker=arguments["ticker"],
+                    start_date=arguments["start_date"],
+                    end_date=arguments.get("end_date"),
+                    limit=arguments.get("limit", 252),
+                )
             # Render price chart
             chart = render_price_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_financial_ratios":
-            result = get_financial_ratios(
-                ticker=arguments["ticker"],
-                start_date=arguments["start_date"],
-                end_date=arguments.get("end_date"),
-                limit=arguments.get("limit", 100),
-            )
+            if use_services:
+                result = await get_financial_ratios_async(
+                    ticker=arguments["ticker"],
+                    start_date=arguments["start_date"],
+                    end_date=arguments.get("end_date"),
+                    limit=arguments.get("limit", 100),
+                )
+            else:
+                result = get_financial_ratios(
+                    ticker=arguments["ticker"],
+                    start_date=arguments["start_date"],
+                    end_date=arguments.get("end_date"),
+                    limit=arguments.get("limit", 100),
+                )
             # Render ratios chart
             chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_fundamentals":
-            result = get_fundamentals(
-                ticker=arguments["ticker"],
-                timeframe=arguments.get("timeframe", "quarterly"),
-                limit=arguments.get("limit", 4),
-            )
+            if use_services:
+                result = await get_fundamentals_async(
+                    ticker=arguments["ticker"],
+                    timeframe=arguments.get("timeframe", "quarterly"),
+                    limit=arguments.get("limit", 4),
+                )
+            else:
+                result = get_fundamentals(
+                    ticker=arguments["ticker"],
+                    timeframe=arguments.get("timeframe", "quarterly"),
+                    limit=arguments.get("limit", 4),
+                )
             # Render fundamentals chart
             chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_economy_data":
-            result = get_economy_data(
-                indicator_type=arguments["indicator_type"],
-                start_date=arguments["start_date"],
-                end_date=arguments.get("end_date"),
-                limit=arguments.get("limit", 100),
-            )
+            if use_services:
+                result = await get_economy_data_async(
+                    indicator_type=arguments["indicator_type"],
+                    start_date=arguments["start_date"],
+                    end_date=arguments.get("end_date"),
+                    limit=arguments.get("limit", 100),
+                )
+            else:
+                result = get_economy_data(
+                    indicator_type=arguments["indicator_type"],
+                    start_date=arguments["start_date"],
+                    end_date=arguments.get("end_date"),
+                    limit=arguments.get("limit", 100),
+                )
             # Render economy chart
             chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
         elif name == "get_economy_dashboard":
+            # get_economy_dashboard not available in service layer (no async version)
             result = get_economy_dashboard(limit=arguments.get("limit", 10))
             # Render economy dashboard
             chart = render_economy_dashboard(result, layout, theme)
