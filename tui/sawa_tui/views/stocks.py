@@ -161,7 +161,15 @@ def render_stock_detail_view(state: AppState) -> Layout:
     """Render the stock detail view."""
     layout = Layout()
 
-    if state.detail_show_news:
+    # Determine bottom panel: overview takes precedence over news
+    if state.detail_overview_visible:
+        # Layout with AI overview pane at bottom
+        layout.split_column(
+            Layout(name="header", size=6),
+            Layout(name="body"),
+            Layout(name="overview", size=18),
+        )
+    elif state.detail_show_news:
         # Layout with news pane at bottom
         layout.split_column(
             Layout(name="header", size=6),
@@ -169,7 +177,7 @@ def render_stock_detail_view(state: AppState) -> Layout:
             Layout(name="news", size=12),
         )
     else:
-        # Layout without news pane
+        # Layout without bottom pane
         layout.split_column(
             Layout(name="header", size=6),
             Layout(name="body"),
@@ -194,8 +202,12 @@ def render_stock_detail_view(state: AppState) -> Layout:
     layout["body"]["sidebar"]["info"].update(_render_company_info(state))
     layout["body"]["sidebar"]["ratios"].update(_render_ratios(state))
 
-    # News pane (if visible)
-    if state.detail_show_news:
+    # Bottom panel (if visible)
+    if state.detail_overview_visible:
+        from sawa_tui.views.overview import render_overview_panel
+
+        layout["overview"].update(render_overview_panel(state))
+    elif state.detail_show_news:
         layout["news"].update(_render_news_pane(state))
 
     return layout
