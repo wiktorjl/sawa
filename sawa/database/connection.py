@@ -3,7 +3,7 @@
 import os
 from typing import Any
 
-import psycopg2
+import psycopg
 
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 5432
@@ -41,12 +41,12 @@ def get_connection_params(
     params = {
         "host": host or os.environ.get(ENV_HOST, DEFAULT_HOST),
         "port": port or int(os.environ.get(ENV_PORT, str(DEFAULT_PORT))),
-        "database": database or os.environ.get(ENV_DATABASE),
+        "dbname": database or os.environ.get(ENV_DATABASE),
         "user": user or os.environ.get(ENV_USER),
         "password": password or os.environ.get(ENV_PASSWORD),
     }
 
-    if not params["database"]:
+    if not params["dbname"]:
         raise ValueError(f"Database required. Set {ENV_DATABASE} or use --database")
     if not params["user"]:
         raise ValueError(f"User required. Set {ENV_USER} or use --user")
@@ -56,7 +56,7 @@ def get_connection_params(
     return params
 
 
-def get_connection(conn_params: dict[str, Any]) -> psycopg2.extensions.connection:
+def get_connection(conn_params: dict[str, Any]) -> psycopg.Connection[tuple[Any, ...]]:
     """
     Create database connection.
 
@@ -66,4 +66,4 @@ def get_connection(conn_params: dict[str, Any]) -> psycopg2.extensions.connectio
     Returns:
         Database connection
     """
-    return psycopg2.connect(**conn_params)
+    return psycopg.connect(**conn_params)

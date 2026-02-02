@@ -3,7 +3,7 @@ Load CSV files into PostgreSQL database.
 
 Refactored from: load_csv_to_postgres.py
 
-Security: Uses psycopg2.sql for safe identifier handling.
+Security: Uses psycopg.sql for safe identifier handling.
 
 Usage:
     python -m sawa.database.loader --csv data.csv --table companies
@@ -15,9 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import execute_values
+import psycopg
+from psycopg import sql
 
 from sawa.utils import setup_logging
 from sawa.utils.cli import add_common_args, create_parser
@@ -131,13 +130,14 @@ def insert_data_batch(
     """
     Insert data with safe SQL construction.
 
-    Uses psycopg2.sql to prevent SQL injection.
+    Uses psycopg.sql to prevent SQL injection.
     """
     inserted = 0
     pk_columns = get_table_primary_key(conn, table_name) if upsert else None
 
-    # Build safe SQL using psycopg2.sql module
+    # Build safe SQL using psycopg.sql module
     columns_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
+    placeholders = sql.SQL(", ").join([sql.Placeholder()] * len(columns))
 
     if upsert and pk_columns:
         pk_sql = sql.SQL(", ").join(map(sql.Identifier, pk_columns))
@@ -146,33 +146,32 @@ def insert_data_batch(
         if update_cols:
             set_sql = sql.SQL(", ").join(
                 [
-                    sql.SQL("{} = EXCLUDED.{}").format(
-                        sql.Identifier(c), sql.Identifier(c)
-                    )
+                    sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
                     for c in update_cols
                 ]
             )
             query = sql.SQL(
-                "INSERT INTO {} ({}) VALUES %s ON CONFLICT ({}) DO UPDATE SET {}"
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
             ).format(
                 sql.Identifier(table_name),
                 columns_sql,
+                placeholders,
                 pk_sql,
                 set_sql,
             )
         else:
-            query = sql.SQL(
-                "INSERT INTO {} ({}) VALUES %s ON CONFLICT ({}) DO NOTHING"
-            ).format(
+            query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING").format(
                 sql.Identifier(table_name),
                 columns_sql,
+                placeholders,
                 pk_sql,
             )
         logger.info(f"Using UPSERT on: {pk_columns}")
     else:
-        query = sql.SQL("INSERT INTO {} ({}) VALUES %s").format(
+        query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
             sql.Identifier(table_name),
             columns_sql,
+            placeholders,
         )
 
     logger.info(f"Inserting into {table_name} (batch size: {batch_size})")
@@ -186,14 +185,14 @@ def insert_data_batch(
             batch = data[start:end]
 
             try:
-                execute_values(cur, query, batch)
+                cur.executemany(query, batch)
                 conn.commit()
                 inserted += len(batch)
 
                 if (batch_num + 1) % 10 == 0 or batch_num == total_batches - 1:
                     logger.info(f"Progress: {end}/{len(data)} rows")
 
-            except psycopg2.Error as e:
+            except psycopg.Error as e:
                 conn.rollback()
                 logger.error(f"Batch {batch_num + 1} failed: {e}")
                 raise
@@ -219,9 +218,7 @@ Environment: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
     parser.add_argument("--table", help="Target table name")
     parser.add_argument("--columns", help="Comma-separated column names")
     parser.add_argument("--mapping", type=Path, help="JSON mapping file")
-    parser.add_argument(
-        "--tables", help="Tables to load from mapping (comma-separated)"
-    )
+    parser.add_argument("--tables", help="Tables to load from mapping (comma-separated)")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--database")
@@ -255,7 +252,7 @@ Environment: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
         )
         conn = get_connection(conn_params)
         logger.info(
-            f"Connected to {conn_params['host']}:{conn_params['port']}/{conn_params['database']}"
+            f"Connected to {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}"
         )
 
         # Build load configs

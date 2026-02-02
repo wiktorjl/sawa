@@ -14,8 +14,9 @@ Usage:
     print(config.default_price_provider)
 """
 
-import os
 from dataclasses import dataclass
+
+from sawa.utils.config import get_database_url, get_env
 
 
 @dataclass
@@ -65,58 +66,6 @@ class RepositoryConfig:
     # Rate limits (for API providers)
     polygon_rate_limit: float = 5.0
     massive_rate_limit: float = 2.0
-
-
-def get_env(
-    key: str,
-    default: str | None = None,
-    required: bool = False,
-) -> str | None:
-    """Get environment variable with optional validation.
-
-    Args:
-        key: Environment variable name
-        default: Default value if not set
-        required: If True, raise ValueError if not set and no default
-
-    Returns:
-        Environment variable value, or default
-
-    Raises:
-        ValueError: If required=True and variable is not set
-    """
-    value = os.environ.get(key)
-    if value is None:
-        if required and default is None:
-            raise ValueError(f"Required environment variable {key} is not set")
-        return default
-    return value
-
-
-def get_database_url() -> str | None:
-    """Get database URL from environment.
-
-    Tries DATABASE_URL first, then constructs from individual PG* variables.
-
-    Returns:
-        Database URL, or None if not configured
-    """
-    # Try DATABASE_URL first
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
-
-    # Try to construct from individual variables
-    host = os.environ.get("PGHOST")
-    port = os.environ.get("PGPORT", "5432")
-    database = os.environ.get("PGDATABASE")
-    user = os.environ.get("PGUSER")
-    password = os.environ.get("PGPASSWORD")
-
-    if all([host, database, user, password]):
-        return f"postgresql://{user}:{password}@{host}:{port}/{database}"
-
-    return None
 
 
 def get_config() -> RepositoryConfig:
