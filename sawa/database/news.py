@@ -110,7 +110,7 @@ def fetch_and_load_news(
     ticker: str | None = None,
     days: int = 30,
     limit: int = 1000,
-    logger: logging.Logger = logger,
+    log: logging.Logger | None = None,
 ) -> int:
     """
     Fetch news from API and load into database.
@@ -121,18 +121,19 @@ def fetch_and_load_news(
         ticker: Optional ticker to filter by
         days: Number of days of history to fetch
         limit: Max articles per request
-        logger: Logger instance
+        log: Logger instance
 
     Returns:
         Number of articles loaded
     """
+    log = log or logger
     # Calculate date range
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
 
-    logger.info(f"Fetching news from {start_date.date()} to {end_date.date()}")
+    log.info(f"Fetching news from {start_date.date()} to {end_date.date()}")
     if ticker:
-        logger.info(f"Filtering by ticker: {ticker}")
+        log.info(f"Filtering by ticker: {ticker}")
 
     # Fetch articles
     articles = client.get_news(
@@ -142,7 +143,7 @@ def fetch_and_load_news(
         limit=limit,
     )
 
-    logger.info(f"Fetched {len(articles)} articles")
+    log.info(f"Fetched {len(articles)} articles")
 
     # Load each article
     loaded = 0
@@ -151,12 +152,12 @@ def fetch_and_load_news(
             load_news_article(conn, article)
             loaded += 1
         except psycopg.Error as e:
-            logger.warning(f"Failed to load article {article.get('id')}: {e}")
+            log.warning(f"Failed to load article {article.get('id')}: {e}")
             conn.rollback()
             continue
 
     conn.commit()
-    logger.info(f"Loaded {loaded} articles")
+    log.info(f"Loaded {loaded} articles")
     return loaded
 
 
@@ -166,7 +167,7 @@ def fetch_news_for_symbols(
     symbols: list[str],
     days: int = 30,
     limit_per_symbol: int = 100,
-    logger: logging.Logger = logger,
+    log: logging.Logger | None = None,
 ) -> int:
     """
     Fetch news for multiple symbols.
@@ -177,14 +178,15 @@ def fetch_news_for_symbols(
         symbols: List of ticker symbols
         days: Number of days of history
         limit_per_symbol: Max articles per symbol
-        logger: Logger instance
+        log: Logger instance
 
     Returns:
         Total number of articles loaded
     """
+    log = log or logger
     total = 0
     for i, symbol in enumerate(symbols, 1):
-        logger.info(f"[{i}/{len(symbols)}] Fetching news for {symbol}")
+        log.info(f"[{i}/{len(symbols)}] Fetching news for {symbol}")
         try:
             count = fetch_and_load_news(
                 conn,
@@ -192,11 +194,11 @@ def fetch_news_for_symbols(
                 ticker=symbol,
                 days=days,
                 limit=limit_per_symbol,
-                logger=logger,
+                log=log,
             )
             total += count
         except Exception as e:
-            logger.error(f"Failed to fetch news for {symbol}: {e}")
+            log.error(f"Failed to fetch news for {symbol}: {e}")
             continue
 
     return total
@@ -274,11 +276,11 @@ Environment: POLYGON_API_KEY, PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
         # Fetch and load news
         if symbols:
             total = fetch_news_for_symbols(
-                conn, client, symbols, days=args.days, limit_per_symbol=args.limit, logger=log
+                conn, client, symbols, days=args.days, limit_per_symbol=args.limit, log=log
             )
         else:
             total = fetch_and_load_news(
-                conn, client, days=args.days, limit=args.limit * 10, logger=log
+                conn, client, days=args.days, limit=args.limit * 10, log=log
             )
 
         conn.close()

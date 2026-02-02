@@ -19,13 +19,15 @@ from sawa.utils.constants import (
     DEFAULT_NEWS_LIMIT_PER_SYMBOL,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def load_csv_to_table(
     conn,
     csv_path: Path,
     table_name: str,
     column_mapping: dict[str, str],
-    logger: logging.Logger,
+    log: logging.Logger | None = None,
     upsert: bool = True,
 ) -> int:
     """
@@ -42,8 +44,9 @@ def load_csv_to_table(
     Returns:
         Number of rows loaded
     """
+    log = log or logger
     if not csv_path.exists():
-        logger.warning(f"CSV not found: {csv_path}")
+        log.warning(f"CSV not found: {csv_path}")
         return 0
 
     # Read CSV data
@@ -66,11 +69,11 @@ def load_csv_to_table(
             rows.append(mapped_row)
 
     if not rows:
-        logger.warning(f"No data in {csv_path}")
+        log.warning(f"No data in {csv_path}")
         return 0
 
     db_columns = list(column_mapping.values())
-    return _insert_rows(conn, table_name, db_columns, rows, upsert, logger)
+    return _insert_rows(conn, table_name, db_columns, rows, upsert, log)
 
 
 def _insert_rows(
@@ -79,9 +82,10 @@ def _insert_rows(
     columns: list[str],
     rows: list[dict[str, Any]],
     upsert: bool,
-    logger: logging.Logger,
+    log: logging.Logger | None = None,
 ) -> int:
     """Insert rows into table with optional upsert."""
+    log = log or logger
     if not rows:
         return 0
 
@@ -129,18 +133,18 @@ def _insert_rows(
                     conn.rollback()  # Rollback to recover from error
                     errors += 1
                     if errors <= 3:
-                        logger.warning(f"  Insert failed: {e}")
+                        log.warning(f"  Insert failed: {e}")
                     elif errors == 4:
-                        logger.warning("  (suppressing further errors...)")
+                        log.warning("  (suppressing further errors...)")
             conn.commit()
 
             if (i + batch_size) % 5000 == 0:
-                logger.info(f"  Progress: {min(i + batch_size, len(rows))}/{len(rows)}")
+                log.info(f"  Progress: {min(i + batch_size, len(rows))}/{len(rows)}")
 
     if errors > 0:
-        logger.warning(f"  {errors} rows failed to insert (check FK constraints)")
+        log.warning(f"  {errors} rows failed to insert (check FK constraints)")
 
-    logger.info(f"  Loaded {inserted} rows into {table_name}")
+    log.info(f"  Loaded {inserted} rows into {table_name}")
     return inserted
 
 
@@ -251,87 +255,94 @@ def _find_file(directory: Path, name: str) -> Path | None:
     return None
 
 
-def load_companies(conn, csv_path: Path, logger: logging.Logger) -> int:
+def load_companies(conn, csv_path: Path, log: logging.Logger | None = None) -> int:
     """Load company overviews into companies table."""
-    logger.info("Loading companies...")
+    log = log or logger
+    log.info("Loading companies...")
 
     # Try to find the file if exact path doesn't exist
     if not csv_path.exists():
         found = _find_file(csv_path.parent, csv_path.name)
         if found:
             csv_path = found
-            logger.info(f"  Found: {csv_path}")
+            log.info(f"  Found: {csv_path}")
 
-    return load_csv_to_table(conn, csv_path, "companies", COMPANY_COLUMNS, logger)
+    return load_csv_to_table(conn, csv_path, "companies", COMPANY_COLUMNS, log)
 
 
-def load_prices(conn, prices_dir: Path, logger: logging.Logger) -> int:
+def load_prices(conn, prices_dir: Path, log: logging.Logger | None = None) -> int:
     """Load stock prices from per-symbol CSV files."""
-    logger.info("Loading stock prices...")
+    log = log or logger
+    log.info("Loading stock prices...")
 
     if not prices_dir.exists():
-        logger.warning(f"Prices directory not found: {prices_dir}")
+        log.warning(f"Prices directory not found: {prices_dir}")
         return 0
 
     csv_files = list(prices_dir.glob("*.csv"))
     if not csv_files:
-        logger.warning("No price CSV files found")
+        log.warning("No price CSV files found")
         return 0
 
     total = 0
     for i, csv_file in enumerate(csv_files, 1):
-        count = load_csv_to_table(
-            conn, csv_file, "stock_prices", PRICE_COLUMNS, logger, upsert=True
-        )
+        count = load_csv_to_table(conn, csv_file, "stock_prices", PRICE_COLUMNS, log, upsert=True)
         total += count
         if i % 50 == 0:
-            logger.info(f"  Processed {i}/{len(csv_files)} symbol files")
+            log.info(f"  Processed {i}/{len(csv_files)} symbol files")
 
-    logger.info(f"  Total price records: {total}")
+    log.info(f"  Total price records: {total}")
     return total
 
 
-def load_ratios(conn, csv_path: Path, logger: logging.Logger) -> int:
+def load_ratios(conn, csv_path: Path, log: logging.Logger | None = None) -> int:
     """Load financial ratios."""
-    logger.info("Loading financial ratios...")
+    log = log or logger
+    log.info("Loading financial ratios...")
 
     # Try to find the file if exact path doesn't exist
     if not csv_path.exists():
         found = _find_file(csv_path.parent, csv_path.name)
         if found:
             csv_path = found
-            logger.info(f"  Found: {csv_path}")
+            log.info(f"  Found: {csv_path}")
 
-    return load_csv_to_table(conn, csv_path, "financial_ratios", RATIO_COLUMNS, logger)
+    return load_csv_to_table(conn, csv_path, "financial_ratios", RATIO_COLUMNS, log)
 
 
-def load_fundamentals(conn, fundamentals_dir: Path, logger: logging.Logger) -> dict[str, int]:
+def load_fundamentals(
+    conn, fundamentals_dir: Path, log: logging.Logger | None = None
+) -> dict[str, int]:
     """Load fundamentals (balance sheets, income statements, cash flows)."""
-    logger.info("Loading fundamentals...")
+    log = log or logger
+    log.info("Loading fundamentals...")
     stats: dict[str, int] = {}
 
     # Balance sheets
     bs_path = fundamentals_dir / "balance_sheets.csv"
     if bs_path.exists():
-        stats["balance_sheets"] = _load_fundamentals_file(conn, bs_path, "balance_sheets", logger)
+        stats["balance_sheets"] = _load_fundamentals_file(conn, bs_path, "balance_sheets", log)
 
     # Income statements
     is_path = fundamentals_dir / "income_statements.csv"
     if is_path.exists():
         stats["income_statements"] = _load_fundamentals_file(
-            conn, is_path, "income_statements", logger
+            conn, is_path, "income_statements", log
         )
 
     # Cash flows
     cf_path = fundamentals_dir / "cash_flow.csv"
     if cf_path.exists():
-        stats["cash_flows"] = _load_fundamentals_file(conn, cf_path, "cash_flows", logger)
+        stats["cash_flows"] = _load_fundamentals_file(conn, cf_path, "cash_flows", log)
 
     return stats
 
 
-def _load_fundamentals_file(conn, csv_path: Path, table_name: str, logger: logging.Logger) -> int:
+def _load_fundamentals_file(
+    conn, csv_path: Path, table_name: str, log: logging.Logger | None = None
+) -> int:
     """Load a fundamentals CSV file, auto-mapping columns."""
+    log = log or logger
     if not csv_path.exists():
         return 0
 
@@ -361,13 +372,14 @@ def _load_fundamentals_file(conn, csv_path: Path, table_name: str, logger: loggi
         elif csv_col == "tickers":
             column_mapping[csv_col] = "ticker"
 
-    logger.info(f"  Loading {table_name} ({len(column_mapping)} columns mapped)...")
-    return load_csv_to_table(conn, csv_path, table_name, column_mapping, logger)
+    log.info(f"  Loading {table_name} ({len(column_mapping)} columns mapped)...")
+    return load_csv_to_table(conn, csv_path, table_name, column_mapping, log)
 
 
-def load_economy(conn, economy_dir: Path, logger: logging.Logger) -> dict[str, int]:
+def load_economy(conn, economy_dir: Path, log: logging.Logger | None = None) -> dict[str, int]:
     """Load economy data tables."""
-    logger.info("Loading economy data...")
+    log = log or logger
+    log.info("Loading economy data...")
     stats: dict[str, int] = {}
 
     tables = {
@@ -384,20 +396,23 @@ def load_economy(conn, economy_dir: Path, logger: logging.Logger) -> dict[str, i
             found = _find_file(economy_dir, filename)
             if found:
                 csv_path = found
-                logger.info(f"  Found: {csv_path.name}")
+                log.info(f"  Found: {csv_path.name}")
 
         if csv_path.exists():
-            count = _load_economy_file(conn, csv_path, table_name, logger)
+            count = _load_economy_file(conn, csv_path, table_name, log)
             stats[table_name] = count
         else:
-            logger.debug(f"  {filename} not found")
+            log.debug(f"  {filename} not found")
             stats[table_name] = 0
 
     return stats
 
 
-def _load_economy_file(conn, csv_path: Path, table_name: str, logger: logging.Logger) -> int:
+def _load_economy_file(
+    conn, csv_path: Path, table_name: str, log: logging.Logger | None = None
+) -> int:
     """Load an economy CSV file, auto-mapping columns."""
+    log = log or logger
     if not csv_path.exists():
         return 0
 
@@ -424,8 +439,8 @@ def _load_economy_file(conn, csv_path: Path, table_name: str, logger: logging.Lo
         if normalized in db_columns:
             column_mapping[csv_col] = normalized
 
-    logger.info(f"  Loading {table_name}...")
-    return load_csv_to_table(conn, csv_path, table_name, column_mapping, logger)
+    log.info(f"  Loading {table_name}...")
+    return load_csv_to_table(conn, csv_path, table_name, column_mapping, log)
 
 
 def load_news(
@@ -434,7 +449,7 @@ def load_news(
     symbols: list[str],
     days: int = DEFAULT_NEWS_DAYS,
     limit_per_symbol: int = DEFAULT_NEWS_LIMIT_PER_SYMBOL,
-    logger: logging.Logger | None = None,
+    log: logging.Logger | None = None,
 ) -> int:
     """
     Load news articles for symbols directly from API into database.
@@ -445,15 +460,15 @@ def load_news(
         symbols: List of ticker symbols
         days: Days of news history to fetch
         limit_per_symbol: Max articles per symbol
-        logger: Logger instance
+        log: Logger instance
 
     Returns:
         Total number of articles loaded
     """
     from sawa.database.news import fetch_news_for_symbols
 
-    logger = logger or logging.getLogger(__name__)
-    logger.info(f"Loading news for {len(symbols)} symbols (last {days} days)...")
+    log = log or logger
+    log.info(f"Loading news for {len(symbols)} symbols (last {days} days)...")
 
     total = fetch_news_for_symbols(
         conn,
@@ -461,8 +476,8 @@ def load_news(
         symbols,
         days=days,
         limit_per_symbol=limit_per_symbol,
-        logger=logger,
+        log=log,
     )
 
-    logger.info(f"  Total news articles loaded: {total}")
+    log.info(f"  Total news articles loaded: {total}")
     return total
