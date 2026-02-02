@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 
 from sawa_tui.ai.client import ZAIClient, ZAIError
-from sawa_tui.ai.prompts import REGEN_OPTIONS
+from sawa_tui.ai.prompts import OVERVIEW_REGEN_OPTIONS, REGEN_OPTIONS
 from sawa_tui.database import init_schema
 from sawa_tui.input import (
     KEY_BACKSPACE,
@@ -31,6 +31,7 @@ from sawa_tui.input import (
     normalize_key,
 )
 from sawa_tui.models.glossary import GlossaryManager
+from sawa_tui.models.overview import OverviewManager
 from sawa_tui.models.watchlist import WatchlistManager
 from sawa_tui.state import AppState, EconomyTab, FundamentalsTab, SettingsCategory, View
 from sawa_tui.views import SETTINGS_ITEMS, render_app
@@ -269,6 +270,11 @@ class SP500App:
             if term:
                 self._generate_glossary_definition(term.term, custom_instructions=value)
 
+        elif callback == "overview_custom_regen":
+            # Custom overview regeneration with user-provided instructions
+            if self.state.detail_ticker:
+                self._generate_company_overview(custom_instructions=value)
+
         elif callback == "filter_stocks":
             # Filter stocks in current watchlist
             self.state.filter_stocks(value)
@@ -406,8 +412,14 @@ class SP500App:
 
     def _handle_detail_key(self, key: str) -> None:
         """Handle keys in stock detail view."""
+        # Handle overview regen menu if active
+        if self.state.detail_overview_show_regen_menu:
+            self._handle_overview_regen_key(key)
+            return
+
         if key == KEY_ESCAPE or key == "KEY_BACKSPACE":
-            # Go back
+            # Go back (also clear overview state)
+            self.state.clear_overview_state()
             self.state.navigate_to(View.STOCKS)
 
         elif key == "a":
@@ -421,7 +433,9 @@ class SP500App:
                     self.state.set_message(error, error=True)
 
         elif key == "v":
-            # Toggle news pane
+            # Toggle news pane (hide overview if showing)
+            if self.state.detail_overview_visible:
+                self.state.detail_overview_visible = False
             self.state.toggle_news_pane()
 
         elif key == "V":
@@ -430,6 +444,109 @@ class SP500App:
                 self.state.selected_news_idx = 0
                 self.state.news_scroll_offset = 0
                 self.state.navigate_to(View.NEWS_FULLSCREEN)
+
+        elif key == "o":
+            # Toggle/generate AI overview
+            if self.state.detail_overview_visible and self.state.detail_overview:
+                # Already visible with data - toggle off
+                self.state.detail_overview_visible = False
+            elif self.state.detail_overview_visible and not self.state.detail_overview:
+                # Visible but no data - generate
+                self._generate_company_overview()
+            else:
+                # Not visible - show and try cache first
+                self.state.detail_overview_visible = True
+                self.state.detail_show_news = False  # Hide news when showing overview
+                if not self.state.load_company_overview(self.state.detail_ticker):
+                    # No cache - generate
+                    self._generate_company_overview()
+
+        elif key == "O":
+            # Show regeneration menu (if overview panel is visible)
+            if self.state.detail_overview_visible:
+                self.state.detail_overview_show_regen_menu = True
+
+        elif key == KEY_UP:
+            # Scroll overview up (if visible)
+            if self.state.detail_overview_visible and self.state.detail_overview:
+                if self.state.detail_overview_scroll > 0:
+                    self.state.detail_overview_scroll -= 1
+
+        elif key == KEY_DOWN:
+            # Scroll overview down (if visible)
+            if self.state.detail_overview_visible and self.state.detail_overview:
+                self.state.detail_overview_scroll += 1
+
+    def _handle_overview_regen_key(self, key: str) -> None:
+        """Handle keys in overview regeneration menu."""
+        if key == KEY_ESCAPE:
+            self.state.detail_overview_show_regen_menu = False
+            return
+
+        # Get option from OVERVIEW_REGEN_OPTIONS
+        if key in OVERVIEW_REGEN_OPTIONS:
+            _, instructions = OVERVIEW_REGEN_OPTIONS[key]
+            self.state.detail_overview_show_regen_menu = False
+            self._generate_company_overview(custom_instructions=instructions)
+
+        elif key == "c":
+            # Custom instructions - start input mode
+            self.state.detail_overview_show_regen_menu = False
+            self.state.start_input("Custom instructions", "overview_custom_regen")
+
+    def _generate_company_overview(self, custom_instructions: str = "") -> None:
+        """Generate a company overview using AI."""
+        if not self.ai_client.is_configured():
+            self.state.detail_overview_error = "ZAI_API_KEY not configured. Set it in Settings or environment."
+            return
+
+        self.state.detail_overview_loading = True
+        self.state.detail_overview_error = ""
+        self.state.detail_overview_stream_content = ""
+        self.state.detail_overview = None
+        self.state.needs_redraw = True
+
+        # Render loading state
+        render_app(self.console, self.state)
+
+        try:
+            company = self.state.detail_company
+
+            # Use streaming to show progress
+            def stream_callback(chunk: str) -> None:
+                self.state.detail_overview_stream_content += chunk
+                self.state.needs_redraw = True
+                render_app(self.console, self.state)
+
+            overview = self.ai_client.generate_company_overview(
+                ticker=self.state.detail_ticker,
+                company_name=company.name if company else self.state.detail_ticker,
+                sector=company.sector if company else None,
+                custom_instructions=custom_instructions,
+                stream_callback=stream_callback,
+            )
+
+            # Save to cache (as user override if user is logged in, shared otherwise)
+            self.state.ensure_user()
+            user_id = self.state.current_user.id if self.state.current_user else None
+            OverviewManager.save(overview, user_id=user_id)
+
+            # Update state
+            self.state.detail_overview = overview
+            self.state.detail_overview_loading = False
+            self.state.detail_overview_stream_content = ""
+
+        except ZAIError as e:
+            self.state.detail_overview_loading = False
+            self.state.detail_overview_error = str(e.message)
+            self.state.detail_overview_stream_content = ""
+            logger.error(f"Failed to generate company overview: {e}")
+
+        except Exception as e:
+            self.state.detail_overview_loading = False
+            self.state.detail_overview_error = f"Unexpected error: {e}"
+            self.state.detail_overview_stream_content = ""
+            logger.error(f"Unexpected error generating overview: {e}")
 
     # =========================================================================
     # NEWS FULLSCREEN VIEW

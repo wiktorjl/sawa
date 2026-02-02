@@ -84,6 +84,38 @@ def cmd_coldstart(args) -> int:
         return 1
 
 
+def cmd_generate_overviews(args) -> int:
+    """Generate AI company overviews for top tickers."""
+    from sawa.ai_batch import run_overview_batch
+
+    logger = setup_logging(args.verbose)
+
+    zai_key = args.zai_api_key or os.environ.get("ZAI_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not zai_key:
+        logger.error("ZAI_API_KEY required (env var or --zai-api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        stats = run_overview_batch(
+            zai_api_key=zai_key,
+            database_url=db_url,
+            limit=args.limit,
+            delay=args.delay,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Batch generation failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_update(args) -> int:
     """Run incremental update."""
     from sawa.update import run_update
@@ -132,19 +164,22 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Commands:
-  coldstart    Full database setup from scratch
-  update       Incremental update since last data
+  coldstart           Full database setup from scratch
+  update              Incremental update since last data
+  generate-overviews  Batch generate AI company overviews
 
 Examples:
   sp500 coldstart --years 5
   sp500 update
   sp500 update --from-date 2024-01-01
+  sp500 generate-overviews --limit 100
 
 Environment Variables:
   POLYGON_API_KEY         Polygon/Massive API key
   POLYGON_S3_ACCESS_KEY   Polygon S3 access key
   POLYGON_S3_SECRET_KEY   Polygon S3 secret key
   DATABASE_URL            PostgreSQL connection URL
+  ZAI_API_KEY             Z.AI API key (for AI overviews)
 """,
     )
 
@@ -220,6 +255,23 @@ Environment Variables:
     update_parser.add_argument("--database-url", help="PostgreSQL URL")
     update_parser.add_argument("-v", "--verbose", action="store_true")
     update_parser.set_defaults(func=cmd_update)
+
+    # Generate overviews subcommand
+    overview_parser = subparsers.add_parser(
+        "generate-overviews",
+        help="Generate AI company overviews for top tickers",
+        description="Batch generate AI-powered company overviews using Z.AI.",
+    )
+    overview_parser.add_argument(
+        "--limit", type=int, default=50, help="Max tickers to process (default: 50)"
+    )
+    overview_parser.add_argument(
+        "--delay", type=float, default=2.0, help="Delay between API calls in seconds (default: 2.0)"
+    )
+    overview_parser.add_argument("--zai-api-key", help="Z.AI API key")
+    overview_parser.add_argument("--database-url", help="PostgreSQL URL")
+    overview_parser.add_argument("-v", "--verbose", action="store_true")
+    overview_parser.set_defaults(func=cmd_generate_overviews)
 
     args = parser.parse_args()
 
