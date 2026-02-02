@@ -15,6 +15,7 @@ from psycopg import sql
 
 from sawa.api import PolygonClient, PolygonS3Client
 from sawa.utils import setup_logging
+from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
 
 
@@ -116,16 +117,7 @@ def update_fundamentals(
 
         if all_data:
             filepath = output_dir / f"{endpoint.replace('-', '_')}_update.csv"
-            # Collect all fieldnames
-            all_fields: set[str] = set()
-            for record in all_data:
-                all_fields.update(record.keys())
-            fieldnames = sorted(all_fields)
-            with open(filepath, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                writer.writeheader()
-                writer.writerows(all_data)
-            logger.info(f"  Found {len(all_data)} new records")
+            write_csv_auto_fields(filepath, all_data, logger)
 
         stats[endpoint] = len(all_data)
 
@@ -151,16 +143,7 @@ def update_economy(
             data = client.get_economy_data(endpoint, start_date, end_date)
             if data:
                 filepath = output_dir / f"{endpoint.replace('-', '_')}_update.csv"
-                # Collect all fieldnames
-                all_fields: set[str] = set()
-                for record in data:
-                    all_fields.update(record.keys())
-                fieldnames = sorted(all_fields)
-                with open(filepath, "w", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(data)
-                logger.info(f"  Found {len(data)} new records")
+                write_csv_auto_fields(filepath, data, logger)
             stats[endpoint] = len(data)
         except Exception as e:
             logger.error(f"  Failed: {e}")

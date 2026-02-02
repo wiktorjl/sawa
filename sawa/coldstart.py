@@ -36,8 +36,13 @@ from sawa.database.load import (
     load_ratios,
 )
 from sawa.database.schema import drop_all_tables, execute_sql_file, get_sql_files
+from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import calculate_date_range, setup_logging
+from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
+
+# Default rate limit for API calls (requests per second)
+DEFAULT_API_RATE_LIMIT = 5.0
 
 # Wikipedia URL for S&P 500 constituents
 WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -124,6 +129,7 @@ def download_fundamentals(
     end_date: str,
     output_dir: Path,
     logger: logging.Logger,
+    rate_limiter: SyncRateLimiter | None = None,
 ) -> dict[str, int]:
     """Download fundamentals data."""
     endpoints = ["balance-sheets", "cash-flow", "income-statements"]
@@ -138,6 +144,8 @@ def download_fundamentals(
             if i % 50 == 0:
                 logger.info(f"  Progress: {i}/{len(symbols)}")
             try:
+                if rate_limiter:
+                    rate_limiter.acquire()
                 data = client.get_fundamentals(
                     endpoint, ticker=symbol, start_date=start_date, end_date=end_date
                 )
@@ -151,16 +159,7 @@ def download_fundamentals(
 
         if all_data:
             filepath = output_dir / f"{endpoint.replace('-', '_')}.csv"
-            # Collect all fieldnames from all records
-            all_fields: set[str] = set()
-            for record in all_data:
-                all_fields.update(record.keys())
-            fieldnames = sorted(all_fields)
-            with open(filepath, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                writer.writeheader()
-                writer.writerows(all_data)
-            logger.info(f"  Saved {len(all_data)} records to {filepath}")
+            write_csv_auto_fields(filepath, all_data, logger)
 
         stats[endpoint] = len(all_data)
 
@@ -172,6 +171,7 @@ def download_overviews(
     symbols: list[str],
     output_dir: Path,
     logger: logging.Logger,
+    rate_limiter: SyncRateLimiter | None = None,
 ) -> int:
     """Download company overviews."""
     logger.info("Downloading company overviews...")
@@ -182,6 +182,8 @@ def download_overviews(
         if i % 50 == 0:
             logger.info(f"  Progress: {i}/{len(symbols)}")
         try:
+            if rate_limiter:
+                rate_limiter.acquire()
             data = client.get_ticker_details(symbol)
             if data:
                 # Flatten nested fields
@@ -198,16 +200,7 @@ def download_overviews(
 
     if overviews:
         filepath = output_dir / "overviews.csv"
-        # Collect all fieldnames from all records
-        all_fields: set[str] = set()
-        for record in overviews:
-            all_fields.update(record.keys())
-        fieldnames = sorted(all_fields)
-        with open(filepath, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(overviews)
-        logger.info(f"Saved {len(overviews)} overviews")
+        write_csv_auto_fields(filepath, overviews, logger)
 
     return len(overviews)
 
@@ -231,16 +224,7 @@ def download_economy(
             data = client.get_economy_data(endpoint, start_date, end_date)
             if data:
                 filepath = output_dir / f"{endpoint.replace('-', '_')}.csv"
-                # Collect all fieldnames
-                all_fields: set[str] = set()
-                for record in data:
-                    all_fields.update(record.keys())
-                fieldnames = sorted(all_fields)
-                with open(filepath, "w", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(data)
-                logger.info(f"  Saved {len(data)} records")
+                write_csv_auto_fields(filepath, data, logger)
             stats[endpoint] = len(data)
         except Exception as e:
             logger.error(f"  Failed: {e}")
@@ -254,6 +238,7 @@ def download_ratios(
     symbols: list[str],
     output_dir: Path,
     logger: logging.Logger,
+    rate_limiter: SyncRateLimiter | None = None,
 ) -> int:
     """Download financial ratios."""
     logger.info("Downloading financial ratios...")
@@ -264,6 +249,8 @@ def download_ratios(
         if i % 50 == 0:
             logger.info(f"  Progress: {i}/{len(symbols)}")
         try:
+            if rate_limiter:
+                rate_limiter.acquire()
             ratios = client.get_ratios(symbol)
             for r in ratios:
                 r["ticker"] = symbol
@@ -273,16 +260,7 @@ def download_ratios(
 
     if all_ratios:
         filepath = output_dir / "ratios.csv"
-        # Collect all fieldnames
-        all_fields: set[str] = set()
-        for record in all_ratios:
-            all_fields.update(record.keys())
-        fieldnames = sorted(all_fields)
-        with open(filepath, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(all_ratios)
-        logger.info(f"Saved {len(all_ratios)} ratio records")
+        write_csv_auto_fields(filepath, all_ratios, logger)
 
     return len(all_ratios)
 
@@ -390,6 +368,7 @@ def run_coldstart(
     # Initialize clients only if we need to download data
     client: PolygonClient | None = None
     s3_client: PolygonS3Client | None = None
+    rate_limiter: SyncRateLimiter | None = None
 
     needs_download = not (schema_only or load_only or skip_all_downloads)
     if needs_download:
@@ -397,6 +376,7 @@ def run_coldstart(
             raise ValueError("API credentials required when downloading data")
         client = PolygonClient(api_key, logger)
         s3_client = PolygonS3Client(s3_access_key, s3_secret_key, logger)
+        rate_limiter = SyncRateLimiter(DEFAULT_API_RATE_LIMIT)
 
     try:
         with psycopg.connect(database_url) as conn:
@@ -513,7 +493,7 @@ def run_coldstart(
                 else:
                     logger.info("\n[4/9] Downloading company overviews...")
                     overview_count = download_overviews(
-                        client, symbols, output_dir / "overviews", logger
+                        client, symbols, output_dir / "overviews", logger, rate_limiter
                     )
                     stats["overviews"] = overview_count
                     # Load companies into DB
@@ -548,7 +528,13 @@ def run_coldstart(
                 else:
                     logger.info("\n[6/9] Downloading fundamentals...")
                     fund_stats = download_fundamentals(
-                        client, symbols, start_str, end_str, output_dir / "fundamentals", logger
+                        client,
+                        symbols,
+                        start_str,
+                        end_str,
+                        output_dir / "fundamentals",
+                        logger,
+                        rate_limiter,
                     )
                     stats["fundamentals"] = fund_stats
                     # Load fundamentals into DB
@@ -561,7 +547,9 @@ def run_coldstart(
                     stats["ratios"] = 0
                 else:
                     logger.info("\n[7/9] Downloading financial ratios...")
-                    ratio_count = download_ratios(client, symbols, output_dir / "ratios", logger)
+                    ratio_count = download_ratios(
+                        client, symbols, output_dir / "ratios", logger, rate_limiter
+                    )
                     stats["ratios"] = ratio_count
                     # Load ratios into DB
                     logger.info("Loading ratios into database...")
