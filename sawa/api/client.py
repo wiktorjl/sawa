@@ -14,7 +14,7 @@ import time
 from typing import Any
 from urllib.parse import urljoin
 
-import requests
+import httpx
 
 # Polygon rebranded to Massive, but API structure is similar
 BASE_URL = "https://api.polygon.io"
@@ -48,8 +48,10 @@ class PolygonClient:
     def __init__(self, api_key: str, logger: logging.Logger | None = None):
         self.api_key = api_key
         self.logger = logger or logging.getLogger(__name__)
-        self.session = requests.Session()
-        self.session.headers["Authorization"] = f"Bearer {api_key}"
+        self.client = httpx.Client(
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30.0,
+        )
 
     def get(
         self,
@@ -79,7 +81,7 @@ class PolygonClient:
         params["apiKey"] = self.api_key
 
         self.logger.debug(f"GET {url}")
-        response = self.session.get(url, params=params, timeout=timeout)
+        response = self.client.get(url, params=params, timeout=timeout)
         response.raise_for_status()
 
         data = response.json()
@@ -119,9 +121,9 @@ class PolygonClient:
             self.logger.debug(f"Fetching page {page}")
 
             if page > 1:
-                response = self.session.get(url, timeout=timeout)
+                response = self.client.get(url, timeout=timeout)
             else:
-                response = self.session.get(url, params=params, timeout=timeout)
+                response = self.client.get(url, params=params, timeout=timeout)
 
             response.raise_for_status()
             data = response.json()
@@ -166,7 +168,7 @@ class PolygonClient:
 
         for attempt in range(max_retries):
             try:
-                response = self.session.get(
+                response = self.client.get(
                     url,
                     params={"apiKey": self.api_key},
                     timeout=timeout,
@@ -189,7 +191,7 @@ class PolygonClient:
 
                 return data.get("results")
 
-            except requests.exceptions.RequestException as e:
+            except httpx.RequestError as e:
                 if attempt < max_retries - 1:
                     self.logger.warning(f"Request failed: {e}. Retrying...")
                     time.sleep(1)

@@ -13,9 +13,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import execute_values
+import psycopg
+from psycopg import sql
 
 from sawa.api.client import PolygonClient
 from sawa.utils import setup_logging
@@ -73,19 +72,19 @@ def load_news_article(conn, article: dict[str, Any]) -> None:
     if tickers:
         ticker_sql = sql.SQL("""
             INSERT INTO news_article_tickers (article_id, ticker)
-            VALUES %s
+            VALUES (%s, %s)
             ON CONFLICT (article_id, ticker) DO NOTHING
         """)
         ticker_data = [(article_id, ticker) for ticker in tickers]
         with conn.cursor() as cur:
-            execute_values(cur, ticker_sql, ticker_data)
+            cur.executemany(ticker_sql, ticker_data)
 
     # Insert sentiment insights
     insights = article.get("insights", [])
     if insights:
         sentiment_sql = sql.SQL("""
             INSERT INTO news_sentiment (article_id, ticker, sentiment, sentiment_reasoning)
-            VALUES %s
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (article_id, ticker) DO UPDATE SET
                 sentiment = EXCLUDED.sentiment,
                 sentiment_reasoning = EXCLUDED.sentiment_reasoning
@@ -102,7 +101,7 @@ def load_news_article(conn, article: dict[str, Any]) -> None:
         ]
         if sentiment_data:
             with conn.cursor() as cur:
-                execute_values(cur, sentiment_sql, sentiment_data)
+                cur.executemany(sentiment_sql, sentiment_data)
 
 
 def fetch_and_load_news(
@@ -151,7 +150,7 @@ def fetch_and_load_news(
         try:
             load_news_article(conn, article)
             loaded += 1
-        except psycopg2.Error as e:
+        except psycopg.Error as e:
             logger.warning(f"Failed to load article {article.get('id')}: {e}")
             conn.rollback()
             continue
@@ -253,7 +252,7 @@ Environment: POLYGON_API_KEY, PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
         )
         conn = get_connection(conn_params)
         log.info(
-            f"Connected to {conn_params['host']}:{conn_params['port']}/{conn_params['database']}"
+            f"Connected to {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}"
         )
 
         # Create API client

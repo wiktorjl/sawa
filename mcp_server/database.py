@@ -9,23 +9,13 @@ from typing import Any
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
+from sawa.utils.config import require_database_url as get_database_url  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 MAX_ROWS = int(os.environ.get("MCP_MAX_ROWS", "1000"))
 QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "30"))
-
-
-def get_database_url() -> str:
-    """Get database connection string from environment."""
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise ValueError(
-            "DATABASE_URL environment variable is required. "
-            "Example: postgresql://user:pass@host:port/database"
-        )
-    return database_url
 
 
 @contextmanager

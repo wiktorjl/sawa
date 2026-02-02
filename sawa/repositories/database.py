@@ -20,8 +20,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 
 from sawa.domain.models import (
     BalanceSheet,
@@ -43,16 +43,16 @@ from sawa.repositories.base import (
 )
 
 
-def _get_connection(database_url: str) -> psycopg2.extensions.connection:
-    """Get database connection with RealDictCursor.
+def _get_connection(database_url: str) -> psycopg.Connection:
+    """Get database connection.
 
     Args:
         database_url: PostgreSQL connection URL
 
     Returns:
-        psycopg2 connection object
+        psycopg connection object
     """
-    return psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    return psycopg.connect(database_url)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -130,7 +130,7 @@ class DatabasePriceRepository(StockPriceRepository):
             ORDER BY date
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(), start_date, end_date))
                 rows = cur.fetchall()
 
@@ -186,7 +186,7 @@ class DatabasePriceRepository(StockPriceRepository):
             LIMIT 1
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(),))
                 row = cur.fetchone()
 
@@ -221,7 +221,7 @@ class DatabasePriceRepository(StockPriceRepository):
             WHERE ticker = ANY(%s) AND date = %s
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, ([t.upper() for t in tickers], target_date))
                 rows = cur.fetchall()
 
@@ -278,7 +278,7 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             LIMIT %s
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(), timeframe, limit))
                 rows = cur.fetchall()
 
@@ -337,7 +337,7 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             LIMIT %s
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(), timeframe, limit))
                 rows = cur.fetchall()
 
@@ -395,7 +395,7 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             LIMIT %s
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(), timeframe, limit))
                 rows = cur.fetchall()
 
@@ -448,7 +448,7 @@ class DatabaseCompanyRepository(CompanyRepository):
         """Synchronous implementation of get_company_info."""
         query = "SELECT * FROM companies WHERE ticker = %s"
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(),))
                 row = cur.fetchone()
 
@@ -495,7 +495,7 @@ class DatabaseCompanyRepository(CompanyRepository):
         """
         pattern = f"%{query}%"
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(sql, (pattern, pattern, limit))
                 rows = cur.fetchall()
 
@@ -562,7 +562,7 @@ class DatabaseRatiosRepository(RatiosRepository):
             ORDER BY date
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(), start_date, end_date))
                 rows = cur.fetchall()
 
@@ -611,7 +611,7 @@ class DatabaseRatiosRepository(RatiosRepository):
             LIMIT 1
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (ticker.upper(),))
                 row = cur.fetchone()
 
@@ -664,7 +664,7 @@ class DatabaseEconomyRepository(EconomyRepository):
             ORDER BY date
         """
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(query, (start_date, end_date))
                 rows = cur.fetchall()
 
@@ -712,26 +712,28 @@ class DatabaseEconomyRepository(EconomyRepository):
         indicator: str | None,
     ) -> list[InflationData]:
         """Synchronous implementation of get_inflation."""
-        if indicator:
-            query = """
-                SELECT *
-                FROM inflation
-                WHERE date BETWEEN %s AND %s AND indicator = %s
-                ORDER BY date
-            """
-            params = (start_date, end_date, indicator)
-        else:
-            query = """
-                SELECT *
-                FROM inflation
-                WHERE date BETWEEN %s AND %s
-                ORDER BY date, indicator
-            """
-            params = (start_date, end_date)
-
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
+            with conn.cursor(row_factory=dict_row) as cur:
+                if indicator:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM inflation
+                        WHERE date BETWEEN %s AND %s AND indicator = %s
+                        ORDER BY date
+                        """,
+                        (start_date, end_date, indicator),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM inflation
+                        WHERE date BETWEEN %s AND %s
+                        ORDER BY date, indicator
+                        """,
+                        (start_date, end_date),
+                    )
                 rows = cur.fetchall()
 
         return [self._row_to_inflation(row) for row in rows]
@@ -773,26 +775,28 @@ class DatabaseEconomyRepository(EconomyRepository):
         indicator: str | None,
     ) -> list[LaborMarketData]:
         """Synchronous implementation of get_labor_market."""
-        if indicator:
-            query = """
-                SELECT *
-                FROM labor_market
-                WHERE date BETWEEN %s AND %s AND indicator = %s
-                ORDER BY date
-            """
-            params = (start_date, end_date, indicator)
-        else:
-            query = """
-                SELECT *
-                FROM labor_market
-                WHERE date BETWEEN %s AND %s
-                ORDER BY date, indicator
-            """
-            params = (start_date, end_date)
-
         with _get_connection(self.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
+            with conn.cursor(row_factory=dict_row) as cur:
+                if indicator:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM labor_market
+                        WHERE date BETWEEN %s AND %s AND indicator = %s
+                        ORDER BY date
+                        """,
+                        (start_date, end_date, indicator),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM labor_market
+                        WHERE date BETWEEN %s AND %s
+                        ORDER BY date, indicator
+                        """,
+                        (start_date, end_date),
+                    )
                 rows = cur.fetchall()
 
         return [self._row_to_labor(row) for row in rows]
