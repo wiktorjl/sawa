@@ -45,6 +45,7 @@ class CachedDefinition:
     custom_prompt: str | None
     generated_at: datetime
     model_used: str
+    is_user_override: bool = False
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "CachedDefinition":
@@ -59,6 +60,7 @@ class CachedDefinition:
             custom_prompt=row.get("custom_prompt"),
             generated_at=row.get("generated_at", datetime.now()),
             model_used=row.get("model_used", "unknown"),
+            is_user_override=row.get("user_id") is not None,
         )
 
     def to_glossary_entry(self) -> GlossaryEntry:
@@ -109,68 +111,139 @@ class GlossaryManager:
         return [GlossaryTerm.from_row(row) for row in rows]
 
     @staticmethod
-    def get_cached_definition(term: str) -> CachedDefinition | None:
+    def get_cached_definition(term: str, user_id: int | None = None) -> CachedDefinition | None:
         """
         Get a cached definition for a term.
 
+        Two-tier lookup:
+        1. If user_id provided, check for user override first
+        2. Fall back to shared definition (user_id IS NULL)
+
         Args:
             term: The term to look up
+            user_id: Optional user ID for user-specific overrides
 
         Returns:
             CachedDefinition if found, None otherwise
         """
+        if user_id is not None:
+            # Try user override first
+            sql = """
+                SELECT term, official_definition, plain_english, examples,
+                       related_terms, learn_more, custom_prompt, generated_at, model_used, user_id
+                FROM glossary_terms
+                WHERE term = %(term)s AND user_id = %(user_id)s
+            """
+            rows = execute_query(sql, {"term": term, "user_id": user_id})
+            if rows:
+                return CachedDefinition.from_row(rows[0])
+
+        # Fall back to shared definition
         sql = """
             SELECT term, official_definition, plain_english, examples,
-                   related_terms, learn_more, custom_prompt, generated_at, model_used
+                   related_terms, learn_more, custom_prompt, generated_at, model_used, user_id
             FROM glossary_terms
-            WHERE term = %(term)s
+            WHERE term = %(term)s AND user_id IS NULL
         """
         rows = execute_query(sql, {"term": term})
         return CachedDefinition.from_row(rows[0]) if rows else None
 
     @staticmethod
-    def save_definition(entry: GlossaryEntry, model: str = "glm-4.7") -> bool:
+    def save_definition(
+        entry: GlossaryEntry, model: str = "glm-4.7", user_id: int | None = None
+    ) -> bool:
         """
         Save a glossary definition to the cache.
+
+        If user_id is None, saves as shared definition.
+        If user_id is provided, saves as user-specific override.
 
         Args:
             entry: The GlossaryEntry to save
             model: The model used to generate the definition
+            user_id: Optional user ID for user-specific override
 
         Returns:
             True if saved successfully
         """
-        sql = """
-            INSERT INTO glossary_terms 
-                (term, official_definition, plain_english, examples, 
-                 related_terms, learn_more, custom_prompt, model_used)
-            VALUES 
-                (%(term)s, %(official_definition)s, %(plain_english)s, %(examples)s,
-                 %(related_terms)s, %(learn_more)s, %(custom_prompt)s, %(model_used)s)
-            ON CONFLICT (term) DO UPDATE SET
-                official_definition = EXCLUDED.official_definition,
-                plain_english = EXCLUDED.plain_english,
-                examples = EXCLUDED.examples,
-                related_terms = EXCLUDED.related_terms,
-                learn_more = EXCLUDED.learn_more,
-                custom_prompt = EXCLUDED.custom_prompt,
-                model_used = EXCLUDED.model_used,
-                generated_at = CURRENT_TIMESTAMP
-        """
+        if user_id is None:
+            # Shared definition - use partial unique index
+            # First, check if it exists
+            check_sql = "SELECT id FROM glossary_terms WHERE term = %(term)s AND user_id IS NULL"
+            existing = execute_query(check_sql, {"term": entry.term})
+
+            if existing:
+                # Update existing
+                sql = """
+                    UPDATE glossary_terms SET
+                        official_definition = %(official_definition)s,
+                        plain_english = %(plain_english)s,
+                        examples = %(examples)s,
+                        related_terms = %(related_terms)s,
+                        learn_more = %(learn_more)s,
+                        custom_prompt = %(custom_prompt)s,
+                        model_used = %(model_used)s,
+                        generated_at = CURRENT_TIMESTAMP
+                    WHERE term = %(term)s AND user_id IS NULL
+                """
+            else:
+                # Insert new
+                sql = """
+                    INSERT INTO glossary_terms 
+                        (term, official_definition, plain_english, examples, 
+                         related_terms, learn_more, custom_prompt, model_used, user_id)
+                    VALUES 
+                        (%(term)s, %(official_definition)s, %(plain_english)s, %(examples)s,
+                         %(related_terms)s, %(learn_more)s, %(custom_prompt)s, %(model_used)s, NULL)
+                """
+        else:
+            # User override - use composite unique index
+            check_sql = """
+                SELECT id FROM glossary_terms 
+                WHERE term = %(term)s AND user_id = %(user_id)s
+            """
+            existing = execute_query(check_sql, {"term": entry.term, "user_id": user_id})
+
+            if existing:
+                # Update existing
+                sql = """
+                    UPDATE glossary_terms SET
+                        official_definition = %(official_definition)s,
+                        plain_english = %(plain_english)s,
+                        examples = %(examples)s,
+                        related_terms = %(related_terms)s,
+                        learn_more = %(learn_more)s,
+                        custom_prompt = %(custom_prompt)s,
+                        model_used = %(model_used)s,
+                        generated_at = CURRENT_TIMESTAMP
+                    WHERE term = %(term)s AND user_id = %(user_id)s
+                """
+            else:
+                # Insert new
+                sql = """
+                    INSERT INTO glossary_terms 
+                        (term, official_definition, plain_english, examples, 
+                         related_terms, learn_more, custom_prompt, model_used, user_id)
+                    VALUES 
+                        (%(term)s, %(official_definition)s, %(plain_english)s, %(examples)s,
+                         %(related_terms)s, %(learn_more)s, %(custom_prompt)s, %(model_used)s, %(user_id)s)
+                """
+
         try:
-            execute_write(
-                sql,
-                {
-                    "term": entry.term,
-                    "official_definition": entry.official_definition,
-                    "plain_english": entry.plain_english,
-                    "examples": json.dumps(entry.examples),
-                    "related_terms": json.dumps(entry.related_terms),
-                    "learn_more": json.dumps(entry.learn_more),
-                    "custom_prompt": entry.custom_prompt,
-                    "model_used": model,
-                },
-            )
+            params = {
+                "term": entry.term,
+                "official_definition": entry.official_definition,
+                "plain_english": entry.plain_english,
+                "examples": json.dumps(entry.examples),
+                "related_terms": json.dumps(entry.related_terms),
+                "learn_more": json.dumps(entry.learn_more),
+                "custom_prompt": entry.custom_prompt,
+                "model_used": model,
+            }
+            if user_id is not None:
+                params["user_id"] = user_id
+
+            execute_write(sql, params)
             return True
         except Exception as e:
             logger.error(f"Failed to save glossary definition: {e}")
@@ -234,23 +307,63 @@ class GlossaryManager:
             return False
 
     @staticmethod
-    def delete_cached_definition(term: str) -> bool:
+    def delete_cached_definition(term: str, user_id: int | None = None) -> bool:
         """
         Delete a cached definition (force regeneration).
 
+        If user_id is None, deletes shared definition.
+        If user_id is provided, deletes only user override.
+
         Args:
             term: The term whose definition to delete
+            user_id: Optional user ID for user-specific override
 
         Returns:
             True if deleted successfully
         """
-        sql = "DELETE FROM glossary_terms WHERE term = %(term)s"
+        if user_id is None:
+            sql = "DELETE FROM glossary_terms WHERE term = %(term)s AND user_id IS NULL"
+            params = {"term": term}
+        else:
+            sql = "DELETE FROM glossary_terms WHERE term = %(term)s AND user_id = %(user_id)s"
+            params = {"term": term, "user_id": user_id}
+
         try:
-            execute_write(sql, {"term": term})
+            execute_write(sql, params)
             return True
         except Exception as e:
             logger.error(f"Failed to delete cached definition: {e}")
             return False
+
+    @staticmethod
+    def has_user_override(term: str, user_id: int) -> bool:
+        """
+        Check if a user has a custom override for a term.
+
+        Args:
+            term: The term to check
+            user_id: User ID
+
+        Returns:
+            True if user has a custom override
+        """
+        sql = "SELECT 1 FROM glossary_terms WHERE term = %(term)s AND user_id = %(user_id)s"
+        rows = execute_query(sql, {"term": term, "user_id": user_id})
+        return len(rows) > 0
+
+    @staticmethod
+    def delete_user_override(term: str, user_id: int) -> bool:
+        """
+        Delete a user's custom override, reverting to shared definition.
+
+        Args:
+            term: The term to revert
+            user_id: User ID
+
+        Returns:
+            True if deleted successfully
+        """
+        return GlossaryManager.delete_cached_definition(term, user_id=user_id)
 
     @staticmethod
     def term_exists(term: str) -> bool:

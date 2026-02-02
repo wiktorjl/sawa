@@ -51,32 +51,5 @@ CREATE TRIGGER user_settings_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_watchlist_timestamp();
 
--- Insert default watchlist if not exists
-INSERT INTO watchlists (name, is_default)
-VALUES ('Default', TRUE)
-ON CONFLICT (name) DO NOTHING;
-
--- Insert default symbols (only if they exist in companies table)
-INSERT INTO watchlist_symbols (watchlist_id, ticker, sort_order)
-SELECT w.id, c.ticker, t.sort_order
-FROM watchlists w
-CROSS JOIN (
-    VALUES ('AAPL', 1), ('GOOGL', 2), ('AMZN', 3)
-) AS t(ticker, sort_order)
-JOIN companies c ON c.ticker = t.ticker
-WHERE w.name = 'Default'
-  AND w.is_default = TRUE
-  AND NOT EXISTS (
-      SELECT 1 FROM watchlist_symbols ws WHERE ws.watchlist_id = w.id
-  )
-ON CONFLICT (watchlist_id, ticker) DO NOTHING;
-
--- Insert default settings
-INSERT INTO user_settings (key, value) VALUES
-    ('chart_period_days', '60'),
-    ('auto_refresh', 'false'),
-    ('refresh_interval_seconds', '60'),
-    ('number_format', 'compact'),
-    ('fundamentals_timeframe', 'quarterly'),
-    ('table_rows', '25')
-ON CONFLICT (key) DO NOTHING;
+-- NOTE: Default watchlist and settings are now created by 11_users.sql
+-- via the default user creation and UserManager.create() logic

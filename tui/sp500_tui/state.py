@@ -4,10 +4,12 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from typing import Any
 
 from rich.text import Text
 
 from sp500_tui.ai.client import GlossaryEntry
+from sp500_tui.components import FOOTER_HEIGHT, HEADER_HEIGHT
 from sp500_tui.logo import get_placeholder, load_logo_async
 from sp500_tui.models.glossary import GlossaryManager, GlossaryTerm
 from sp500_tui.models.queries import (
@@ -23,6 +25,7 @@ from sp500_tui.models.queries import (
     StockQueries,
     TreasuryYields,
 )
+from sp500_tui.models.users import User, UserManager
 from sp500_tui.models.watchlist import Watchlist, WatchlistManager, WatchlistStock
 
 logger = logging.getLogger(__name__)
@@ -37,7 +40,10 @@ class View(Enum):
     FUNDAMENTALS = auto()
     ECONOMY = auto()
     SETTINGS = auto()
+    SCREENER = auto()
     GLOSSARY = auto()
+    USER_MANAGEMENT = auto()
+    USER_SWITCHER = auto()
 
 
 class FundamentalsTab(Enum):
@@ -63,11 +69,15 @@ class SettingsCategory(Enum):
     CHARTS = auto()
     BEHAVIOR = auto()
     API = auto()
+    USERS = auto()
 
 
 @dataclass
 class AppState:
     """Complete application state."""
+
+    # User state
+    current_user: User | None = None
 
     # Navigation
     current_view: View = View.STOCKS
@@ -80,6 +90,7 @@ class AppState:
     watchlist_stocks: list[WatchlistStock] = field(default_factory=list)
     selected_stock_idx: int = 0
     stock_scroll_offset: int = 0  # Scroll offset for stock table
+    stock_filter: str = ""  # Filter string for stocks
     focus_sidebar: bool = False  # True = sidebar, False = stock list
 
     # Terminal dimensions (set by app)
@@ -142,6 +153,13 @@ class AppState:
     settings_popup_idx: int = 0  # Selected index in popup
     settings_popup_label: str = ""  # Label for the setting being edited
 
+    # User management view
+    user_mgmt_users: list[User] = field(default_factory=list)  # All users
+    user_mgmt_selected_idx: int = 0  # Selected user index
+    user_mgmt_confirm_delete: bool = False  # Confirm delete prompt
+    user_switcher_users: list[User] = field(default_factory=list)  # Users for switcher
+    user_switcher_selected_idx: int = 0  # Selected user in switcher
+
     # UI state
     message: str = ""  # Status message to display
     message_error: bool = False  # Is message an error?
@@ -149,14 +167,33 @@ class AppState:
     input_prompt: str = ""
     input_value: str = ""
     input_callback: str = ""  # Action to take on input submit
+    show_help_overlay: bool = False  # Show keyboard shortcuts overlay
 
     # App control
     running: bool = True
     needs_redraw: bool = True  # Flag to trigger redraw
 
+    # Screener view
+    screener_universe: list[Any] = field(default_factory=list)  # ScreenerResult
+    screener_results: list[Any] = field(default_factory=list)
+    screener_query: str = ""
+    screener_error: str = ""
+    screener_selected_idx: int = 0
+    screener_scroll_offset: int = 0
+    screener_loaded: bool = False
+
+    def ensure_user(self) -> None:
+        """Ensure a user is loaded and active."""
+        if self.current_user is None:
+            self.current_user = UserManager.ensure_active_user()
+
     def load_watchlists(self) -> None:
-        """Load all watchlists."""
-        self.watchlists = WatchlistManager.get_all()
+        """Load all watchlists for current user."""
+        self.ensure_user()
+        if self.current_user:
+            self.watchlists = WatchlistManager.get_all(self.current_user.id)
+        else:
+            self.watchlists = []
         if self.selected_watchlist_idx >= len(self.watchlists):
             self.selected_watchlist_idx = 0
         self.load_watchlist_stocks()
@@ -174,14 +211,15 @@ class AppState:
 
     def get_visible_stock_rows(self) -> int:
         """Calculate how many stock rows fit in the visible area."""
-        # Header=3, Footer=3, Panel borders=2, Table header=1, padding=2
-        # Available: term_height - 3 - 3 - 2 - 1 - 2 = term_height - 11
-        return max(1, self.term_height - 11)
+        # Header + Footer + Panel borders + Table header + padding
+        chrome = HEADER_HEIGHT + FOOTER_HEIGHT + 2 + 1 + 2
+        return max(1, self.term_height - chrome)
 
     def get_visible_watchlist_rows(self) -> int:
         """Calculate how many watchlist rows fit in the visible area."""
-        # Same as stocks but sidebar has help text at bottom (~3 lines)
-        return max(1, self.term_height - 14)
+        # Same as stocks but no help text at bottom anymore
+        chrome = HEADER_HEIGHT + FOOTER_HEIGHT + 2 + 1 + 2
+        return max(1, self.term_height - chrome)
 
     def adjust_stock_scroll(self) -> None:
         """Adjust scroll offset to keep selected stock visible."""
@@ -209,9 +247,27 @@ class AppState:
 
     def current_stock(self) -> WatchlistStock | None:
         """Get currently selected stock."""
-        if self.watchlist_stocks:
-            return self.watchlist_stocks[self.selected_stock_idx]
+        stocks = self.get_filtered_stocks()
+        if stocks and self.selected_stock_idx < len(stocks):
+            return stocks[self.selected_stock_idx]
         return None
+
+    def filter_stocks(self, query: str) -> None:
+        """Filter current watchlist stocks by ticker/name."""
+        self.stock_filter = query
+        self.selected_stock_idx = 0
+        self.stock_scroll_offset = 0
+
+    def get_filtered_stocks(self) -> list[WatchlistStock]:
+        """Get stocks filtered by current filter."""
+        if not self.stock_filter:
+            return self.watchlist_stocks
+        q = self.stock_filter.lower()
+        return [
+            s
+            for s in self.watchlist_stocks
+            if q in s.ticker.lower() or (s.name and q in s.name.lower())
+        ]
 
     def load_stock_detail(self, ticker: str) -> None:
         """Load detailed data for a stock."""
@@ -303,8 +359,9 @@ class AppState:
 
     def get_visible_news_rows(self) -> int:
         """Calculate how many news rows fit in the visible area."""
-        # Full screen: Header=3, Footer=3, Panel borders=2, sentiment header=3
-        return max(1, self.term_height - 11)
+        # Full screen: Header + Footer + Panel borders + sentiment header
+        chrome = HEADER_HEIGHT + FOOTER_HEIGHT + 2 + 3
+        return max(1, self.term_height - chrome)
 
     def adjust_news_scroll(self) -> None:
         """Adjust scroll offset to keep selected news visible."""
@@ -357,9 +414,12 @@ class AppState:
         """
         Load cached glossary definition for a term.
 
+        Uses two-tier lookup: user override -> shared definition.
         Returns True if definition was found in cache.
         """
-        cached = GlossaryManager.get_cached_definition(term)
+        self.ensure_user()
+        user_id = self.current_user.id if self.current_user else None
+        cached = GlossaryManager.get_cached_definition(term, user_id=user_id)
         if cached:
             self.glossary_definition = cached.to_glossary_entry()
             self.glossary_error = ""
@@ -369,8 +429,9 @@ class AppState:
 
     def get_visible_glossary_rows(self) -> int:
         """Calculate how many glossary term rows fit in the visible area."""
-        # Header=3, Footer=3, Panel borders=2, search box=2, help text=2
-        return max(1, self.term_height - 12)
+        # Header + Footer + Panel borders + search box
+        chrome = HEADER_HEIGHT + FOOTER_HEIGHT + 2 + 2
+        return max(1, self.term_height - chrome)
 
     def adjust_glossary_scroll(self) -> None:
         """Adjust scroll offset to keep selected term visible."""
@@ -409,3 +470,58 @@ class AppState:
         self.previous_view = self.current_view
         self.current_view = view
         self.clear_message()
+
+    def load_users_for_management(self) -> None:
+        """Load all users for user management view."""
+        self.user_mgmt_users = UserManager.get_all()
+        if self.user_mgmt_selected_idx >= len(self.user_mgmt_users):
+            self.user_mgmt_selected_idx = 0
+
+    def load_users_for_switcher(self) -> None:
+        """Load users for user switcher view."""
+        self.user_switcher_users = UserManager.get_all()
+        # Set selected to current user
+        if self.current_user:
+            for i, user in enumerate(self.user_switcher_users):
+                if user.id == self.current_user.id:
+                    self.user_switcher_selected_idx = i
+                    break
+
+    def load_screener(self) -> None:
+        """Load screener universe if not already loaded."""
+        if self.screener_loaded:
+            return
+
+        self.screener_universe = StockQueries.get_screener_universe()
+        self.screener_results = self.screener_universe
+        self.screener_loaded = True
+
+    def run_screener(self, query: str) -> None:
+        """Run screener query."""
+        from sp500_tui.screener import ScreenerEngine
+
+        self.screener_query = query
+        engine = ScreenerEngine(self.screener_universe)
+        self.screener_results, self.screener_error = engine.filter(query)
+        self.screener_selected_idx = 0
+        self.screener_scroll_offset = 0
+
+    def current_screener_result(self) -> Any | None:
+        """Get currently selected screener result."""
+        if self.screener_results and self.screener_selected_idx < len(self.screener_results):
+            return self.screener_results[self.screener_selected_idx]
+        return None
+
+    def get_visible_screener_rows(self) -> int:
+        """Calculate visible screener rows."""
+        # Header + Footer + Panel borders + Help + Search
+        chrome = HEADER_HEIGHT + FOOTER_HEIGHT + 2 + 1 + 2
+        return max(1, self.term_height - chrome)
+
+    def adjust_screener_scroll(self) -> None:
+        """Adjust scroll offset for screener."""
+        visible = self.get_visible_screener_rows()
+        if self.screener_selected_idx >= self.screener_scroll_offset + visible:
+            self.screener_scroll_offset = self.screener_selected_idx - visible + 1
+        if self.screener_selected_idx < self.screener_scroll_offset:
+            self.screener_scroll_offset = self.screener_selected_idx

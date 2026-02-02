@@ -67,80 +67,103 @@ class WatchlistManager:
     """Manager for watchlist CRUD operations."""
 
     @staticmethod
-    def get_all() -> list[Watchlist]:
-        """Get all watchlists with symbol counts."""
+    def get_all(user_id: int) -> list[Watchlist]:
+        """Get all watchlists for a user with symbol counts."""
         sql = """
             SELECT w.id, w.name, w.is_default, w.created_at,
                    COUNT(ws.ticker) as symbol_count
             FROM watchlists w
             LEFT JOIN watchlist_symbols ws ON w.id = ws.watchlist_id
+            WHERE w.user_id = %(user_id)s
             GROUP BY w.id, w.name, w.is_default, w.created_at
             ORDER BY w.is_default DESC, w.name ASC
         """
-        rows = execute_query(sql)
+        rows = execute_query(sql, {"user_id": user_id})
         return [Watchlist.from_row(row) for row in rows]
 
     @staticmethod
-    def get_by_id(watchlist_id: int) -> Watchlist | None:
-        """Get a watchlist by ID."""
+    def get_by_id(user_id: int, watchlist_id: int) -> Watchlist | None:
+        """Get a watchlist by ID (must belong to user)."""
         sql = """
             SELECT w.id, w.name, w.is_default, w.created_at,
                    COUNT(ws.ticker) as symbol_count
             FROM watchlists w
             LEFT JOIN watchlist_symbols ws ON w.id = ws.watchlist_id
-            WHERE w.id = %(id)s
+            WHERE w.id = %(id)s AND w.user_id = %(user_id)s
             GROUP BY w.id, w.name, w.is_default, w.created_at
         """
-        rows = execute_query(sql, {"id": watchlist_id})
+        rows = execute_query(sql, {"id": watchlist_id, "user_id": user_id})
         return Watchlist.from_row(rows[0]) if rows else None
 
     @staticmethod
-    def get_default() -> Watchlist | None:
-        """Get the default watchlist."""
+    def get_default(user_id: int) -> Watchlist | None:
+        """Get the default watchlist for a user."""
         sql = """
             SELECT w.id, w.name, w.is_default, w.created_at,
                    COUNT(ws.ticker) as symbol_count
             FROM watchlists w
             LEFT JOIN watchlist_symbols ws ON w.id = ws.watchlist_id
-            WHERE w.is_default = TRUE
+            WHERE w.user_id = %(user_id)s AND w.is_default = TRUE
             GROUP BY w.id, w.name, w.is_default, w.created_at
         """
-        rows = execute_query(sql)
+        rows = execute_query(sql, {"user_id": user_id})
         return Watchlist.from_row(rows[0]) if rows else None
 
     @staticmethod
-    def create(name: str, is_default: bool = False) -> Watchlist | None:
-        """Create a new watchlist."""
+    def create(user_id: int, name: str, is_default: bool = False) -> Watchlist | None:
+        """Create a new watchlist for a user."""
+        # If setting as default, unset other defaults for this user
+        if is_default:
+            unset_sql = """
+                UPDATE watchlists SET is_default = FALSE 
+                WHERE user_id = %(user_id)s AND is_default = TRUE
+            """
+            execute_write(unset_sql, {"user_id": user_id})
+
         sql = """
-            INSERT INTO watchlists (name, is_default)
-            VALUES (%(name)s, %(is_default)s)
+            INSERT INTO watchlists (user_id, name, is_default)
+            VALUES (%(user_id)s, %(name)s, %(is_default)s)
             RETURNING id, name, is_default, created_at
         """
-        row = execute_write_returning(sql, {"name": name, "is_default": is_default})
+        row = execute_write_returning(
+            sql, {"user_id": user_id, "name": name, "is_default": is_default}
+        )
         if row:
             row["symbol_count"] = 0
             return Watchlist.from_row(row)
         return None
 
     @staticmethod
-    def rename(watchlist_id: int, new_name: str) -> bool:
-        """Rename a watchlist."""
-        sql = "UPDATE watchlists SET name = %(name)s WHERE id = %(id)s"
-        return execute_write(sql, {"id": watchlist_id, "name": new_name}) > 0
+    def rename(user_id: int, watchlist_id: int, new_name: str) -> bool:
+        """Rename a watchlist (must belong to user)."""
+        sql = """
+            UPDATE watchlists SET name = %(name)s 
+            WHERE id = %(id)s AND user_id = %(user_id)s
+        """
+        return execute_write(sql, {"id": watchlist_id, "user_id": user_id, "name": new_name}) > 0
 
     @staticmethod
-    def delete(watchlist_id: int) -> bool:
-        """Delete a watchlist (cascade deletes symbols)."""
-        sql = "DELETE FROM watchlists WHERE id = %(id)s AND is_default = FALSE"
-        return execute_write(sql, {"id": watchlist_id}) > 0
+    def delete(user_id: int, watchlist_id: int) -> bool:
+        """Delete a watchlist (cascade deletes symbols, must belong to user, cannot delete default)."""
+        sql = """
+            DELETE FROM watchlists 
+            WHERE id = %(id)s AND user_id = %(user_id)s AND is_default = FALSE
+        """
+        return execute_write(sql, {"id": watchlist_id, "user_id": user_id}) > 0
 
     @staticmethod
-    def set_default(watchlist_id: int) -> bool:
-        """Set a watchlist as the default (unsets other defaults)."""
-        sql1 = "UPDATE watchlists SET is_default = FALSE WHERE is_default = TRUE"
-        sql2 = "UPDATE watchlists SET is_default = TRUE WHERE id = %(id)s"
-        execute_write(sql1)
-        return execute_write(sql2, {"id": watchlist_id}) > 0
+    def set_default(user_id: int, watchlist_id: int) -> bool:
+        """Set a watchlist as the default for a user (unsets other defaults)."""
+        sql1 = """
+            UPDATE watchlists SET is_default = FALSE 
+            WHERE user_id = %(user_id)s AND is_default = TRUE
+        """
+        sql2 = """
+            UPDATE watchlists SET is_default = TRUE 
+            WHERE id = %(id)s AND user_id = %(user_id)s
+        """
+        execute_write(sql1, {"user_id": user_id})
+        return execute_write(sql2, {"id": watchlist_id, "user_id": user_id}) > 0
 
     @staticmethod
     def get_stocks(watchlist_id: int) -> list[WatchlistStock]:
@@ -262,16 +285,17 @@ class WatchlistManager:
         return len(execute_query(sql, {"watchlist_id": watchlist_id, "ticker": ticker})) > 0
 
     @staticmethod
-    def get_watchlists_for_symbol(ticker: str) -> list[Watchlist]:
-        """Get all watchlists that contain a given symbol."""
+    def get_watchlists_for_symbol(user_id: int, ticker: str) -> list[Watchlist]:
+        """Get all watchlists for a user that contain a given symbol."""
         sql = """
             SELECT w.id, w.name, w.is_default, w.created_at,
                    COUNT(ws2.ticker) as symbol_count
             FROM watchlists w
             JOIN watchlist_symbols ws ON w.id = ws.watchlist_id AND ws.ticker = %(ticker)s
             LEFT JOIN watchlist_symbols ws2 ON w.id = ws2.watchlist_id
+            WHERE w.user_id = %(user_id)s
             GROUP BY w.id, w.name, w.is_default, w.created_at
             ORDER BY w.is_default DESC, w.name ASC
         """
-        rows = execute_query(sql, {"ticker": ticker})
+        rows = execute_query(sql, {"user_id": user_id, "ticker": ticker})
         return [Watchlist.from_row(row) for row in rows]

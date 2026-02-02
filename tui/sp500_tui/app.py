@@ -11,7 +11,6 @@ from rich.console import Console
 
 from sp500_tui.ai.client import ZAIClient, ZAIError
 from sp500_tui.ai.prompts import REGEN_OPTIONS
-from sp500_tui.config import get_tui_config
 from sp500_tui.database import init_schema
 from sp500_tui.input import (
     KEY_BACKSPACE,
@@ -23,6 +22,7 @@ from sp500_tui.input import (
     KEY_F3,
     KEY_F4,
     KEY_F5,
+    KEY_F6,
     KEY_LEFT,
     KEY_RIGHT,
     KEY_TAB,
@@ -106,6 +106,9 @@ class SP500App:
         if key == "q":
             self.state.running = False
             return
+        if key == "?":
+            self.state.show_help_overlay = not self.state.show_help_overlay
+            return
         if key == KEY_F1:
             self.state.navigate_to(View.STOCKS)
             self.state.load_watchlists()
@@ -136,8 +139,42 @@ class SP500App:
             if not self.state.glossary_terms:
                 self.state.load_glossary_terms()
             return
+        if key == KEY_F6:
+            self.state.navigate_to(View.SCREENER)
+            self.state.load_screener()
+            return
+        if key == "\x15":  # Ctrl+U - User switcher
+            self.state.navigate_to(View.USER_SWITCHER)
+            self.state.load_users_for_switcher()
+            return
+        if key == "\x10" and self.state.current_user and self.state.current_user.is_admin:
+            # Ctrl+P - User management (admin only)
+            self.state.navigate_to(View.USER_MANAGEMENT)
+            self.state.load_users_for_management()
+            return
         if key == "r" and self.state.current_view != View.SETTINGS:
             self._refresh()
+            return
+
+        # Universal search (where applicable)
+        if key == "/" and self.state.current_view in (
+            View.STOCKS,
+            View.FUNDAMENTALS,
+            View.GLOSSARY,
+            View.SCREENER,
+        ):
+            if self.state.current_view == View.STOCKS:
+                self.state.start_input("Filter stocks", "filter_stocks", self.state.stock_filter)
+            elif self.state.current_view == View.FUNDAMENTALS:
+                self.state.start_input("Ticker", "search_ticker")
+            elif self.state.current_view == View.GLOSSARY:
+                self.state.start_input(
+                    "Search terms", "glossary_search", self.state.glossary_search
+                )
+            elif self.state.current_view == View.SCREENER:
+                self.state.start_input(
+                    "Query (e.g. pe < 15)", "run_screener", self.state.screener_query
+                )
             return
 
         # View-specific keys
@@ -155,6 +192,12 @@ class SP500App:
             self._handle_settings_key(key)
         elif self.state.current_view == View.GLOSSARY:
             self._handle_glossary_key(key)
+        elif self.state.current_view == View.USER_MANAGEMENT:
+            self._handle_user_management_key(key)
+        elif self.state.current_view == View.USER_SWITCHER:
+            self._handle_user_switcher_key(key)
+        elif self.state.current_view == View.SCREENER:
+            self._handle_screener_key(key)
 
     def _handle_input_mode(self, key: str) -> None:
         """Handle keys in input mode."""
@@ -177,12 +220,16 @@ class SP500App:
             return
 
         if callback == "new_watchlist":
-            wl = WatchlistManager.create(value)
-            if wl:
-                self.state.set_message(f"Created watchlist: {value}")
-                self.state.load_watchlists()
+            self.state.ensure_user()
+            if self.state.current_user:
+                wl = WatchlistManager.create(self.state.current_user.id, value)
+                if wl:
+                    self.state.set_message(f"Created watchlist: {value}")
+                    self.state.load_watchlists()
+                else:
+                    self.state.set_message("Failed to create watchlist", error=True)
             else:
-                self.state.set_message("Failed to create watchlist", error=True)
+                self.state.set_message("No active user", error=True)
 
         elif callback == "search_ticker":
             ticker = value.upper()
@@ -216,6 +263,40 @@ class SP500App:
             term = self.state.current_glossary_term()
             if term:
                 self._generate_glossary_definition(term.term, custom_instructions=value)
+
+        elif callback == "filter_stocks":
+            # Filter stocks in current watchlist
+            self.state.filter_stocks(value)
+
+        elif callback == "run_screener":
+            self.state.run_screener(value)
+
+        elif callback == "create_user":
+            from sp500_tui.models.users import UserManager
+
+            user = UserManager.create(value, is_admin=False)
+            if user:
+                self.state.set_message(f"Created user: {value}")
+                self.state.load_users_for_management()
+            else:
+                self.state.set_message(
+                    f"Failed to create user (name may already exist)", error=True
+                )
+
+        elif callback == "rename_user":
+            from sp500_tui.models.users import UserManager
+
+            if self.state.user_mgmt_users:
+                user = self.state.user_mgmt_users[self.state.user_mgmt_selected_idx]
+                success, error = UserManager.rename(user.id, value)
+                if success:
+                    self.state.set_message(f"Renamed to: {value}")
+                    self.state.load_users_for_management()
+                    # Update current_user if we renamed ourselves
+                    if self.state.current_user and self.state.current_user.id == user.id:
+                        self.state.current_user = UserManager.get_by_id(user.id)
+                else:
+                    self.state.set_message(error, error=True)
 
     def _refresh(self) -> None:
         """Refresh current view data."""
@@ -292,7 +373,10 @@ class SP500App:
                 if wl.is_default:
                     self.state.set_message("Cannot delete default watchlist", error=True)
                 else:
-                    if WatchlistManager.delete(wl.id):
+                    self.state.ensure_user()
+                    if self.state.current_user and WatchlistManager.delete(
+                        self.state.current_user.id, wl.id
+                    ):
                         self.state.set_message(f"Deleted: {wl.name}")
                         self.state.load_watchlists()
                     else:
@@ -333,11 +417,11 @@ class SP500App:
                 else:
                     self.state.set_message(error, error=True)
 
-        elif key == "n":
+        elif key == "v":
             # Toggle news pane
             self.state.toggle_news_pane()
 
-        elif key == "N":
+        elif key == "V":
             # Enter fullscreen news view
             if self.state.detail_news:
                 self.state.selected_news_idx = 0
@@ -448,17 +532,24 @@ class SP500App:
 
     def _handle_settings_key(self, key: str) -> None:
         """Handle keys in settings view."""
+        from sp500_tui.models.settings import SettingsManager
+
         items = SETTINGS_ITEMS.get(self.state.settings_category, [])
-        config = get_tui_config()
+
+        # Ensure user is loaded
+        self.state.ensure_user()
+        if not self.state.current_user:
+            self.state.set_message("No active user", error=True)
+            return
 
         # Handle popup menu
         if self.state.settings_popup_open:
-            self._handle_settings_popup(key, items, config)
+            self._handle_settings_popup(key, items)
             return
 
         # Handle editing mode
         if self.state.settings_editing:
-            self._handle_settings_edit(key, items, config)
+            self._handle_settings_edit(key, items)
             return
 
         # Category switching
@@ -478,6 +569,10 @@ class SP500App:
             self.state.settings_category = SettingsCategory.API
             self.state.settings_selected_idx = 0
             return
+        if key == "5":
+            self.state.settings_category = SettingsCategory.USERS
+            self.state.settings_selected_idx = 0
+            return
 
         # Navigation
         if key == KEY_UP:
@@ -495,13 +590,18 @@ class SP500App:
             if not items:
                 return
             item_key, label, value_type, choices = items[self.state.settings_selected_idx]
-            section, config_key = self._get_config_location(item_key)
-            current_value = config.get(section, config_key)
+            current_value = SettingsManager.get(self.state.current_user.id, item_key)
 
             if value_type == "bool":
                 # Toggle boolean
-                config.set(section, config_key, not current_value)
-                self.state.set_message(f"{label}: {'On' if not current_value else 'Off'}")
+                new_value = "false" if current_value == "true" else "true"
+                success, error = SettingsManager.set(
+                    self.state.current_user.id, item_key, new_value
+                )
+                if success:
+                    self.state.set_message(f"{label}: {'On' if new_value == 'true' else 'Off'}")
+                else:
+                    self.state.set_message(error, error=True)
             elif (value_type == "choice" or value_type == "int") and choices:
                 # Open popup menu for choices
                 self.state.settings_popup_open = True
@@ -509,8 +609,13 @@ class SP500App:
                 self.state.settings_popup_label = label
                 # Set current selection
                 try:
-                    self.state.settings_popup_idx = choices.index(current_value)
-                except ValueError:
+                    if value_type == "int" and current_value:
+                        self.state.settings_popup_idx = choices.index(int(current_value))
+                    elif current_value:
+                        self.state.settings_popup_idx = choices.index(current_value)
+                    else:
+                        self.state.settings_popup_idx = 0
+                except (ValueError, TypeError):
                     self.state.settings_popup_idx = 0
             elif value_type == "secret":
                 # For secrets, start with empty value (user re-enters)
@@ -530,8 +635,7 @@ class SP500App:
             if not choices:
                 return
 
-            section, config_key = self._get_config_location(item_key)
-            current_value = config.get(section, config_key)
+            current_value = SettingsManager.get(self.state.current_user.id, item_key)
 
             if value_type == "choice":
                 try:
@@ -543,24 +647,36 @@ class SP500App:
                 else:
                     idx = (idx - 1) % len(choices)
                 new_value = choices[idx]
-                config.set(section, config_key, new_value)
-                self.state.set_message(f"{label}: {new_value}")
+                success, error = SettingsManager.set(
+                    self.state.current_user.id, item_key, new_value
+                )
+                if success:
+                    self.state.set_message(f"{label}: {new_value}")
+                else:
+                    self.state.set_message(error, error=True)
             elif value_type == "int":
                 try:
-                    idx = choices.index(current_value)
-                except ValueError:
+                    idx = choices.index(int(current_value)) if current_value else 0
+                except (ValueError, TypeError):
                     idx = 0
                 if key == KEY_RIGHT:
                     idx = (idx + 1) % len(choices)
                 else:
                     idx = (idx - 1) % len(choices)
-                new_value = choices[idx]
-                config.set(section, config_key, new_value)
-                self.state.set_message(f"{label}: {new_value}")
+                new_value = str(choices[idx])
+                success, error = SettingsManager.set(
+                    self.state.current_user.id, item_key, new_value
+                )
+                if success:
+                    self.state.set_message(f"{label}: {new_value}")
+                else:
+                    self.state.set_message(error, error=True)
             return
 
-    def _handle_settings_edit(self, key: str, items: list, config) -> None:
+    def _handle_settings_edit(self, key: str, items: list) -> None:
         """Handle keys while editing a setting value."""
+        from sp500_tui.models.settings import SettingsManager
+
         if key == KEY_ESCAPE:
             self.state.settings_editing = False
             self.state.settings_edit_value = ""
@@ -569,24 +685,22 @@ class SP500App:
         if key == KEY_ENTER:
             # Save the value
             item_key, label, value_type, choices = items[self.state.settings_selected_idx]
-            section, config_key = self._get_config_location(item_key)
 
-            try:
-                if value_type == "int":
-                    new_value = int(self.state.settings_edit_value)
-                else:
-                    new_value = self.state.settings_edit_value
+            # Validate and save
+            new_value_str = self.state.settings_edit_value
+            success, error = SettingsManager.set(
+                self.state.current_user.id, item_key, new_value_str
+            )
 
-                config.set(section, config_key, new_value)
-
+            if success:
                 # For API keys, also set environment variable for current session
-                if value_type == "secret" and item_key == "polygon_api_key":
-                    os.environ["POLYGON_API_KEY"] = str(new_value)
+                if value_type == "secret" and item_key == "zai_api_key":
+                    os.environ["ZAI_API_KEY"] = new_value_str
                     self.state.set_message(f"Saved: {label}")
                 else:
-                    self.state.set_message(f"Saved: {label} = {new_value}")
-            except ValueError:
-                self.state.set_message(f"Invalid value for {label}", error=True)
+                    self.state.set_message(f"Saved: {label} = {new_value_str}")
+            else:
+                self.state.set_message(error, error=True)
 
             self.state.settings_editing = False
             self.state.settings_edit_value = ""
@@ -600,8 +714,10 @@ class SP500App:
         if key and all(c.isprintable() for c in key):
             self.state.settings_edit_value += key
 
-    def _handle_settings_popup(self, key: str, items: list, config) -> None:
+    def _handle_settings_popup(self, key: str, items: list) -> None:
         """Handle keys in settings popup menu."""
+        from sp500_tui.models.settings import SettingsManager
+
         if key == KEY_ESCAPE:
             # Close popup without saving
             self.state.settings_popup_open = False
@@ -620,15 +736,16 @@ class SP500App:
         if key == KEY_ENTER or key == " ":
             # Select the highlighted choice
             item_key, label, value_type, choices = items[self.state.settings_selected_idx]
-            section, config_key = self._get_config_location(item_key)
 
-            selected_value = self.state.settings_popup_choices[self.state.settings_popup_idx]
-            # Convert back to int if needed
-            if value_type == "int":
-                selected_value = int(selected_value)
+            selected_value_str = self.state.settings_popup_choices[self.state.settings_popup_idx]
 
-            config.set(section, config_key, selected_value)
-            self.state.set_message(f"{label}: {selected_value}")
+            success, error = SettingsManager.set(
+                self.state.current_user.id, item_key, selected_value_str
+            )
+            if success:
+                self.state.set_message(f"{label}: {selected_value_str}")
+            else:
+                self.state.set_message(error, error=True)
 
             # Close popup
             self.state.settings_popup_open = False
@@ -648,6 +765,7 @@ class SP500App:
             SettingsCategory.CHARTS: "charts",
             SettingsCategory.BEHAVIOR: "behavior",
             SettingsCategory.API: "api",
+            SettingsCategory.USERS: "users",
         }
         return section_map[self.state.settings_category], key
 
@@ -795,7 +913,9 @@ class SP500App:
                 _, instructions = option
                 self.state.glossary_show_regen_menu = False
                 # Delete cached definition first
-                GlossaryManager.delete_cached_definition(term.term)
+                self.state.ensure_user()
+                user_id = self.state.current_user.id if self.state.current_user else None
+                GlossaryManager.delete_cached_definition(term.term, user_id=user_id)
                 self._generate_glossary_definition(term.term, custom_instructions=instructions)
             return
 
@@ -833,8 +953,10 @@ class SP500App:
                 stream_callback=stream_callback,
             )
 
-            # Save to cache
-            GlossaryManager.save_definition(entry)
+            # Save to cache (as user override if user is logged in, shared otherwise)
+            self.state.ensure_user()
+            user_id = self.state.current_user.id if self.state.current_user else None
+            GlossaryManager.save_definition(entry, user_id=user_id)
 
             # Update state
             self.state.glossary_definition = entry
@@ -857,16 +979,161 @@ class SP500App:
             self.state.glossary_stream_content = ""
             logger.error(f"Unexpected error generating glossary: {e}")
 
+    # =========================================================================
+    # USER MANAGEMENT VIEWS
+    # =========================================================================
+
+    def _handle_user_management_key(self, key: str) -> None:
+        """Handle keys in user management view."""
+        from sp500_tui.models.users import UserManager
+
+        # Confirm delete prompt
+        if self.state.user_mgmt_confirm_delete:
+            if key == "y":
+                user = self.state.user_mgmt_users[self.state.user_mgmt_selected_idx]
+                success, error = UserManager.delete(user.id)
+                if success:
+                    self.state.set_message(f"Deleted user: {user.name}")
+                    self.state.load_users_for_management()
+                else:
+                    self.state.set_message(error, error=True)
+                self.state.user_mgmt_confirm_delete = False
+            elif key == "n" or key == KEY_ESCAPE:
+                self.state.user_mgmt_confirm_delete = False
+            return
+
+        # Escape: go back
+        if key == KEY_ESCAPE:
+            self.state.navigate_to(View.SETTINGS)
+            return
+
+        # Navigation
+        if key == KEY_UP:
+            if self.state.user_mgmt_selected_idx > 0:
+                self.state.user_mgmt_selected_idx -= 1
+            return
+
+        if key == KEY_DOWN:
+            if self.state.user_mgmt_selected_idx < len(self.state.user_mgmt_users) - 1:
+                self.state.user_mgmt_selected_idx += 1
+            return
+
+        # Enter: Switch to selected user
+        if key == KEY_ENTER:
+            if self.state.user_mgmt_users:
+                user = self.state.user_mgmt_users[self.state.user_mgmt_selected_idx]
+                success = UserManager.set_active(user.id)
+                if success:
+                    self.state.current_user = user
+                    self.state.set_message(f"Switched to user: {user.name}")
+                    # Reload data for new user
+                    self.state.load_watchlists()
+                else:
+                    self.state.set_message("Failed to switch user", error=True)
+            return
+
+        # n: New user
+        if key == "n":
+            self.state.start_input("New user name", "create_user")
+            return
+
+        # d: Delete user
+        if key == "d":
+            if self.state.user_mgmt_users:
+                self.state.user_mgmt_confirm_delete = True
+            return
+
+        # t: Toggle admin
+        if key == "t":
+            if self.state.user_mgmt_users:
+                user = self.state.user_mgmt_users[self.state.user_mgmt_selected_idx]
+                success, error = UserManager.toggle_admin(user.id)
+                if success:
+                    self.state.load_users_for_management()
+                    self.state.set_message(f"Toggled admin for: {user.name}")
+                else:
+                    self.state.set_message(error, error=True)
+            return
+
+        # r: Rename user
+        if key == "r":
+            if self.state.user_mgmt_users:
+                user = self.state.user_mgmt_users[self.state.user_mgmt_selected_idx]
+                self.state.start_input(f"Rename '{user.name}'", "rename_user", user.name)
+            return
+
+    def _handle_user_switcher_key(self, key: str) -> None:
+        """Handle keys in user switcher view."""
+        from sp500_tui.models.users import UserManager
+
+        # Escape: close switcher
+        if key == KEY_ESCAPE:
+            self.state.navigate_to(self.state.previous_view or View.STOCKS)
+            return
+
+        # Navigation
+        if key == KEY_UP:
+            if self.state.user_switcher_selected_idx > 0:
+                self.state.user_switcher_selected_idx -= 1
+            return
+
+        if key == KEY_DOWN:
+            if self.state.user_switcher_selected_idx < len(self.state.user_switcher_users) - 1:
+                self.state.user_switcher_selected_idx += 1
+            return
+
+        # Enter: Switch to selected user
+        if key == KEY_ENTER:
+            if self.state.user_switcher_users:
+                user = self.state.user_switcher_users[self.state.user_switcher_selected_idx]
+                success = UserManager.set_active(user.id)
+                if success:
+                    self.state.current_user = user
+                    self.state.set_message(f"Switched to user: {user.name}")
+                    # Reload data for new user
+                    self.state.load_watchlists()
+                    self.state.navigate_to(View.STOCKS)
+                else:
+                    self.state.set_message("Failed to switch user", error=True)
+            return
+
+    # =========================================================================
+    # SCREENER VIEW
+    # =========================================================================
+
+    def _handle_screener_key(self, key: str) -> None:
+        """Handle keys in screener view."""
+        if key == KEY_UP:
+            if self.state.screener_selected_idx > 0:
+                self.state.screener_selected_idx -= 1
+                self.state.adjust_screener_scroll()
+            return
+
+        if key == KEY_DOWN:
+            if self.state.screener_selected_idx < len(self.state.screener_results) - 1:
+                self.state.screener_selected_idx += 1
+                self.state.adjust_screener_scroll()
+            return
+
+        if key == KEY_ENTER:
+            # Go to detail view
+            item = self.state.current_screener_result()
+            if item:
+                self.state.load_stock_detail(item.ticker)
+                self.state.navigate_to(View.STOCK_DETAIL)
+            return
+
 
 def setup_logging(verbose: bool = False) -> None:
-    """Set up logging configuration using XDG state directory."""
-    from sp500_tui.config import get_tui_log_file
+    """Set up logging configuration."""
+    from pathlib import Path
 
     level = logging.DEBUG if verbose else logging.WARNING
-    log_file = get_tui_log_file()
 
-    # Ensure parent directory exists
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+    # Log to ~/.local/state/sp500-tui/app.log
+    log_dir = Path.home() / ".local" / "state" / "sp500-tui"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "app.log"
 
     logging.basicConfig(
         level=level,

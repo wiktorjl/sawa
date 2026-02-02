@@ -378,6 +378,54 @@ class NewsArticle:
         )
 
 
+@dataclass
+class ScreenerResult:
+    """Unified data for screening."""
+
+    ticker: str
+    name: str
+    sector: str
+    price: float | None = None
+    change_pct: float | None = None
+    market_cap: float | None = None
+    volume: int | None = None
+    pe: float | None = None
+    pb: float | None = None
+    ps: float | None = None
+    dividend_yield: float | None = None
+    debt_to_equity: float | None = None
+    roe: float | None = None
+    eps: float | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "ScreenerResult":
+        """Create from row."""
+
+        def to_float(val: Any) -> float | None:
+            if val is None:
+                return None
+            if isinstance(val, Decimal):
+                return float(val)
+            return float(val)
+
+        return cls(
+            ticker=row["ticker"],
+            name=row["name"],
+            sector=row.get("sic_description") or "Unknown",
+            price=to_float(row.get("price")),
+            change_pct=None,  # Need 2 days for this, maybe skip or calc later
+            market_cap=to_float(row.get("market_cap")),
+            volume=int(row.get("volume")) if row.get("volume") else None,
+            pe=to_float(row.get("price_to_earnings")),
+            pb=to_float(row.get("price_to_book")),
+            ps=to_float(row.get("price_to_sales")),
+            dividend_yield=to_float(row.get("dividend_yield")),
+            debt_to_equity=to_float(row.get("debt_to_equity")),
+            roe=to_float(row.get("return_on_equity")),
+            eps=to_float(row.get("earnings_per_share")),
+        )
+
+
 class StockQueries:
     """Query methods for stock and market data."""
 
@@ -628,3 +676,33 @@ class StockQueries:
         """
         rows = execute_query(sql, {"ticker": ticker, "days": days})
         return {row["sentiment"]: row["count"] for row in rows if row.get("sentiment")}
+
+    @staticmethod
+    def get_screener_universe() -> list[ScreenerResult]:
+        """Get full universe of data for screening."""
+        sql = """
+            SELECT
+                c.ticker,
+                c.name,
+                c.sic_description,
+                c.market_cap,
+                fr.price,
+                fr.price_to_earnings,
+                fr.price_to_book,
+                fr.price_to_sales,
+                fr.dividend_yield,
+                fr.debt_to_equity,
+                fr.return_on_equity,
+                fr.earnings_per_share,
+                fr.enterprise_value,
+                fr.average_volume as volume
+            FROM companies c
+            LEFT JOIN (
+                SELECT DISTINCT ON (ticker) *
+                FROM financial_ratios
+                ORDER BY ticker, date DESC
+            ) fr ON c.ticker = fr.ticker
+            ORDER BY c.market_cap DESC NULLS LAST
+        """
+        rows = execute_query(sql)
+        return [ScreenerResult.from_row(row) for row in rows]
