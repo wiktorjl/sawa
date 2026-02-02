@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from sp500_tools.utils.xdg import load_config
+from sawa.utils.xdg import load_config
 
 # App name for XDG paths
 APP_NAME = "sp500-tools"

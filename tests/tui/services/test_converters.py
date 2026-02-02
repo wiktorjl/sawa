@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from sp500_tools.domain import models as domain
+from sawa.domain import models as domain
 
 # Add TUI to path for testing (must be before TUI imports)
 tui_path = Path(__file__).parent.parent.parent.parent / "tui"
 sys.path.insert(0, str(tui_path))
 
-from sp500_tui.models.queries import (  # noqa: E402
+from sawa_tui.models.queries import (  # noqa: E402
     BalanceSheet,
     CashFlow,
     Company,
@@ -24,7 +24,7 @@ from sp500_tui.models.queries import (  # noqa: E402
     StockPrice,
     TreasuryYields,
 )
-from sp500_tui.services.converters import (  # noqa: E402
+from sawa_tui.services.converters import (  # noqa: E402
     balance_sheet_to_tui,
     cash_flow_to_tui,
     company_info_to_tui,

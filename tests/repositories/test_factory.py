@@ -2,8 +2,8 @@
 
 import pytest
 
-from sp500_tools.repositories.config import RepositoryConfig
-from sp500_tools.repositories.factory import (
+from sawa.repositories.config import RepositoryConfig
+from sawa.repositories.factory import (
     RepositoryFactory,
     get_factory,
     reset_factory,

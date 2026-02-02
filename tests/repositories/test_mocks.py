@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from sp500_tools.domain.models import FinancialRatio
+from sawa.domain.models import FinancialRatio
 from tests.repositories.mocks import (
     MockCompanyRepository,
     MockPriceRepository,

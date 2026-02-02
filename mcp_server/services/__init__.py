@@ -1,6 +1,6 @@
 """MCP service layer for repository-based data access.
 
-This module provides services that wrap the sp500_tools repository layer,
+This module provides services that wrap the sawa repository layer,
 converting domain models to MCP-compatible dictionaries.
 
 Usage:

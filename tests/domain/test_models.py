@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from sp500_tools.domain.models import (
+from sawa.domain.models import (
     BalanceSheet,
     CashFlow,
     CompanyInfo,

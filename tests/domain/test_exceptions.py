@@ -2,7 +2,7 @@
 
 import pytest
 
-from sp500_tools.domain.exceptions import (
+from sawa.domain.exceptions import (
     AuthenticationError,
     NotFoundError,
     ProviderError,

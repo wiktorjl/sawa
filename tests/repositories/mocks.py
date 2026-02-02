@@ -18,7 +18,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from sp500_tools.domain.models import (
+from sawa.domain.models import (
     BalanceSheet,
     CashFlow,
     CompanyInfo,
@@ -29,7 +29,7 @@ from sp500_tools.domain.models import (
     StockPrice,
     TreasuryYield,
 )
-from sp500_tools.repositories.base import (
+from sawa.repositories.base import (
     CompanyRepository,
     EconomyRepository,
     FundamentalRepository,

@@ -7,7 +7,7 @@ These converters transform domain models back to that format.
 from decimal import Decimal
 from typing import Any
 
-from sp500_tools.domain import models as domain
+from sawa.domain import models as domain
 
 
 def _decimal_to_float(value: Decimal | None) -> float | None:

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sp500-tools"
+name = "sawa"
 version = "0.3.0"
 description = "S&P 500 data download and processing tools"
 readme = "README.md"
@@ -27,13 +27,17 @@ dev = [
     "pytest-cov",
     "mypy>=1.0",
     "ruff>=0.1.0",
+    "types-psycopg2",
+    "types-requests",
+    "types-python-dateutil",
+    "boto3-stubs[s3]",
 ]
 
 [project.scripts]
-sp500 = "sp500_tools.cli:main"
+sawa = "sawa.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["sp500_tools"]
+packages = ["sawa"]
 
 [tool.ruff]
 line-length = 100
