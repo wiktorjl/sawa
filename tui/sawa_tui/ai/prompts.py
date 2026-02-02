@@ -68,7 +68,7 @@ def build_glossary_prompt(term: str, custom_instructions: str = "") -> list[dict
     ]
 
 
-# Predefined regeneration options
+# Predefined regeneration options for glossary
 REGEN_OPTIONS = {
     "1": ("More technical", "Use more technical language and include formulas if applicable."),
     "2": (
@@ -80,4 +80,96 @@ REGEN_OPTIONS = {
         "Focus on practical use",
         "Focus on how investors actually use this metric in decision-making.",
     ),
+}
+
+
+# Company Overview Prompts
+
+COMPANY_OVERVIEW_SYSTEM_PROMPT = (
+    "You are a senior equity research analyst who provides clear, actionable company "
+    "analysis for investors. Your analysis should be factual, balanced, and based on "
+    "publicly available information. Always return valid JSON without any markdown "
+    "formatting or code blocks."
+)
+
+COMPANY_OVERVIEW_USER_PROMPT = """Analyze the company: {ticker} ({company_name})
+Sector: {sector}
+
+Return a JSON object with this exact structure:
+{{
+  "main_product": "A 2-3 sentence description of the company's most important product or service. What generates the majority of their revenue or defines their market position?",
+
+  "revenue_model": "A 2-3 sentence explanation of how the company makes money. Include key revenue streams, business model type (subscription, transaction, advertising, etc.), and any notable pricing dynamics.",
+
+  "headwinds": [
+    "Major challenge or risk #1 facing the company (1-2 sentences)",
+    "Major challenge or risk #2 (1-2 sentences)",
+    "Major challenge or risk #3 (1-2 sentences)"
+  ],
+
+  "tailwinds": [
+    "Growth driver or opportunity #1 (1-2 sentences)",
+    "Growth driver or opportunity #2 (1-2 sentences)",
+    "Growth driver or opportunity #3 (1-2 sentences)"
+  ],
+
+  "sector_outlook": "2-3 sentences on how the overall sector/industry is performing. Include recent trends, growth prospects, and any macro factors affecting the sector.",
+
+  "competitive_position": "2-3 sentences on where this company stands relative to competitors. Include market share context, competitive advantages (moats), and key differentiators."
+}}
+
+Guidelines:
+- Be specific with examples where possible (e.g., "iPhone generates ~50% of revenue")
+- For headwinds/tailwinds, prioritize the most impactful factors
+- Mention specific competitors by name in competitive_position
+- Keep each section focused and actionable for investors
+- If information is uncertain, indicate with "reportedly" or "estimated"
+
+{custom_instructions}
+
+Return ONLY the JSON object, no additional text or formatting."""
+
+
+def build_company_overview_prompt(
+    ticker: str,
+    company_name: str,
+    sector: str | None = None,
+    custom_instructions: str = "",
+) -> list[dict[str, str]]:
+    """
+    Build the messages array for a company overview generation request.
+
+    Args:
+        ticker: Stock ticker symbol
+        company_name: Full company name
+        sector: Industry/sector description
+        custom_instructions: Optional custom instructions for regeneration
+
+    Returns:
+        List of message dicts for the API request
+    """
+    custom_text = ""
+    if custom_instructions:
+        custom_text = f"\nAdditional instructions: {custom_instructions}"
+
+    return [
+        {"role": "system", "content": COMPANY_OVERVIEW_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": COMPANY_OVERVIEW_USER_PROMPT.format(
+                ticker=ticker,
+                company_name=company_name,
+                sector=sector or "Unknown",
+                custom_instructions=custom_text,
+            ),
+        },
+    ]
+
+
+# Predefined regeneration options for company overview
+OVERVIEW_REGEN_OPTIONS = {
+    "1": ("More bullish focus", "Focus more on growth potential and positive catalysts."),
+    "2": ("More bearish focus", "Focus more on risks, challenges, and potential problems."),
+    "3": ("Technical deep-dive", "Include more technical and product-specific details."),
+    "4": ("Valuation context", "Add valuation and price context to each section."),
 }
