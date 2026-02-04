@@ -103,6 +103,11 @@ class SP500App:
             self._handle_input_mode(key)
             return
 
+        # Help overlay - can be closed with Esc
+        if self.state.show_help_overlay and key == KEY_ESCAPE:
+            self.state.show_help_overlay = False
+            return
+
         # Settings editing mode - handle before global keys
         if self.state.settings_editing or self.state.settings_popup_open:
             self._handle_settings_key(key)
@@ -221,6 +226,7 @@ class SP500App:
         value = self.state.input_value.strip()
         callback = self.state.input_callback
         self.state.cancel_input()
+        self.state.needs_redraw = True
 
         if not value:
             return
@@ -246,7 +252,9 @@ class SP500App:
         elif callback == "add_stock":
             ticker = value.upper()
             wl = self.state.current_watchlist()
-            if wl:
+            if not wl:
+                self.state.set_message("No watchlist selected", error=True)
+            else:
                 success, error = WatchlistManager.add_symbol(wl.id, ticker)
                 if success:
                     self.state.set_message(f"Added {ticker} to {wl.name}")
@@ -497,7 +505,9 @@ class SP500App:
     def _generate_company_overview(self, custom_instructions: str = "") -> None:
         """Generate a company overview using AI."""
         if not self.ai_client.is_configured():
-            self.state.detail_overview_error = "ZAI_API_KEY not configured. Set it in Settings or environment."
+            self.state.detail_overview_error = (
+                "ZAI_API_KEY not configured. Set it in Settings or environment."
+            )
             return
 
         self.state.detail_overview_loading = True
