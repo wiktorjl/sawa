@@ -1,10 +1,11 @@
 """
-Main CLI entry point for sp500 command.
+Main CLI entry point for sawa command.
 
 Usage:
-    sp500 coldstart              # Full database setup
-    sp500 update                 # Incremental update
-    sp500 update --from-date 2024-01-01  # Force update from date
+    sawa coldstart              # Full database setup
+    sawa daily                  # Daily price update
+    sawa weekly                 # Weekly fundamentals/economy update
+    sawa update                 # Legacy: runs both daily + weekly
 """
 
 import argparse
@@ -21,11 +22,20 @@ from sawa.utils.dates import parse_date
 load_dotenv()
 
 
+def get_log_dir(args) -> Path | None:
+    """Get log directory from args, creating if needed."""
+    if hasattr(args, "log_dir") and args.log_dir:
+        log_dir = Path(args.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir
+    return None
+
+
 def cmd_coldstart(args) -> int:
     """Run cold start."""
     from sawa.coldstart import run_coldstart
 
-    logger = setup_logging(args.verbose)
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="coldstart")
 
     # Get credentials
     api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
@@ -84,11 +94,143 @@ def cmd_coldstart(args) -> int:
         return 1
 
 
+def cmd_daily(args) -> int:
+    """Run daily price update."""
+    from sawa.daily import run_daily
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="daily")
+
+    # Get credentials (S3 not needed - using REST API)
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        stats = run_daily(
+            api_key=api_key,
+            database_url=db_url,
+            force_from_date=args.from_date,
+            skip_news=args.skip_news,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Daily update failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_add_symbol(args) -> int:
+    """Add new symbols to database."""
+    from sawa.add_symbol import run_add_symbols
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="add_symbol")
+
+    # Get credentials
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    # Collect symbols from args and/or file
+    symbols: list[str] = list(args.symbols) if args.symbols else []
+
+    if args.file:
+        if not args.file.exists():
+            logger.error(f"File not found: {args.file}")
+            return 1
+        with open(args.file) as f:
+            for line in f:
+                sym = line.strip()
+                if sym and not sym.startswith("#"):
+                    symbols.append(sym)
+
+    if not symbols:
+        logger.error("No symbols specified. Use positional args or --file")
+        return 1
+
+    # Remove duplicates, preserve order
+    seen: set[str] = set()
+    unique_symbols: list[str] = []
+    for s in symbols:
+        s_upper = s.upper()
+        if s_upper not in seen:
+            seen.add(s_upper)
+            unique_symbols.append(s_upper)
+
+    try:
+        stats = run_add_symbols(
+            api_key=api_key,
+            database_url=db_url,
+            symbols=unique_symbols,
+            years=args.years,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Add symbols failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_weekly(args) -> int:
+    """Run weekly data update."""
+    from sawa.weekly import run_weekly
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="weekly")
+
+    # Get credentials
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        stats = run_weekly(
+            api_key=api_key,
+            database_url=db_url,
+            output_dir=Path(args.output_dir),
+            skip_fundamentals=args.skip_fundamentals,
+            skip_economy=args.skip_economy,
+            skip_overviews=args.skip_overviews,
+            skip_ratios=args.skip_ratios,
+            skip_news=args.skip_news,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Weekly update failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_update(args) -> int:
-    """Run incremental update."""
+    """Run incremental update (legacy: daily + weekly)."""
     from sawa.update import run_update
 
-    logger = setup_logging(args.verbose)
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="update")
 
     # Get credentials
     api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
@@ -127,18 +269,21 @@ def cmd_update(args) -> int:
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        prog="sp500",
+        prog="sawa",
         description="S&P 500 data download and database management.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Commands:
   coldstart    Full database setup from scratch
-  update       Incremental update since last data
+  daily        Daily stock price update
+  weekly       Weekly fundamentals/economy update
+  update       Legacy: combined daily + weekly update
 
 Examples:
-  sp500 coldstart --years 5
-  sp500 update
-  sp500 update --from-date 2024-01-01
+  sawa coldstart --years 5
+  sawa daily
+  sawa weekly --skip-news
+  sawa daily --dry-run
 
 Environment Variables:
   POLYGON_API_KEY         Polygon/Massive API key
@@ -198,14 +343,91 @@ Environment Variables:
         "--skip-ratios", action="store_true", help="Skip financial ratios download"
     )
     cold_parser.add_argument("--skip-news", action="store_true", help="Skip news download")
+    cold_parser.add_argument("--log-dir", help="Directory for log files")
     cold_parser.add_argument("-v", "--verbose", action="store_true")
     cold_parser.set_defaults(func=cmd_coldstart)
 
-    # Update subcommand
+    # Daily update subcommand (uses REST API, no S3 needed)
+    daily_parser = subparsers.add_parser(
+        "daily",
+        help="Daily stock price and news update",
+        description="Update stock prices and news via REST API (fast, daily operation).",
+    )
+    daily_parser.add_argument(
+        "--from-date",
+        type=parse_date,
+        metavar="YYYY-MM-DD",
+        help="Force update from specific date",
+    )
+    daily_parser.add_argument("--api-key", help="Polygon API key")
+    daily_parser.add_argument("--database-url", help="PostgreSQL URL")
+    daily_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
+    daily_parser.add_argument("--log-dir", help="Directory for log files")
+    daily_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    daily_parser.add_argument("-v", "--verbose", action="store_true")
+    daily_parser.set_defaults(func=cmd_daily)
+
+    # Add symbol subcommand
+    add_parser = subparsers.add_parser(
+        "add-symbol",
+        help="Add new symbols to database",
+        description="Add new stock symbols with company info and price history.",
+    )
+    add_parser.add_argument(
+        "symbols",
+        nargs="*",
+        help="Ticker symbols to add (e.g., U PLTR COIN)",
+    )
+    add_parser.add_argument(
+        "--file", "-f",
+        type=Path,
+        help="File with symbols (one per line)",
+    )
+    add_parser.add_argument(
+        "--years",
+        type=int,
+        default=5,
+        help="Years of price history to fetch (default: 5)",
+    )
+    add_parser.add_argument("--api-key", help="Polygon API key")
+    add_parser.add_argument("--database-url", help="PostgreSQL URL")
+    add_parser.add_argument("--log-dir", help="Directory for log files")
+    add_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    add_parser.add_argument("-v", "--verbose", action="store_true")
+    add_parser.set_defaults(func=cmd_add_symbol)
+
+    # Weekly update subcommand
+    weekly_parser = subparsers.add_parser(
+        "weekly",
+        help="Weekly fundamentals/economy update",
+        description="Update slow-changing data: fundamentals, economy, overviews, ratios, news.",
+    )
+    weekly_parser.add_argument("--output-dir", default="data", help="Output data directory")
+    weekly_parser.add_argument("--api-key", help="Polygon API key")
+    weekly_parser.add_argument("--database-url", help="PostgreSQL URL")
+    weekly_parser.add_argument(
+        "--skip-fundamentals", action="store_true", help="Skip fundamentals update"
+    )
+    weekly_parser.add_argument(
+        "--skip-economy", action="store_true", help="Skip economy data update"
+    )
+    weekly_parser.add_argument(
+        "--skip-overviews", action="store_true", help="Skip company overviews update"
+    )
+    weekly_parser.add_argument(
+        "--skip-ratios", action="store_true", help="Skip financial ratios update"
+    )
+    weekly_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
+    weekly_parser.add_argument("--log-dir", help="Directory for log files")
+    weekly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    weekly_parser.add_argument("-v", "--verbose", action="store_true")
+    weekly_parser.set_defaults(func=cmd_weekly)
+
+    # Legacy update subcommand
     update_parser = subparsers.add_parser(
         "update",
-        help="Incremental update since last data",
-        description="Check last date in database and pull new data.",
+        help="Legacy: combined daily + weekly update",
+        description="Check last date in database and pull new data (prices + fundamentals).",
     )
     update_parser.add_argument(
         "--from-date",
@@ -218,6 +440,7 @@ Environment Variables:
     update_parser.add_argument("--s3-access-key", help="Polygon S3 access key")
     update_parser.add_argument("--s3-secret-key", help="Polygon S3 secret key")
     update_parser.add_argument("--database-url", help="PostgreSQL URL")
+    update_parser.add_argument("--log-dir", help="Directory for log files")
     update_parser.add_argument("-v", "--verbose", action="store_true")
     update_parser.set_defaults(func=cmd_update)
 
