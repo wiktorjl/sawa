@@ -14,9 +14,11 @@ from .market_data import (
     get_financial_ratios_async,
     get_latest_price,
     get_latest_price_async,
+    get_live_price,
     get_stock_prices,
     get_stock_prices_async,
 )
+from .scanner import scan_ytd_performance
 
 __all__ = [
     # Companies
@@ -39,4 +41,7 @@ __all__ = [
     "get_financial_ratios_async",
     "get_latest_price",
     "get_latest_price_async",
+    "get_live_price",
+    # Scanner
+    "scan_ytd_performance",
 ]

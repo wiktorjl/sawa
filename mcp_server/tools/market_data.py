@@ -1,7 +1,8 @@
 """Market data MCP tools (prices and financial ratios)."""
 
 import logging
-from datetime import date
+import os
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..database import execute_query
@@ -161,7 +162,7 @@ def get_financial_ratios(
 
 def get_latest_price(ticker: str) -> dict[str, Any] | None:
     """
-    Get the most recent stock price for a ticker.
+    Get the most recent stock price for a ticker from database.
 
     Args:
         ticker: Stock ticker symbol
@@ -185,3 +186,84 @@ def get_latest_price(ticker: str) -> dict[str, Any] | None:
 
     results = execute_query(sql, {"ticker": ticker.upper()})
     return results[0] if results else None
+
+
+def get_live_price(ticker: str, days: int = 7) -> dict[str, Any]:
+    """
+    Get live stock price from Polygon API.
+
+    Fetches the most recent price data directly from Polygon API,
+    not from the database. Returns recent price history.
+
+    Args:
+        ticker: Stock ticker symbol
+        days: Number of days of history to fetch (default: 7)
+
+    Returns:
+        Dictionary with latest price info and recent history
+    """
+    from sawa.api.client import PolygonClient
+    from sawa.utils.config import get_env
+
+    api_key = get_env("POLYGON_API_KEY")
+    if not api_key:
+        raise ValueError("POLYGON_API_KEY not configured")
+
+    client = PolygonClient(api_key, logger)
+
+    # Calculate date range
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    try:
+        # Fetch recent prices
+        data = client.get(
+            "aggregates",
+            path_params={"ticker": ticker.upper(), "start": start_date, "end": end_date},
+            params={"adjusted": "true", "sort": "desc", "limit": days},
+        )
+
+        results = data.get("results", [])
+
+        if not results:
+            raise ValueError(f"No price data found for {ticker}")
+
+        # Format response
+        latest = results[0]
+        latest_date = datetime.fromtimestamp(latest["t"] / 1000)
+
+        # Calculate price change
+        prev_close = results[1]["c"] if len(results) > 1 else latest["c"]
+        change = latest["c"] - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0
+
+        return {
+            "ticker": ticker.upper(),
+            "latest_price": latest["c"],
+            "latest_date": latest_date.strftime("%Y-%m-%d %H:%M:%S"),
+            "open": latest["o"],
+            "high": latest["h"],
+            "low": latest["l"],
+            "close": latest["c"],
+            "volume": latest["v"],
+            "change": round(change, 2),
+            "change_percent": round(change_pct, 2),
+            "previous_close": prev_close,
+            "history": [
+                {
+                    "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                    "open": bar["o"],
+                    "high": bar["h"],
+                    "low": bar["l"],
+                    "close": bar["c"],
+                    "volume": bar["v"],
+                }
+                for bar in results
+            ],
+            "source": "polygon_api",
+            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching live price for {ticker}: {e}")
+        raise
