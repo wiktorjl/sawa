@@ -222,7 +222,7 @@ def _render_stock_header(state: AppState) -> Panel:
 
     # Line 1: Ticker, Name, Sector
     text = Text()
-    text.append(f" {company.ticker} ", style=f"bold {theme.text_bright} on {theme.primary}")
+    text.append(f" {company.ticker} ", style=f"bold {theme.text_bright}")
     text.append(f" {company.name} ", style=f"bold {theme.text}")
     text.append(f" {company.sector or 'Unknown'} ", style=theme.text_muted)
     if company.exchange:
@@ -320,41 +320,27 @@ def _render_price_chart(state: AppState) -> Panel:
     max_p = max(highs)
     range_p = max_p - min_p or 1
 
-    # Build chart with candlestick-style bars
+    price_per_row = range_p / max(1, chart_height - 1) if chart_height > 1 else 1
+
     lines = []
-    for row in range(chart_height, -1, -1):
-        threshold_high = min_p + (range_p * (row + 0.5) / chart_height)
-        threshold_low = min_p + (range_p * (row - 0.5) / chart_height)
+    for row in range(chart_height - 1, -1, -1):
+        row_top = min_p + price_per_row * (row + 1)
+        row_bottom = min_p + price_per_row * row
         line_chars = []
 
         for i in range(len(prices)):
             hi, lo, cl = highs[i], lows[i], closes[i]
             prev_c = closes[i - 1] if i > 0 else cl
 
-            # Determine what to draw at this position
-            if lo <= threshold_high and hi >= threshold_low:
-                # Price range crosses this row
-                if cl >= prev_c:
-                    # Up candle
-                    if cl >= threshold_low and cl <= threshold_high:
-                        line_chars.append(("█", theme.positive))
-                    elif hi >= threshold_low and lo <= threshold_high:
-                        line_chars.append(("│", theme.positive))
-                    else:
-                        line_chars.append((" ", ""))
-                else:
-                    # Down candle
-                    if cl >= threshold_low and cl <= threshold_high:
-                        line_chars.append(("█", theme.negative))
-                    elif hi >= threshold_low and lo <= threshold_high:
-                        line_chars.append(("│", theme.negative))
-                    else:
-                        line_chars.append((" ", ""))
+            if lo >= row_bottom and hi <= row_top:
+                line_chars.append(("█", theme.positive if cl >= prev_c else theme.negative))
+            elif hi >= row_bottom and lo <= row_top:
+                line_chars.append(("│", theme.positive if cl >= prev_c else theme.negative))
             else:
                 line_chars.append((" ", ""))
 
         # Y-axis label
-        if row == chart_height:
+        if row == chart_height - 1:
             label = f"${max_p:>8.2f}"
         elif row == 0:
             label = f"${min_p:>8.2f}"
@@ -576,7 +562,7 @@ def _render_news_pane(state: AppState) -> Panel:
     else:
         content.append(" No recent news available", style=theme.text_muted)
 
-    title = f"[{theme.header}]News & Sentiment[/] [{theme.text_muted}](n:toggle N:fullscreen)[/]"
+    title = f"[{theme.header}]News & Sentiment[/]"
     return Panel(content, title=title, border_style=theme.text_muted)
 
 
