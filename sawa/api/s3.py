@@ -85,8 +85,8 @@ class PolygonS3Client:
                     return tmp.name
             except ClientError as e:
                 error_code = e.response.get("Error", {}).get("Code")
-                if error_code == "404":
-                    # No data for this date (weekend/holiday) - don't retry
+                if error_code in ("404", "403"):
+                    # No data for this date (weekend/holiday/not yet available) - don't retry
                     return None
                 if error_code in ("500", "502", "503", "504", "SlowDown"):
                     # Transient errors - retry
