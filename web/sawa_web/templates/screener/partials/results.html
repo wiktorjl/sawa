@@ -1,0 +1,91 @@
+{% if results %}
+<div class="results-header mb-4">
+    <span class="text-muted">Found <strong class="text-cyan">{{ count }}</strong> stocks matching:</span>
+    <code class="ml-2">{{ query }}</code>
+</div>
+
+<div class="table-container">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Symbol</th>
+                <th>Company</th>
+                <th>Sector</th>
+                <th class="text-right">Price</th>
+                <th class="text-right">Change</th>
+                <th class="text-right">Market Cap</th>
+                <th class="text-right">P/E</th>
+                <th class="text-right">P/B</th>
+                <th class="text-right">Yield</th>
+                <th class="text-right">ROE</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for stock in results %}
+            <tr class="cursor-pointer" onclick="window.location='/stocks/{{ stock.ticker }}'">
+                <td>
+                    <span class="stock-symbol">{{ stock.ticker }}</span>
+                </td>
+                <td>
+                    <span class="font-medium">{{ stock.name }}</span>
+                </td>
+                <td>
+                    {% if stock.sector %}
+                    <span class="badge badge-purple text-xs">{{ stock.sector[:20] }}{% if stock.sector|length > 20 %}...{% endif %}</span>
+                    {% else %}
+                    <span class="text-muted">-</span>
+                    {% endif %}
+                </td>
+                <td class="numeric">
+                    {% if stock.price %}
+                        ${{ "%.2f"|format(stock.price | float) }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td class="numeric {% if stock.change_percent %}{% if (stock.change_percent | float) > 0 %}positive{% elif (stock.change_percent | float) < 0 %}negative{% endif %}{% endif %}">
+                    {% if stock.change_percent %}
+                        {% if (stock.change_percent | float) > 0 %}+{% endif %}{{ "%.2f"|format(stock.change_percent | float) }}%
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td class="numeric">
+                    {{ format_number(stock.market_cap) }}
+                </td>
+                <td class="numeric">
+                    {{ format_ratio(stock.pe) }}
+                </td>
+                <td class="numeric">
+                    {{ format_ratio(stock.pb) }}
+                </td>
+                <td class="numeric">
+                    {{ format_ratio(stock.dividend_yield, true) }}
+                </td>
+                <td class="numeric">
+                    {{ format_ratio(stock.roe, true) }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if count >= 100 %}
+<div class="text-muted text-sm mt-4 text-center">
+    Showing first 100 results. Refine your query for more specific results.
+</div>
+{% endif %}
+
+{% else %}
+<div class="text-center py-12">
+    <svg class="mx-auto mb-4 text-muted" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <h3 class="text-lg font-semibold mb-2">No Matches Found</h3>
+    <p class="text-muted">No stocks match your query: <code>{{ query }}</code></p>
+    <p class="text-muted text-sm mt-2">Try adjusting your criteria</p>
+</div>
+{% endif %}

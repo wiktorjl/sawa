@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - ORION{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">Welcome back, {{ user.name }}</h1>
+    <p class="text-muted">S&P 500 Market Overview</p>
+</div>
+
+<!-- Market Stats Grid -->
+<div class="grid grid-cols-4 gap-6 mb-8">
+    <div class="card metric-card card-glow">
+        <div class="flex items-start justify-between">
+            <div>
+                <div class="metric-value glow">{{ market_stats.total_companies }}</div>
+                <div class="metric-label">Companies</div>
+            </div>
+            <div class="text-cyan opacity-50">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="7" height="9"/>
+                    <rect x="14" y="3" width="7" height="5"/>
+                    <rect x="14" y="12" width="7" height="9"/>
+                    <rect x="3" y="16" width="7" height="5"/>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="card metric-card card-glow">
+        <div class="flex items-start justify-between">
+            <div>
+                <div class="metric-value glow">${{ "%.2f"|format((market_stats.total_market_cap | float) / 1000000000000) }}T</div>
+                <div class="metric-label">Total Market Cap</div>
+            </div>
+            <div class="text-purple opacity-50">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="12" y1="1" x2="12" y2="23"/>
+                    <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="card metric-card card-glow">
+        <div class="flex items-start justify-between">
+            <div>
+                <div class="metric-value glow">{{ "%.1f"|format(market_stats.avg_pe_ratio | float) }}x</div>
+                <div class="metric-label">Avg P/E Ratio</div>
+            </div>
+            <div class="text-orange opacity-50">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="20" x2="18" y2="10"/>
+                    <line x1="12" y1="20" x2="12" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="14"/>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="card metric-card card-glow">
+        <div class="flex items-start justify-between">
+            <div>
+                <div class="metric-value glow">{{ "%.2f"|format(market_stats.avg_dividend_yield | float) }}%</div>
+                <div class="metric-label">Avg Dividend Yield</div>
+            </div>
+            <div class="text-success opacity-50">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                    <polyline points="17 6 23 6 23 12"/>
+                </svg>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Main Content Grid -->
+<div class="grid grid-cols-12 gap-6">
+    <!-- Watchlist Summary -->
+    <div class="col-span-8">
+        <div class="card card-glow">
+            <div class="card-header">
+                <h3 class="card-title">
+                    <svg class="text-cyan" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                    </svg>
+                    Your Watchlist
+                </h3>
+                <a href="/stocks" class="btn btn-secondary btn-sm">View All</a>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-4">
+                    You have <span class="text-cyan font-semibold">{{ watchlist_summary.stock_count }}</span>
+                    stocks in your <span class="font-medium">{{ watchlist_summary.watchlist_name }}</span> watchlist.
+                </p>
+
+                <div
+                    hx-get="/stocks/watchlist-preview"
+                    hx-trigger="load"
+                    hx-swap="innerHTML"
+                >
+                    <div class="flex items-center justify-center p-8">
+                        <div class="spinner"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top Movers -->
+    <div class="col-span-4">
+        <div class="card card-glow mb-6">
+            <div class="card-header">
+                <h3 class="card-title text-success">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="18 15 12 9 6 15"/>
+                    </svg>
+                    Top Gainers
+                </h3>
+            </div>
+            <div class="card-body">
+                {% if top_gainers %}
+                <div class="space-y-3">
+                    {% for stock in top_gainers %}
+                    <a href="/stocks/{{ stock.ticker }}" class="flex items-center justify-between p-2 rounded-lg hover:bg-glass transition">
+                        <div>
+                            <div class="stock-symbol">{{ stock.ticker }}</div>
+                            <div class="text-xs text-muted truncate" style="max-width: 120px;">{{ stock.name }}</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-mono">${{ "%.2f"|format(stock.price | float) }}</div>
+                            <div class="stock-change up text-sm">+{{ "%.2f"|format(stock.change_percent | float) }}%</div>
+                        </div>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted text-center py-4">No data available</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card card-glow">
+            <div class="card-header">
+                <h3 class="card-title text-danger">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                    Top Losers
+                </h3>
+            </div>
+            <div class="card-body">
+                {% if top_losers %}
+                <div class="space-y-3">
+                    {% for stock in top_losers %}
+                    <a href="/stocks/{{ stock.ticker }}" class="flex items-center justify-between p-2 rounded-lg hover:bg-glass transition">
+                        <div>
+                            <div class="stock-symbol">{{ stock.ticker }}</div>
+                            <div class="text-xs text-muted truncate" style="max-width: 120px;">{{ stock.name }}</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-mono">${{ "%.2f"|format(stock.price | float) }}</div>
+                            <div class="stock-change down text-sm">{{ "%.2f"|format(stock.change_percent | float) }}%</div>
+                        </div>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted text-center py-4">No data available</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="grid grid-cols-3 gap-6 mt-8">
+    <a href="/screener" class="card card-glow flex items-center gap-4 hover:border-cyan transition">
+        <div class="p-3 rounded-lg bg-cyan bg-opacity-10">
+            <svg class="text-cyan" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+            </svg>
+        </div>
+        <div>
+            <h4 class="font-semibold">Stock Screener</h4>
+            <p class="text-sm text-muted">Filter and find stocks</p>
+        </div>
+    </a>
+
+    <a href="/fundamentals" class="card card-glow flex items-center gap-4 hover:border-purple transition">
+        <div class="p-3 rounded-lg bg-purple bg-opacity-10">
+            <svg class="text-purple" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+            </svg>
+        </div>
+        <div>
+            <h4 class="font-semibold">Fundamentals</h4>
+            <p class="text-sm text-muted">Financial statements</p>
+        </div>
+    </a>
+
+    <a href="/economy" class="card card-glow flex items-center gap-4 hover:border-orange transition">
+        <div class="p-3 rounded-lg bg-orange bg-opacity-10">
+            <svg class="text-orange" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+        </div>
+        <div>
+            <h4 class="font-semibold">Economy</h4>
+            <p class="text-sm text-muted">Economic indicators</p>
+        </div>
+    </a>
+</div>
+{% endblock %}

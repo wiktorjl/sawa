@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block title %}Glossary - ORION{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h1 class="text-3xl font-bold mb-2">Glossary</h1>
+        <p class="text-muted">Financial terms and definitions</p>
+    </div>
+    <button class="btn btn-secondary" data-modal-open="add-term-modal">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add Term
+    </button>
+</div>
+
+<div class="grid grid-cols-12 gap-6">
+    <!-- Term List (Left Panel) -->
+    <div class="col-span-4">
+        <div class="card glossary-term-panel">
+            <!-- Search -->
+            <div class="mb-4">
+                <input
+                    type="text"
+                    class="form-input"
+                    placeholder="Search terms..."
+                    hx-get="/glossary/terms"
+                    hx-trigger="keyup changed delay:300ms"
+                    hx-target="#term-list"
+                    hx-swap="innerHTML"
+                    name="q"
+                >
+            </div>
+
+            <!-- Term List -->
+            <div id="term-list" class="term-list-container">
+                {% include "glossary/partials/term_list.html" %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Definition (Right Panel) -->
+    <div class="col-span-8">
+        <div class="card card-glow glossary-definition-panel">
+            <div id="definition-content">
+                <div class="text-center py-16">
+                    <svg class="mx-auto mb-4 text-muted" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                    </svg>
+                    <h3 class="text-xl font-semibold mb-2">Select a Term</h3>
+                    <p class="text-muted">Click on a term from the list to view its definition</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Term Modal -->
+<div id="add-term-modal" class="modal-backdrop">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 class="modal-title">Add New Term</h3>
+            <button class="modal-close" data-modal-close>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+            </button>
+        </div>
+        <form hx-post="/glossary/terms/add" hx-target="#term-list" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Term</label>
+                    <input type="text" name="term" class="form-input" placeholder="Enter financial term..." required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Category</label>
+                    <select name="category" class="form-select">
+                        <option value="Valuation">Valuation</option>
+                        <option value="Profitability">Profitability</option>
+                        <option value="Liquidity">Liquidity</option>
+                        <option value="Leverage">Leverage</option>
+                        <option value="Cash Flow">Cash Flow</option>
+                        <option value="Dividends">Dividends</option>
+                        <option value="Growth">Growth</option>
+                        <option value="Trading">Trading</option>
+                        <option value="Other" selected>Other</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" data-modal-close>Cancel</button>
+                <button type="submit" class="btn btn-primary" data-modal-close>Add Term</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function selectTerm(term) {
+    // Update active state
+    document.querySelectorAll('.term-item').forEach(item => {
+        item.classList.remove('active');
+    });
+    event.currentTarget.classList.add('active');
+
+    // Load definition
+    htmx.ajax('GET', '/glossary/term/' + encodeURIComponent(term), {
+        target: '#definition-content',
+        swap: 'innerHTML'
+    });
+}
+</script>
+{% endblock %}

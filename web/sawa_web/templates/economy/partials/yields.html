@@ -1,0 +1,62 @@
+{% if data %}
+<div class="table-container">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th class="text-right">1M</th>
+                <th class="text-right">3M</th>
+                <th class="text-right">6M</th>
+                <th class="text-right">1Y</th>
+                <th class="text-right">2Y</th>
+                <th class="text-right">5Y</th>
+                <th class="text-right">10Y</th>
+                <th class="text-right">20Y</th>
+                <th class="text-right">30Y</th>
+                <th class="text-right">Spread (10Y-2Y)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in data %}
+            <tr>
+                <td class="font-medium">{{ row.date.strftime('%b %d, %Y') }}</td>
+                <td class="numeric">{{ format_percent(row.yield_1_month) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_3_month) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_6_month) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_1_year) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_2_year) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_5_year) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_10_year) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_20_year) }}</td>
+                <td class="numeric">{{ format_percent(row.yield_30_year) }}</td>
+                <td class="numeric {% if yield_spreads[loop.index0] is not none %}{% if yield_spreads[loop.index0] < 0 %}negative{% else %}positive{% endif %}{% endif %}">
+                    {% if yield_spreads[loop.index0] is not none %}
+                        {{ format_percent(yield_spreads[loop.index0]) }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="mt-4 p-4 bg-panel rounded-lg">
+    <h4 class="font-semibold mb-2">Yield Curve Interpretation</h4>
+    <ul class="text-sm text-muted space-y-1">
+        <li><span class="text-success">Positive spread</span> - Normal yield curve (longer-term rates higher than short-term)</li>
+        <li><span class="text-danger">Negative spread</span> - Inverted yield curve (potential recession indicator)</li>
+    </ul>
+</div>
+{% else %}
+<div class="text-center py-12">
+    <svg class="mx-auto mb-4 text-muted" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <h3 class="text-lg font-semibold mb-2">No Treasury Yield Data</h3>
+    <p class="text-muted">No treasury yield data available</p>
+</div>
+{% endif %}

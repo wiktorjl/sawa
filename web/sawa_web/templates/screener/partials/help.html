@@ -1,0 +1,49 @@
+<h3 class="text-lg font-semibold mb-4">Query Syntax</h3>
+
+<!-- Variables -->
+<div class="help-section mb-6">
+    <h4 class="text-sm font-semibold text-muted mb-2">Variables</h4>
+    {% for category, vars in help_info.variables.items() %}
+    <div class="mb-3">
+        <span class="text-xs text-muted">{{ category }}</span>
+        <div class="flex flex-wrap gap-1 mt-1">
+            {% for var in vars %}
+            <code class="code-badge">{{ var }}</code>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Operators -->
+<div class="help-section mb-6">
+    <h4 class="text-sm font-semibold text-muted mb-2">Operators</h4>
+    <div class="flex flex-wrap gap-2">
+        {% for op in help_info.operators %}
+        <code class="code-badge">{{ op }}</code>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Logical -->
+<div class="help-section mb-6">
+    <h4 class="text-sm font-semibold text-muted mb-2">Combine Conditions</h4>
+    <div class="flex flex-wrap gap-2">
+        {% for op in help_info.logical %}
+        <code class="code-badge">{{ op }}</code>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Examples -->
+<div class="help-section">
+    <h4 class="text-sm font-semibold text-muted mb-2">Examples</h4>
+    <div class="space-y-2">
+        {% for query, desc in help_info.examples %}
+        <div class="example-item" onclick="setQuery('{{ query }}')">
+            <code class="text-cyan text-sm">{{ query }}</code>
+            <span class="text-muted text-xs block mt-1">{{ desc }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>

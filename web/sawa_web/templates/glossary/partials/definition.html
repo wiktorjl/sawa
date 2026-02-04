@@ -1,0 +1,165 @@
+{% if definition %}
+<div class="definition-content">
+    <div class="definition-header mb-6">
+        <h2 class="text-2xl font-bold text-cyan">{{ term }}</h2>
+        {% if definition.generated_at %}
+        <p class="text-muted text-sm mt-1">
+            Generated {{ definition.generated_at.strftime('%b %d, %Y at %H:%M') if definition.generated_at.strftime else definition.generated_at }}
+            {% if definition.model_used %}using {{ definition.model_used }}{% endif %}
+        </p>
+        {% endif %}
+    </div>
+
+    <!-- Official Definition -->
+    <div class="definition-section mb-6">
+        <h3 class="text-lg font-semibold mb-2">
+            <svg class="inline-block mr-2" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            </svg>
+            Official Definition
+        </h3>
+        <p class="prose text-secondary">{{ definition.official_definition }}</p>
+    </div>
+
+    <!-- Plain English -->
+    <div class="definition-section mb-6">
+        <h3 class="text-lg font-semibold mb-2">
+            <svg class="inline-block mr-2" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            Plain English
+        </h3>
+        <p class="prose text-secondary">{{ definition.plain_english }}</p>
+    </div>
+
+    <!-- Examples -->
+    {% if definition.examples %}
+    <div class="definition-section mb-6">
+        <h3 class="text-lg font-semibold mb-2">
+            <svg class="inline-block mr-2" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                <polyline points="2 17 12 22 22 17"/>
+                <polyline points="2 12 12 17 22 12"/>
+            </svg>
+            Examples
+        </h3>
+        <ul class="list-disc list-inside space-y-2">
+            {% for example in definition.examples %}
+            <li class="text-secondary">{{ example }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <!-- Related Terms -->
+    {% if definition.related_terms %}
+    <div class="definition-section mb-6">
+        <h3 class="text-lg font-semibold mb-2">
+            <svg class="inline-block mr-2" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="18" cy="5" r="3"/>
+                <circle cx="6" cy="12" r="3"/>
+                <circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
+                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            </svg>
+            Related Terms
+        </h3>
+        <div class="flex flex-wrap gap-2">
+            {% for related in definition.related_terms %}
+            <button
+                class="badge badge-cyan cursor-pointer"
+                onclick="selectTerm('{{ related }}')"
+            >
+                {{ related }}
+            </button>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Learn More -->
+    {% if definition.learn_more %}
+    <div class="definition-section mb-6">
+        <h3 class="text-lg font-semibold mb-2">
+            <svg class="inline-block mr-2" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+            </svg>
+            Learn More
+        </h3>
+        <ul class="list-disc list-inside space-y-1">
+            {% for resource in definition.learn_more %}
+            <li class="text-secondary text-sm">{{ resource }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <!-- Regenerate Options -->
+    <div class="definition-actions mt-8 pt-6 border-t">
+        <h4 class="text-sm font-semibold text-muted mb-3">Regenerate Definition</h4>
+        <div class="flex flex-wrap gap-2">
+            <button
+                class="btn btn-sm btn-ghost"
+                hx-post="/glossary/term/{{ term }}/regenerate"
+                hx-vals='{"regen_type": "technical"}'
+                hx-target="#definition-content"
+                hx-swap="innerHTML"
+                hx-indicator="#regen-loading"
+            >
+                More Technical
+            </button>
+            <button
+                class="btn btn-sm btn-ghost"
+                hx-post="/glossary/term/{{ term }}/regenerate"
+                hx-vals='{"regen_type": "simple"}'
+                hx-target="#definition-content"
+                hx-swap="innerHTML"
+                hx-indicator="#regen-loading"
+            >
+                Simpler
+            </button>
+            <button
+                class="btn btn-sm btn-ghost"
+                hx-post="/glossary/term/{{ term }}/regenerate"
+                hx-vals='{"regen_type": "examples"}'
+                hx-target="#definition-content"
+                hx-swap="innerHTML"
+                hx-indicator="#regen-loading"
+            >
+                More Examples
+            </button>
+        </div>
+        <div id="regen-loading" class="htmx-indicator mt-4">
+            <div class="loading-spinner sm"></div>
+            <span class="text-muted text-sm ml-2">Regenerating...</span>
+        </div>
+    </div>
+</div>
+
+{% else %}
+<!-- No definition yet - show generate button -->
+<div class="text-center py-12">
+    <h2 class="text-2xl font-bold mb-4">{{ term }}</h2>
+    <p class="text-muted mb-6">No definition generated yet for this term.</p>
+    <button
+        class="btn btn-primary"
+        hx-post="/glossary/term/{{ term }}/generate"
+        hx-target="#definition-content"
+        hx-swap="innerHTML"
+        hx-indicator="#generate-loading"
+    >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+        Generate Definition
+    </button>
+    <div id="generate-loading" class="htmx-indicator mt-4">
+        <div class="loading-spinner"></div>
+        <p class="text-muted mt-2">Generating definition with AI...</p>
+    </div>
+</div>
+{% endif %}
