@@ -1,0 +1,58 @@
+<div class="settings-section">
+    <h2 class="text-xl font-semibold mb-2">Display Settings</h2>
+    <p class="text-muted mb-6">Customize how information is displayed in the dashboard</p>
+
+    <div class="space-y-6">
+        <!-- Number Format -->
+        <div class="setting-item">
+            <div class="setting-info">
+                <label class="setting-label" for="number_format">{{ settings.number_format.label }}</label>
+                <p class="setting-description">{{ settings.number_format.description }}</p>
+            </div>
+            <div class="setting-control">
+                <select
+                    id="number_format"
+                    name="value"
+                    class="form-select"
+                    hx-post="/settings/update"
+                    hx-vals='{"key": "number_format"}'
+                    hx-target="#number_format_status"
+                    hx-swap="innerHTML"
+                >
+                    {% for option in settings.number_format.options %}
+                    <option value="{{ option }}" {% if settings.number_format.value == option %}selected{% endif %}>
+                        {% if option == "compact" %}Compact (1.5M){% elif option == "full" %}Full (1,500,000){% else %}{{ option|title }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+                <span id="number_format_status" class="setting-status"></span>
+            </div>
+        </div>
+
+        <!-- Theme -->
+        <div class="setting-item">
+            <div class="setting-info">
+                <label class="setting-label" for="theme">{{ settings.theme.label }}</label>
+                <p class="setting-description">{{ settings.theme.description }}</p>
+            </div>
+            <div class="setting-control">
+                <select
+                    id="theme"
+                    name="value"
+                    class="form-select"
+                    hx-post="/settings/update"
+                    hx-vals='{"key": "theme"}'
+                    hx-target="#theme_status"
+                    hx-swap="innerHTML"
+                >
+                    {% for option in settings.theme.options %}
+                    <option value="{{ option }}" {% if settings.theme.value == option %}selected{% endif %}>
+                        {% if option == "osaka-jade" %}Osaka Jade{% else %}{{ option|title }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+                <span id="theme_status" class="setting-status"></span>
+            </div>
+        </div>
+    </div>
+</div>

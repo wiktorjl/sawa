@@ -1,0 +1,30 @@
+{% if categories %}
+    {% for category, terms in categories.items() %}
+    <div class="term-category">
+        <div class="term-category-header">
+            <span class="badge badge-purple">{{ category_codes.get(category, 'OTH') }}</span>
+            <span class="text-sm text-muted ml-2">{{ category }}</span>
+        </div>
+        <div class="term-category-items">
+            {% for term in terms %}
+            <button
+                class="term-item"
+                onclick="selectTerm('{{ term.term }}')"
+            >
+                <span class="term-name">{{ term.term }}</span>
+                {% if term.source == 'user' %}
+                <span class="badge badge-cyan text-xs">User</span>
+                {% endif %}
+            </button>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+{% else %}
+<div class="text-center py-8 text-muted">
+    <p>No terms found</p>
+    {% if search_query %}
+    <p class="text-sm mt-2">Try a different search term</p>
+    {% endif %}
+</div>
+{% endif %}

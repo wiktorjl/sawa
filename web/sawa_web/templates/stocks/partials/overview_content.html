@@ -1,0 +1,60 @@
+<!-- AI Overview Content Partial -->
+<div class="space-y-4">
+    {% if overview.main_product %}
+    <div>
+        <h4 class="text-sm font-semibold text-cyan mb-1">Main Product</h4>
+        <p class="text-secondary">{{ overview.main_product }}</p>
+    </div>
+    {% endif %}
+
+    {% if overview.revenue_model %}
+    <div>
+        <h4 class="text-sm font-semibold text-cyan mb-1">Revenue Model</h4>
+        <p class="text-secondary">{{ overview.revenue_model }}</p>
+    </div>
+    {% endif %}
+
+    {% if overview.headwinds %}
+    <div>
+        <h4 class="text-sm font-semibold text-danger mb-1">Headwinds</h4>
+        <ul class="list-disc list-inside text-secondary space-y-1">
+            {% for item in overview.headwinds %}
+            <li>{{ item }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if overview.tailwinds %}
+    <div>
+        <h4 class="text-sm font-semibold text-success mb-1">Tailwinds</h4>
+        <ul class="list-disc list-inside text-secondary space-y-1">
+            {% for item in overview.tailwinds %}
+            <li>{{ item }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if overview.sector_outlook %}
+    <div>
+        <h4 class="text-sm font-semibold text-cyan mb-1">Sector Outlook</h4>
+        <p class="text-secondary">{{ overview.sector_outlook }}</p>
+    </div>
+    {% endif %}
+
+    {% if overview.competitive_position %}
+    <div>
+        <h4 class="text-sm font-semibold text-cyan mb-1">Competitive Position</h4>
+        <p class="text-secondary">{{ overview.competitive_position }}</p>
+    </div>
+    {% endif %}
+</div>
+
+{% if overview.generated_at %}
+<div class="mt-4 pt-4 border-t border-subtle">
+    <span class="text-xs text-muted">
+        Generated {{ overview.generated_at.strftime('%b %d, %Y at %H:%M') if overview.generated_at else 'N/A' }}
+    </span>
+</div>
+{% endif %}

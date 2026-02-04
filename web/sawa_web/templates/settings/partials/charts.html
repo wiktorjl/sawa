@@ -1,0 +1,58 @@
+<div class="settings-section">
+    <h2 class="text-xl font-semibold mb-2">Chart Settings</h2>
+    <p class="text-muted mb-6">Configure how charts are displayed throughout the dashboard</p>
+
+    <div class="space-y-6">
+        <!-- Chart Period -->
+        <div class="setting-item">
+            <div class="setting-info">
+                <label class="setting-label" for="chart_period_days">{{ settings.chart_period_days.label }}</label>
+                <p class="setting-description">{{ settings.chart_period_days.description }}</p>
+            </div>
+            <div class="setting-control">
+                <select
+                    id="chart_period_days"
+                    name="value"
+                    class="form-select"
+                    hx-post="/settings/update"
+                    hx-vals='{"key": "chart_period_days"}'
+                    hx-target="#chart_period_days_status"
+                    hx-swap="innerHTML"
+                >
+                    {% for option in settings.chart_period_days.options %}
+                    <option value="{{ option }}" {% if settings.chart_period_days.value == option %}selected{% endif %}>
+                        {{ option }} days
+                    </option>
+                    {% endfor %}
+                </select>
+                <span id="chart_period_days_status" class="setting-status"></span>
+            </div>
+        </div>
+
+        <!-- Chart Detail -->
+        <div class="setting-item">
+            <div class="setting-info">
+                <label class="setting-label" for="chart_detail">{{ settings.chart_detail.label }}</label>
+                <p class="setting-description">{{ settings.chart_detail.description }}</p>
+            </div>
+            <div class="setting-control">
+                <select
+                    id="chart_detail"
+                    name="value"
+                    class="form-select"
+                    hx-post="/settings/update"
+                    hx-vals='{"key": "chart_detail"}'
+                    hx-target="#chart_detail_status"
+                    hx-swap="innerHTML"
+                >
+                    {% for option in settings.chart_detail.options %}
+                    <option value="{{ option }}" {% if settings.chart_detail.value == option %}selected{% endif %}>
+                        {{ option|title }}
+                    </option>
+                    {% endfor %}
+                </select>
+                <span id="chart_detail_status" class="setting-status"></span>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page_title }} - ORION{% endblock %}
+
+{% block content %}
+<div class="text-center py-16">
+    <div class="text-6xl mb-6 opacity-50">
+        <svg class="mx-auto text-cyan" width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+        </svg>
+    </div>
+    <h1 class="text-3xl font-bold mb-4">{{ page_title }}</h1>
+    <p class="text-xl text-muted mb-8">This feature is coming soon.</p>
+    <a href="/dashboard" class="btn btn-primary">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        Back to Dashboard
+    </a>
+</div>
+{% endblock %}

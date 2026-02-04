@@ -1,0 +1,83 @@
+<div class="settings-section">
+    <h2 class="text-xl font-semibold mb-2">Account Settings</h2>
+    <p class="text-muted mb-6">Manage your account information and security</p>
+
+    <div class="space-y-8">
+        <!-- Account Info -->
+        <div class="account-info-card">
+            <h3 class="text-lg font-medium mb-4">Account Information</h3>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <span class="text-muted text-sm">Username</span>
+                    <p class="font-medium">{{ user.name }}</p>
+                </div>
+                <div>
+                    <span class="text-muted text-sm">Role</span>
+                    <p class="font-medium">
+                        {% if user.is_admin %}
+                        <span class="badge badge-cyan">Admin</span>
+                        {% else %}
+                        <span class="badge badge-secondary">User</span>
+                        {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <span class="text-muted text-sm">Member Since</span>
+                    <p class="font-medium">{{ user.created_at.strftime('%B %d, %Y') if user.created_at else 'N/A' }}</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Change Password -->
+        <div class="password-section">
+            <h3 class="text-lg font-medium mb-4">Change Password</h3>
+            <form
+                hx-post="/settings/password"
+                hx-target="#password-result"
+                hx-swap="innerHTML"
+            >
+                <div class="space-y-4 max-w-md">
+                    <div class="form-group">
+                        <label class="form-label" for="current_password">Current Password</label>
+                        <input
+                            type="password"
+                            id="current_password"
+                            name="current_password"
+                            class="form-input"
+                            required
+                            autocomplete="current-password"
+                        >
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="new_password">New Password</label>
+                        <input
+                            type="password"
+                            id="new_password"
+                            name="new_password"
+                            class="form-input"
+                            required
+                            minlength="4"
+                            autocomplete="new-password"
+                        >
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="confirm_password">Confirm New Password</label>
+                        <input
+                            type="password"
+                            id="confirm_password"
+                            name="confirm_password"
+                            class="form-input"
+                            required
+                            minlength="4"
+                            autocomplete="new-password"
+                        >
+                    </div>
+                    <div id="password-result"></div>
+                    <button type="submit" class="btn btn-primary">
+                        Update Password
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>

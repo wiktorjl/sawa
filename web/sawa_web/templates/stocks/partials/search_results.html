@@ -1,0 +1,28 @@
+{% if results %}
+<div class="space-y-2">
+    {% for stock in results %}
+    <div
+        class="flex items-center justify-between p-3 rounded-lg hover:bg-glass cursor-pointer transition border border-transparent hover:border-cyan"
+        onclick="closeAddStockModal(); window.location.href='/stocks/{{ stock.ticker }}';"
+    >
+        <div>
+            <div class="flex items-center gap-3">
+                <span class="stock-symbol">{{ stock.ticker }}</span>
+                <span class="font-medium">{{ stock.name }}</span>
+            </div>
+            {% if stock.sector %}
+            <span class="text-xs text-muted">{{ stock.sector }}</span>
+            {% endif %}
+        </div>
+        <svg class="text-cyan" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+    </div>
+    {% endfor %}
+</div>
+{% elif query %}
+<div class="text-center py-8 text-muted">
+    <p>No stocks found for "{{ query }}"</p>
+</div>
+{% endif %}

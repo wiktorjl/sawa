@@ -1,0 +1,53 @@
+{% if created %}
+<div class="alert alert-success mb-4" id="watchlist-alert">Watchlist created successfully</div>
+{% endif %}
+{% if deleted %}
+<div class="alert alert-success mb-4" id="watchlist-alert">Watchlist deleted</div>
+{% endif %}
+
+{% if watchlists %}
+<div class="flex items-center gap-4">
+    <div class="tabs-pill flex-1">
+        {% for wl in watchlists %}
+        <button
+            class="tab {% if current_watchlist and wl.id == current_watchlist.id %}active{% endif %}"
+            hx-get="/stocks/watchlist/{{ wl.id }}"
+            hx-target="#stocks-table"
+            hx-swap="innerHTML"
+            data-watchlist-id="{{ wl.id }}"
+        >
+            {{ wl.name }}
+            <span class="badge badge-cyan ml-2">{{ wl.stock_count }}</span>
+            {% if wl.is_default %}
+            <span class="default-star ml-1" title="Default watchlist">*</span>
+            {% endif %}
+        </button>
+        {% endfor %}
+    </div>
+    <div class="watchlist-actions flex gap-2">
+        <button class="btn btn-ghost btn-sm" data-modal-open="create-watchlist-modal" title="Create watchlist">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+        </button>
+        {% if current_watchlist %}
+        <button class="btn btn-ghost btn-sm" data-modal-open="manage-watchlist-modal" title="Manage watchlist">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="1"/>
+                <circle cx="19" cy="12" r="1"/>
+                <circle cx="5" cy="12" r="1"/>
+            </svg>
+        </button>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<script>
+// Auto-hide alerts after 3 seconds
+setTimeout(() => {
+    const alert = document.getElementById('watchlist-alert');
+    if (alert) alert.remove();
+}, 3000);
+</script>

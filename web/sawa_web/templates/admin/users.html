@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}User Management - ORION{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h1 class="text-3xl font-bold mb-2">User Management</h1>
+        <p class="text-muted">Manage users and their permissions</p>
+    </div>
+    <button class="btn btn-primary" data-modal-open="create-user-modal">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="8.5" cy="7" r="4"/>
+            <line x1="20" y1="8" x2="20" y2="14"/>
+            <line x1="23" y1="11" x2="17" y2="11"/>
+        </svg>
+        Add User
+    </button>
+</div>
+
+<!-- User List -->
+<div class="card card-glow">
+    <div id="user-list">
+        {% include "admin/partials/user_list.html" %}
+    </div>
+</div>
+
+<!-- Create User Modal -->
+<div id="create-user-modal" class="modal-backdrop">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 class="modal-title">Create New User</h3>
+            <button class="modal-close" data-modal-close>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+            </button>
+        </div>
+        <form hx-post="/admin/users/create" hx-target="#user-list" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Username</label>
+                    <input
+                        type="text"
+                        name="username"
+                        class="form-input"
+                        placeholder="Enter username..."
+                        required
+                    >
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Password</label>
+                    <input
+                        type="password"
+                        name="password"
+                        class="form-input"
+                        placeholder="Enter password..."
+                        required
+                        minlength="4"
+                    >
+                </div>
+                <div class="form-group">
+                    <label class="form-checkbox">
+                        <input type="checkbox" name="is_admin" value="true">
+                        <span>Grant admin privileges</span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" data-modal-close>Cancel</button>
+                <button type="submit" class="btn btn-primary" data-modal-close>Create User</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
