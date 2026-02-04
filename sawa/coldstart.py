@@ -77,6 +77,34 @@ def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
     return symbols
 
 
+def _check_date_already_downloaded(date_str: str, output_dir: Path) -> bool:
+    """Check if a date has already been downloaded by sampling a few files."""
+    if not output_dir.exists():
+        return False
+
+    # Check up to 3 existing CSV files to see if they contain this date
+    csv_files = list(output_dir.glob("*.csv"))
+    if not csv_files:
+        return False
+
+    for filepath in csv_files[:3]:
+        try:
+            with open(filepath, "r") as f:
+                # Skip header
+                next(f, None)
+                # Check first few lines for this date
+                for _ in range(10):
+                    line = f.readline()
+                    if not line:
+                        break
+                    if line.startswith(date_str):
+                        return True
+        except Exception:
+            continue
+
+    return False
+
+
 def download_prices(
     s3_client: PolygonS3Client,
     symbols: set[str],
@@ -92,11 +120,19 @@ def download_prices(
 
     trading_set = set(trading_days)
     total_records = 0
+    skipped_dates = 0
 
     current = start_date
     while current <= end_date:
         date_str = current.strftime(DATE_FORMAT)
         if date_str in trading_set:
+            # Check if this date has already been downloaded
+            if _check_date_already_downloaded(date_str, output_dir):
+                logger.debug(f"  {date_str}... (already downloaded, skipping)")
+                skipped_dates += 1
+                current += timedelta(days=1)
+                continue
+
             logger.info(f"  {date_str}...")
             records = s3_client.download_and_parse(current, symbols)
             if records:
@@ -116,6 +152,8 @@ def download_prices(
                 total_records += len(records)
         current += timedelta(days=1)
 
+    if skipped_dates > 0:
+        logger.info(f"Skipped {skipped_dates} already-downloaded dates")
     logger.info(f"Downloaded {total_records} price records")
     return total_records
 
