@@ -12,9 +12,13 @@ import os
 import sys
 from typing import Any
 
+from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+
+# Load environment variables from .env file
+load_dotenv()
 
 from .charts.config import ChartDetail, get_chart_config
 from .charts.core.layout import get_layout
@@ -41,9 +45,11 @@ from .tools.fundamentals import get_fundamentals, get_fundamentals_async
 from .tools.market_data import (
     get_financial_ratios,
     get_financial_ratios_async,
+    get_live_price,
     get_stock_prices,
     get_stock_prices_async,
 )
+from .tools.scanner import scan_ytd_performance
 
 # Setup logging
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
@@ -122,6 +128,27 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_live_price",
+            description="Get live stock price from Polygon API (real-time, not from database)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL, MSFT)",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days of history to include (default: 7)",
+                        "default": 7,
+                        "minimum": 1,
+                        "maximum": 30,
+                    },
+                },
+                "required": ["ticker"],
             },
         ),
         Tool(
@@ -286,6 +313,37 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="scan_ytd_performance",
+            description="Scan market indices (S&P 500, NASDAQ-100, or both) for YTD performance analysis with sector grouping",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in YYYY-MM-DD format (default: Jan 1 current year)",
+                    },
+                    "large_cap_threshold": {
+                        "type": "number",
+                        "description": "Market cap threshold in billions for Table B (default: 100)",
+                        "default": 100,
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Number of top winners/losers to show (default: 10)",
+                        "default": 10,
+                        "minimum": 5,
+                        "maximum": 50,
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Index to scan: sp500, nasdaq100, or both (default: sp500)",
+                        "enum": ["sp500", "nasdaq100", "both"],
+                        "default": "sp500",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="execute_query",
             description="Execute a custom read-only SQL query (SELECT only)",
             inputSchema={
@@ -359,6 +417,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     query=arguments["query"],
                     limit=arguments.get("limit", 20),
                 )
+        elif name == "get_live_price":
+            # Live price lookup from Polygon API (always synchronous, no chart)
+            result = get_live_price(
+                ticker=arguments["ticker"],
+                days=arguments.get("days", 7),
+            )
         elif name == "get_stock_prices":
             if use_services:
                 result = await get_stock_prices_async(
@@ -430,6 +494,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = get_economy_dashboard(limit=arguments.get("limit", 10))
             # Render economy dashboard
             chart = render_economy_dashboard(result, layout, theme)
+        elif name == "scan_ytd_performance":
+            # YTD performance scanner (always synchronous, returns formatted tables)
+            result = scan_ytd_performance(
+                start_date=arguments.get("start_date"),
+                large_cap_threshold=arguments.get("large_cap_threshold", 100.0),
+                top_n=arguments.get("top_n", 10),
+                index=arguments.get("index", "sp500"),
+            )
+            # Return formatted output directly (don't convert to JSON)
+            return [
+                TextContent(
+                    type="text",
+                    text=f"{result['summary']}\n\n{result['table_a']}\n\n{result['table_b']}",
+                )
+            ]
         elif name == "execute_query":
             result = execute_query(arguments["sql"])
         else:
