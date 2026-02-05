@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS dividends (
     dividend_type VARCHAR(20),  -- CD=cash, SC=special cash, LT=long-term cap gain, ST=short-term cap gain
     frequency INTEGER,          -- 0=one-time, 1=annual, 2=semi-annual, 4=quarterly, 12=monthly
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(ticker, ex_dividend_date, COALESCE(cash_amount, 0))
+    UNIQUE(ticker, ex_dividend_date, dividend_type)
 );
 
 -- Earnings calendar and history
