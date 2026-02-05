@@ -50,6 +50,23 @@ def get_symbols_from_db(conn) -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
+def is_reporting_month(check_date: date | None = None) -> bool:
+    """Check if we're in a quarterly reporting month.
+
+    Quarterly earnings are typically reported in January, April, July, and October,
+    covering Q4, Q1, Q2, and Q3 respectively. Running fundamentals updates
+    outside these months is usually wasteful.
+
+    Args:
+        check_date: Date to check (defaults to today)
+
+    Returns:
+        True if the month is a reporting month (Jan, Apr, Jul, Oct)
+    """
+    check_date = check_date or date.today()
+    return check_date.month in (1, 4, 7, 10)
+
+
 def download_fundamentals(
     client: PolygonClient,
     symbols: list[str],
@@ -203,6 +220,7 @@ def run_weekly(
     skip_ratios: bool = False,
     skip_news: bool = False,
     skip_corporate_actions: bool = False,
+    force_fundamentals: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -219,6 +237,7 @@ def run_weekly(
         skip_ratios: Skip financial ratios update
         skip_news: Skip news update
         skip_corporate_actions: Skip corporate actions (splits/dividends) update
+        force_fundamentals: Force fundamentals update even outside reporting months
         dry_run: If True, show what would be done without executing
         logger: Logger instance
 
@@ -274,7 +293,11 @@ def run_weekly(
             if not skip_overviews:
                 logger.info(f"  - Company overviews for {len(symbols)} symbols")
             if not skip_fundamentals:
-                logger.info(f"  - Fundamentals from {fund_start_str}")
+                should_run = force_fundamentals or is_reporting_month()
+                if should_run:
+                    logger.info(f"  - Fundamentals from {fund_start_str}")
+                else:
+                    logger.info("  - Fundamentals: SKIP (not a reporting month)")
             if not skip_ratios:
                 logger.info(f"  - Financial ratios for {len(symbols)} symbols")
             if not skip_economy:
@@ -311,23 +334,32 @@ def run_weekly(
             with psycopg.connect(database_url) as conn:
                 load_companies(conn, output_dir / "overviews" / "overviews.csv", logger)
 
-        # Step: Update fundamentals
+        # Step: Update fundamentals (quarterly - only in Jan/Apr/Jul/Oct)
         if not skip_fundamentals:
-            logger.info(f"\n[{step}/{total_steps}] Updating fundamentals...")
-            step += 1
-            fund_stats = download_fundamentals(
-                client,
-                symbols,
-                fund_start_str,
-                end_str,
-                output_dir / "fundamentals",
-                logger,
-                rate_limiter,
-            )
-            stats["fundamentals"] = fund_stats
-            # Load into database
-            with psycopg.connect(database_url) as conn:
-                load_fundamentals(conn, output_dir / "fundamentals", logger)
+            should_run = force_fundamentals or is_reporting_month()
+            if not should_run:
+                logger.info(
+                    f"\n[{step}/{total_steps}] Skipping fundamentals (not a reporting month)"
+                )
+                logger.info("  Fundamentals are quarterly; use --force-fundamentals to override")
+                step += 1
+                stats["fundamentals"] = {"skipped": "not_reporting_month"}
+            else:
+                logger.info(f"\n[{step}/{total_steps}] Updating fundamentals...")
+                step += 1
+                fund_stats = download_fundamentals(
+                    client,
+                    symbols,
+                    fund_start_str,
+                    end_str,
+                    output_dir / "fundamentals",
+                    logger,
+                    rate_limiter,
+                )
+                stats["fundamentals"] = fund_stats
+                # Load into database
+                with psycopg.connect(database_url) as conn:
+                    load_fundamentals(conn, output_dir / "fundamentals", logger)
 
         # Step: Update ratios
         if not skip_ratios:
@@ -381,7 +413,12 @@ def run_weekly(
         if "overviews" in stats:
             logger.info(f"  Overviews: {stats['overviews']}")
         if "fundamentals" in stats:
-            logger.info(f"  Fundamentals: {sum(stats['fundamentals'].values())} records")
+            fund_stats = stats["fundamentals"]
+            if "skipped" in fund_stats:
+                logger.info(f"  Fundamentals: skipped ({fund_stats['skipped']})")
+            else:
+                total = sum(int(v) for v in fund_stats.values())
+                logger.info(f"  Fundamentals: {total} records")
         if "ratios" in stats:
             logger.info(f"  Ratios: {stats['ratios']}")
         if "economy" in stats:
