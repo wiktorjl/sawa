@@ -281,7 +281,7 @@ def cmd_earnings(args) -> int:
         stats = run_earnings_update(
             database_url=db_url,
             tickers=tickers,
-            years=args.years,
+            quarters=args.quarters,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -849,7 +849,7 @@ Environment Variables:
     )
     earnings_parser.add_argument("--ticker", help="Single ticker to fetch (default: all active)")
     earnings_parser.add_argument(
-        "--years", type=int, default=5, help="Years of history to fetch (default: 5)"
+        "--quarters", type=int, default=5, help="Quarters of history to fetch (default: 5)"
     )
     earnings_parser.add_argument("--database-url", help="PostgreSQL URL")
     earnings_parser.add_argument("--log-dir", help="Directory for log files")

@@ -15,8 +15,8 @@ import yfinance as yf
 
 from sawa.utils import setup_logging
 
-# Default to 5 years of history
-DEFAULT_YEARS = 5
+# Default to 5 quarters of history (matches yfinance revenue data availability)
+DEFAULT_QUARTERS = 5
 
 
 def get_active_tickers(conn) -> list[str]:
@@ -28,7 +28,7 @@ def get_active_tickers(conn) -> list[str]:
 
 def fetch_earnings_yfinance(
     ticker: str,
-    years: int = DEFAULT_YEARS,
+    quarters: int = DEFAULT_QUARTERS,
     logger: logging.Logger | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -36,7 +36,7 @@ def fetch_earnings_yfinance(
 
     Args:
         ticker: Stock ticker symbol
-        years: Number of years of history to fetch
+        quarters: Number of quarters of history to fetch (default: 5)
         logger: Logger instance
 
     Returns:
@@ -104,8 +104,8 @@ def fetch_earnings_yfinance(
         except Exception:
             pass
 
-        # Calculate cutoff date
-        cutoff = datetime.now() - timedelta(days=years * 365)
+        # Calculate cutoff date (approximately 3 months per quarter)
+        cutoff = datetime.now() - timedelta(days=quarters * 91)
 
         for idx, row in earnings_dates.iterrows():
             # idx is the earnings date (timestamp with timezone)
@@ -253,7 +253,7 @@ def load_earnings(
 def run_earnings_update(
     database_url: str,
     tickers: list[str] | None = None,
-    years: int = DEFAULT_YEARS,
+    quarters: int = DEFAULT_QUARTERS,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -263,7 +263,7 @@ def run_earnings_update(
     Args:
         database_url: PostgreSQL connection URL
         tickers: List of tickers to fetch (default: all active)
-        years: Number of years of history to fetch (default: 5)
+        quarters: Number of quarters of history to fetch (default: 5)
         dry_run: If True, show what would be done without writing
         logger: Logger instance
 
@@ -282,7 +282,7 @@ def run_earnings_update(
     logger.info("=" * 60)
     logger.info("EARNINGS UPDATE - Yahoo Finance")
     logger.info("=" * 60)
-    logger.info(f"History: {years} years")
+    logger.info(f"History: {quarters} quarters")
 
     with psycopg.connect(database_url) as conn:
         # Get tickers if not provided
@@ -306,7 +306,7 @@ def run_earnings_update(
             if i % 50 == 0:
                 logger.info(f"  Progress: {i}/{len(tickers)} ({len(all_earnings)} earnings found)")
 
-            earnings = fetch_earnings_yfinance(ticker, years, logger)
+            earnings = fetch_earnings_yfinance(ticker, quarters, logger)
             if earnings:
                 all_earnings.extend(earnings)
                 stats["tickers_processed"] += 1
