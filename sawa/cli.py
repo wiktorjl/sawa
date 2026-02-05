@@ -211,19 +211,51 @@ def cmd_weekly(args) -> int:
             api_key=api_key,
             database_url=db_url,
             output_dir=Path(args.output_dir),
-            skip_fundamentals=args.skip_fundamentals,
             skip_economy=args.skip_economy,
             skip_overviews=args.skip_overviews,
-            skip_ratios=args.skip_ratios,
             skip_news=args.skip_news,
             skip_corporate_actions=args.skip_corporate_actions,
-            force_fundamentals=args.force_fundamentals,
             dry_run=args.dry_run,
             logger=logger,
         )
         return 0 if stats.get("success") else 1
     except Exception as e:
         logger.error(f"Weekly update failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_quarterly(args) -> int:
+    """Run quarterly fundamentals update."""
+    from sawa.quarterly import run_quarterly
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="quarterly")
+
+    # Get credentials
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        stats = run_quarterly(
+            api_key=api_key,
+            database_url=db_url,
+            output_dir=Path(args.output_dir),
+            skip_fundamentals=args.skip_fundamentals,
+            skip_ratios=args.skip_ratios,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Quarterly update failed: {e}")
         if args.verbose:
             raise
         return 1
@@ -734,28 +766,17 @@ Environment Variables:
     # Weekly update subcommand
     weekly_parser = subparsers.add_parser(
         "weekly",
-        help="Weekly fundamentals/economy update",
-        description="Update slow-changing data: fundamentals, economy, overviews, ratios, news.",
+        help="Weekly economy/news/corporate actions update",
+        description="Update frequently-changing data: economy, overviews, news, corporate actions.",
     )
     weekly_parser.add_argument("--output-dir", default="data", help="Output data directory")
     weekly_parser.add_argument("--api-key", help="Polygon API key")
     weekly_parser.add_argument("--database-url", help="PostgreSQL URL")
     weekly_parser.add_argument(
-        "--skip-fundamentals", action="store_true", help="Skip fundamentals update"
-    )
-    weekly_parser.add_argument(
-        "--force-fundamentals",
-        action="store_true",
-        help="Force fundamentals update even outside reporting months (Jan/Apr/Jul/Oct)",
-    )
-    weekly_parser.add_argument(
         "--skip-economy", action="store_true", help="Skip economy data update"
     )
     weekly_parser.add_argument(
         "--skip-overviews", action="store_true", help="Skip company overviews update"
-    )
-    weekly_parser.add_argument(
-        "--skip-ratios", action="store_true", help="Skip financial ratios update"
     )
     weekly_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
     weekly_parser.add_argument(
@@ -767,6 +788,26 @@ Environment Variables:
     weekly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     weekly_parser.add_argument("-v", "--verbose", action="store_true")
     weekly_parser.set_defaults(func=cmd_weekly)
+
+    # Quarterly fundamentals subcommand
+    quarterly_parser = subparsers.add_parser(
+        "quarterly",
+        help="Quarterly fundamentals update",
+        description="Update financial statements: balance sheets, income, cash flow, ratios.",
+    )
+    quarterly_parser.add_argument("--output-dir", default="data", help="Output data directory")
+    quarterly_parser.add_argument("--api-key", help="Polygon API key")
+    quarterly_parser.add_argument("--database-url", help="PostgreSQL URL")
+    quarterly_parser.add_argument(
+        "--skip-fundamentals", action="store_true", help="Skip fundamentals update"
+    )
+    quarterly_parser.add_argument(
+        "--skip-ratios", action="store_true", help="Skip financial ratios update"
+    )
+    quarterly_parser.add_argument("--log-dir", help="Directory for log files")
+    quarterly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    quarterly_parser.add_argument("-v", "--verbose", action="store_true")
+    quarterly_parser.set_defaults(func=cmd_quarterly)
 
     # Technical indicator backfill subcommand
     ta_parser = subparsers.add_parser(
