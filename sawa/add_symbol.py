@@ -8,7 +8,6 @@ Usage:
 
 import logging
 from datetime import date
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -19,7 +18,6 @@ from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
-
 
 # Ratios columns mapping
 RATIO_COLUMNS = [
@@ -375,7 +373,7 @@ def run_add_symbols(
             logger.info(f"\n[{i}/{len(symbols)}] Processing {symbol}...")
 
             if symbol in existing:
-                logger.info(f"  Already exists, updating...")
+                logger.info("  Already exists, updating...")
 
             # Fetch company details
             rate_limiter.acquire()

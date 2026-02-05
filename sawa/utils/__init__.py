@@ -18,10 +18,14 @@ from .dates import (
 from .logging import setup_logging
 from .sic_mapping import (
     clear_cache as clear_sic_cache,
+)
+from .sic_mapping import (
     get_sic_industry,
     get_sic_mapping,
-    load_mappings_from_db as load_sic_mappings,
     map_sic_to_gics,
+)
+from .sic_mapping import (
+    load_mappings_from_db as load_sic_mappings,
 )
 from .symbols import (
     fetch_index_symbols,

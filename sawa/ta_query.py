@@ -7,7 +7,7 @@ Uses the repository layer for data access.
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from sawa.repositories import get_factory

@@ -342,6 +342,151 @@ def cmd_ta_screen(args) -> int:
         return 1
 
 
+def cmd_index_list(args) -> int:
+    """List all market indices."""
+    import asyncio
+
+    from sawa.repositories.database import DatabaseIndexRepository
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="index_list")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        repo = DatabaseIndexRepository(db_url)
+        indices = asyncio.get_event_loop().run_until_complete(repo.list_indices())
+
+        if not indices:
+            print("No indices found in database.")
+            return 0
+
+        print(f"\n{'Code':<12} {'Name':<20} {'Constituents':>12}  Last Updated")
+        print("-" * 70)
+        for idx in indices:
+            updated = idx.last_updated.strftime("%Y-%m-%d %H:%M") if idx.last_updated else "Never"
+            print(f"{idx.code:<12} {idx.name:<20} {idx.constituent_count:>12}  {updated}")
+
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to list indices: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_index_show(args) -> int:
+    """Show index details and constituents."""
+    import asyncio
+
+    from sawa.repositories.database import DatabaseIndexRepository
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="index_show")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        repo = DatabaseIndexRepository(db_url)
+        code = args.code.lower()
+
+        index = asyncio.get_event_loop().run_until_complete(repo.get_index(code))
+        if not index:
+            logger.error(f"Index not found: {code}")
+            return 1
+
+        constituents = asyncio.get_event_loop().run_until_complete(repo.get_constituents(code))
+
+        print(f"\nIndex: {index.name} ({index.code})")
+        print(f"Description: {index.description or 'N/A'}")
+        print(f"Source: {index.source_url or 'N/A'}")
+        updated = (
+            index.last_updated.strftime("%Y-%m-%d %H:%M:%S") if index.last_updated else "Never"
+        )
+        print(f"Last Updated: {updated}")
+        print(f"Constituents: {len(constituents)}")
+
+        if constituents and not args.no_tickers:
+            print(f"\nTickers ({len(constituents)}):")
+            # Print in columns
+            cols = 10
+            for i in range(0, len(constituents), cols):
+                row = constituents[i : i + cols]
+                print("  " + " ".join(f"{t:<6}" for t in row))
+
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to show index: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_index_update(args) -> int:
+    """Update index constituents from Wikipedia."""
+    import psycopg
+
+    from sawa.coldstart import populate_index_constituents
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="index_update")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        with psycopg.connect(db_url) as conn:
+            stats = populate_index_constituents(conn, logger)
+
+        print("\nIndex update complete:")
+        for code, count in stats.items():
+            print(f"  {code}: {count} constituents")
+
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to update indices: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_index_check(args) -> int:
+    """Check which indices a ticker belongs to."""
+    import asyncio
+
+    from sawa.repositories.database import DatabaseIndexRepository
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="index_check")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        repo = DatabaseIndexRepository(db_url)
+        ticker = args.ticker.upper()
+
+        indices = asyncio.get_event_loop().run_until_complete(repo.get_ticker_indices(ticker))
+
+        if indices:
+            print(f"{ticker} is a member of: {', '.join(indices)}")
+        else:
+            print(f"{ticker} is not a member of any tracked index")
+
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to check indices: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_update(args) -> int:
     """Run incremental update (legacy: daily + weekly)."""
     from sawa.update import run_update
@@ -398,6 +543,10 @@ Commands:
   ta-backfill         Calculate technical indicators for all history
   ta-show             Show technical indicators for a ticker
   ta-screen           Screen stocks by technical indicators
+  index-list          List all market indices
+  index-show          Show index details and constituents
+  index-update        Update index constituents from Wikipedia
+  index-check         Check which indices a ticker belongs to
 
 Examples:
   sawa coldstart --years 5
@@ -411,6 +560,9 @@ Examples:
   sawa ta-show AAPL --from-date 2025-01-01
   sawa ta-screen --rsi-max 30
   sawa ta-screen --rsi-max 30 --volume-min 2.0
+  sawa index-list
+  sawa index-show sp500
+  sawa index-check AAPL
 
 Environment Variables:
   POLYGON_API_KEY         Polygon/Massive API key
@@ -663,6 +815,52 @@ Environment Variables:
     update_parser.add_argument("--log-dir", help="Directory for log files")
     update_parser.add_argument("-v", "--verbose", action="store_true")
     update_parser.set_defaults(func=cmd_update)
+
+    # Index management subcommands
+    index_list_parser = subparsers.add_parser(
+        "index-list",
+        help="List all market indices",
+        description="List all tracked market indices with constituent counts.",
+    )
+    index_list_parser.add_argument("--database-url", help="PostgreSQL URL")
+    index_list_parser.add_argument("--log-dir", help="Directory for log files")
+    index_list_parser.add_argument("-v", "--verbose", action="store_true")
+    index_list_parser.set_defaults(func=cmd_index_list)
+
+    index_show_parser = subparsers.add_parser(
+        "index-show",
+        help="Show index details and constituents",
+        description="Display details and constituent stocks for a market index.",
+    )
+    index_show_parser.add_argument("code", help="Index code (e.g., sp500, nasdaq100)")
+    index_show_parser.add_argument(
+        "--no-tickers", action="store_true", help="Don't list constituent tickers"
+    )
+    index_show_parser.add_argument("--database-url", help="PostgreSQL URL")
+    index_show_parser.add_argument("--log-dir", help="Directory for log files")
+    index_show_parser.add_argument("-v", "--verbose", action="store_true")
+    index_show_parser.set_defaults(func=cmd_index_show)
+
+    index_update_parser = subparsers.add_parser(
+        "index-update",
+        help="Update index constituents from Wikipedia",
+        description="Refresh index constituent lists from Wikipedia.",
+    )
+    index_update_parser.add_argument("--database-url", help="PostgreSQL URL")
+    index_update_parser.add_argument("--log-dir", help="Directory for log files")
+    index_update_parser.add_argument("-v", "--verbose", action="store_true")
+    index_update_parser.set_defaults(func=cmd_index_update)
+
+    index_check_parser = subparsers.add_parser(
+        "index-check",
+        help="Check which indices a ticker belongs to",
+        description="Check index membership for a specific stock ticker.",
+    )
+    index_check_parser.add_argument("ticker", help="Stock ticker symbol (e.g., AAPL)")
+    index_check_parser.add_argument("--database-url", help="PostgreSQL URL")
+    index_check_parser.add_argument("--log-dir", help="Directory for log files")
+    index_check_parser.add_argument("-v", "--verbose", action="store_true")
+    index_check_parser.set_defaults(func=cmd_index_check)
 
     args = parser.parse_args()
 
