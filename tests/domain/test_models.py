@@ -253,17 +253,17 @@ class TestNewsArticle:
         """Test creating news article."""
         article = NewsArticle(
             id="abc123",
-            ticker="AAPL",
             title="Apple Reports Q1 Earnings",
-            content="Apple Inc. reported strong quarterly earnings...",
-            published_at=datetime(2024, 1, 25, 16, 30, 0),
-            source="Reuters",
-            url="https://reuters.com/article/abc123",
-            sentiment_score=0.75,
-            sentiment_label="positive",
+            published_utc=datetime(2024, 1, 25, 16, 30, 0),
+            article_url="https://reuters.com/article/abc123",
+            author="John Doe",
+            description="Apple Inc. reported strong quarterly earnings...",
+            publisher_name="Reuters",
+            sentiment="positive",
+            sentiment_reasoning="Strong earnings beat expectations",
         )
         assert article.id == "abc123"
-        assert article.sentiment_label == "positive"
+        assert article.sentiment == "positive"
 
 
 class TestMarketSentiment:
