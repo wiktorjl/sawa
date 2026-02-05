@@ -488,6 +488,48 @@ def cmd_index_check(args) -> int:
         return 1
 
 
+def cmd_corporate_actions(args) -> int:
+    """Run corporate actions update (splits, dividends)."""
+    from sawa.corporate_actions import run_corporate_actions_update
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="corporate_actions")
+
+    # Get credentials
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    # Parse start date
+    start_date = parse_date(args.start_date) if args.start_date else None
+
+    # Parse ticker(s)
+    tickers = [args.ticker.upper()] if args.ticker else None
+
+    try:
+        stats = run_corporate_actions_update(
+            api_key=api_key,
+            database_url=db_url,
+            start_date=start_date,
+            tickers=tickers,
+            include_splits=not args.dividends_only,
+            include_dividends=not args.splits_only,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Corporate actions update failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_update(args) -> int:
     """Run incremental update (legacy: daily + weekly)."""
     from sawa.update import run_update
@@ -548,6 +590,7 @@ Commands:
   index-show          Show index details and constituents
   index-update        Update index constituents from Wikipedia
   index-check         Check which indices a ticker belongs to
+  corporate-actions   Download stock splits and dividends
 
 Examples:
   sawa coldstart --years 5
@@ -867,6 +910,23 @@ Environment Variables:
     index_check_parser.add_argument("--log-dir", help="Directory for log files")
     index_check_parser.add_argument("-v", "--verbose", action="store_true")
     index_check_parser.set_defaults(func=cmd_index_check)
+
+    # Corporate actions subcommand
+    corp_parser = subparsers.add_parser(
+        "corporate-actions",
+        help="Download stock splits and dividends",
+        description="Download and store corporate actions (splits, dividends) from Polygon.",
+    )
+    corp_parser.add_argument("--start-date", help="Fetch data from this date (default: 1 year ago)")
+    corp_parser.add_argument("--ticker", help="Single ticker to fetch (default: all active)")
+    corp_parser.add_argument("--splits-only", action="store_true", help="Only fetch splits")
+    corp_parser.add_argument("--dividends-only", action="store_true", help="Only fetch dividends")
+    corp_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    corp_parser.add_argument("--api-key", help="Polygon API key")
+    corp_parser.add_argument("--database-url", help="PostgreSQL URL")
+    corp_parser.add_argument("--log-dir", help="Directory for log files")
+    corp_parser.add_argument("-v", "--verbose", action="store_true")
+    corp_parser.set_defaults(func=cmd_corporate_actions)
 
     args = parser.parse_args()
 

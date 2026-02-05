@@ -44,6 +44,15 @@ from .tools.companies import (
     search_companies,
     search_companies_async,
 )
+from .tools.corporate_actions import (
+    get_dividend_yield_leaders,
+    get_dividends,
+    get_earnings_calendar,
+    get_earnings_history,
+    get_ex_dividend_calendar,
+    get_recent_splits,
+    get_stock_splits,
+)
 from .tools.economy import get_economy_dashboard, get_economy_data, get_economy_data_async
 from .tools.fundamentals import get_fundamentals, get_fundamentals_async
 from .tools.indices import (
@@ -981,6 +990,192 @@ async def list_tools() -> list[Tool]:
                 "required": ["code"],
             },
         ),
+        # Corporate actions tools
+        Tool(
+            name="get_stock_splits",
+            description="Get stock split history",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Filter by ticker symbol (optional)",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date YYYY-MM-DD (optional)",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date YYYY-MM-DD (optional)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 100)",
+                        "default": 100,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_dividends",
+            description="Get dividend history or upcoming dividends",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Filter by ticker symbol (optional)",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date YYYY-MM-DD (optional)",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date YYYY-MM-DD (optional)",
+                    },
+                    "upcoming_only": {
+                        "type": "boolean",
+                        "description": "Only return future dividends",
+                        "default": False,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 100)",
+                        "default": 100,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_ex_dividend_calendar",
+            description="Get ex-dividend calendar for a date range",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date YYYY-MM-DD",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date YYYY-MM-DD",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index: sp500, nasdaq100, or all",
+                        "enum": ["sp500", "nasdaq100", "all"],
+                        "default": "all",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 200)",
+                        "default": 200,
+                    },
+                },
+                "required": ["start_date", "end_date"],
+            },
+        ),
+        Tool(
+            name="get_recent_splits",
+            description="Get recent stock splits",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Days to look back (default: 30)",
+                        "default": 30,
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index: sp500, nasdaq100, or all",
+                        "enum": ["sp500", "nasdaq100", "all"],
+                        "default": "all",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_dividend_yield_leaders",
+            description="Get stocks with highest dividend yields",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index: sp500, nasdaq100, or all",
+                        "enum": ["sp500", "nasdaq100", "all"],
+                        "default": "all",
+                    },
+                    "min_yield": {
+                        "type": "number",
+                        "description": "Minimum dividend yield % (default: 2.0)",
+                        "default": 2.0,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 50)",
+                        "default": 50,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_earnings_calendar",
+            description="Get earnings calendar for a date range",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date YYYY-MM-DD",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date YYYY-MM-DD",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index: sp500, nasdaq100, or all",
+                        "enum": ["sp500", "nasdaq100", "all"],
+                        "default": "all",
+                    },
+                    "timing": {
+                        "type": "string",
+                        "description": "Filter by timing: BMO, AMC, or all",
+                        "enum": ["BMO", "AMC", "all"],
+                        "default": "all",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 200)",
+                        "default": 200,
+                    },
+                },
+                "required": ["start_date", "end_date"],
+            },
+        ),
+        Tool(
+            name="get_earnings_history",
+            description="Get historical earnings for a ticker",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of quarters (default: 12)",
+                        "default": 12,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
     ]
 
 
@@ -1297,6 +1492,60 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = get_index_with_prices(
                 code=arguments["code"],
                 limit=arguments.get("limit", 50),
+            )
+        # Corporate actions tools
+        elif name == "get_stock_splits":
+            logger.info("  Executing: get_stock_splits")
+            result = get_stock_splits(
+                ticker=arguments.get("ticker"),
+                start_date=arguments.get("start_date"),
+                end_date=arguments.get("end_date"),
+                limit=arguments.get("limit", 100),
+            )
+        elif name == "get_dividends":
+            logger.info("  Executing: get_dividends")
+            result = get_dividends(
+                ticker=arguments.get("ticker"),
+                start_date=arguments.get("start_date"),
+                end_date=arguments.get("end_date"),
+                upcoming_only=arguments.get("upcoming_only", False),
+                limit=arguments.get("limit", 100),
+            )
+        elif name == "get_ex_dividend_calendar":
+            logger.info("  Executing: get_ex_dividend_calendar")
+            result = get_ex_dividend_calendar(
+                start_date=arguments["start_date"],
+                end_date=arguments["end_date"],
+                index=arguments.get("index", "all"),
+                limit=arguments.get("limit", 200),
+            )
+        elif name == "get_recent_splits":
+            logger.info("  Executing: get_recent_splits")
+            result = get_recent_splits(
+                days=arguments.get("days", 30),
+                index=arguments.get("index", "all"),
+            )
+        elif name == "get_dividend_yield_leaders":
+            logger.info("  Executing: get_dividend_yield_leaders")
+            result = get_dividend_yield_leaders(
+                index=arguments.get("index", "all"),
+                min_yield=arguments.get("min_yield", 2.0),
+                limit=arguments.get("limit", 50),
+            )
+        elif name == "get_earnings_calendar":
+            logger.info("  Executing: get_earnings_calendar")
+            result = get_earnings_calendar(
+                start_date=arguments["start_date"],
+                end_date=arguments["end_date"],
+                index=arguments.get("index", "all"),
+                timing=arguments.get("timing", "all"),
+                limit=arguments.get("limit", 200),
+            )
+        elif name == "get_earnings_history":
+            logger.info("  Executing: get_earnings_history")
+            result = get_earnings_history(
+                ticker=arguments["ticker"],
+                limit=arguments.get("limit", 12),
             )
         else:
             raise ValueError(f"Unknown tool: {name}")

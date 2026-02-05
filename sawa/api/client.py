@@ -37,6 +37,10 @@ ENDPOINTS = {
     "inflation": "/fed/v1/inflation",
     "inflation-expectations": "/fed/v1/inflation-expectations",
     "labor-market": "/fed/v1/labor-market",
+    # Corporate actions
+    "splits": "/v3/reference/splits",
+    "dividends": "/v3/reference/dividends",
+    "ticker-events": "/vX/reference/tickers/{ticker}/events",
     # Other
     "short-interest": "/stocks/v1/short-interest",
     "short-volume": "/stocks/v1/short-volume",
@@ -302,3 +306,89 @@ class PolygonClient:
             params["published_utc.lte"] = published_utc_lte
 
         return self.get_paginated("news", params)
+
+    def get_splits(
+        self,
+        ticker: str | None = None,
+        execution_date_gte: str | None = None,
+        execution_date_lte: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """
+        Get stock split history.
+
+        Args:
+            ticker: Filter by ticker symbol (e.g., 'AAPL')
+            execution_date_gte: Return splits on or after this date (YYYY-MM-DD)
+            execution_date_lte: Return splits on or before this date (YYYY-MM-DD)
+            limit: Max results per page
+
+        Returns:
+            List of stock splits with ticker, execution_date, split_from, split_to
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            ticker = validate_ticker(ticker)
+            params["ticker"] = ticker
+        if execution_date_gte:
+            params["execution_date.gte"] = execution_date_gte
+        if execution_date_lte:
+            params["execution_date.lte"] = execution_date_lte
+
+        return self.get_paginated("splits", params)
+
+    def get_dividends(
+        self,
+        ticker: str | None = None,
+        ex_dividend_date_gte: str | None = None,
+        ex_dividend_date_lte: str | None = None,
+        dividend_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """
+        Get dividend history.
+
+        Args:
+            ticker: Filter by ticker symbol (e.g., 'AAPL')
+            ex_dividend_date_gte: Return dividends on or after this date (YYYY-MM-DD)
+            ex_dividend_date_lte: Return dividends on or before this date (YYYY-MM-DD)
+            dividend_type: Filter by type (CD=cash, SC=special cash, etc.)
+            limit: Max results per page
+
+        Returns:
+            List of dividends with ticker, ex_dividend_date, cash_amount, etc.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            ticker = validate_ticker(ticker)
+            params["ticker"] = ticker
+        if ex_dividend_date_gte:
+            params["ex_dividend_date.gte"] = ex_dividend_date_gte
+        if ex_dividend_date_lte:
+            params["ex_dividend_date.lte"] = ex_dividend_date_lte
+        if dividend_type:
+            params["dividend_type"] = dividend_type
+
+        return self.get_paginated("dividends", params)
+
+    def get_ticker_events(
+        self,
+        ticker: str,
+        event_types: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Get ticker events including earnings dates.
+
+        Args:
+            ticker: Ticker symbol (e.g., 'AAPL')
+            event_types: Filter by event types (e.g., ['earnings'])
+
+        Returns:
+            Dict with events including earnings calendar
+        """
+        ticker = validate_ticker(ticker)
+        params: dict[str, Any] = {}
+        if event_types:
+            params["types"] = ",".join(event_types)
+
+        return self.get_single("ticker-events", path_params={"ticker": ticker})
