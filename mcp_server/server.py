@@ -62,7 +62,7 @@ from .tools.market_data import (
 from .tools.movers import get_market_breadth, get_top_movers, get_volume_leaders
 from .tools.scanner import scan_ytd_performance
 from .tools.schema import describe_database, describe_table
-from .tools.screener import screen_stocks
+from .tools.screener import get_52week_extremes, get_daily_range_leaders, screen_stocks
 from .tools.sectors import get_sector_performance, list_sectors
 
 # Setup logging
@@ -796,6 +796,82 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # 52-week high/low screener
+        Tool(
+            name="get_52week_extremes",
+            description="Find stocks at or near 52-week highs or lows",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "extreme": {
+                        "type": "string",
+                        "description": "Which extreme: 'highs', 'lows', or 'both'",
+                        "enum": ["highs", "lows", "both"],
+                        "default": "both",
+                    },
+                    "threshold_pct": {
+                        "type": "number",
+                        "description": "% threshold from extreme (default: 2 = within 2%)",
+                        "default": 2.0,
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index: sp500, nasdaq100, or all",
+                        "enum": ["sp500", "nasdaq100", "all"],
+                        "default": "all",
+                    },
+                    "min_volume": {
+                        "type": "integer",
+                        "description": "Minimum volume filter",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 50, max: 200)",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                },
+            },
+        ),
+        # Daily range (intraday volatility) screener
+        Tool(
+            name="get_daily_range_leaders",
+            description="Find stocks with high intraday volatility (daily range %)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "min_range_pct": {
+                        "type": "number",
+                        "description": "Minimum daily range % (default: 3%)",
+                        "default": 3.0,
+                    },
+                    "max_range_pct": {
+                        "type": "number",
+                        "description": "Maximum daily range % (optional)",
+                    },
+                    "sector": {
+                        "type": "string",
+                        "description": "Optional sector filter",
+                    },
+                    "min_price": {
+                        "type": "number",
+                        "description": "Minimum stock price filter",
+                    },
+                    "min_volume": {
+                        "type": "integer",
+                        "description": "Minimum volume filter",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 50, max: 200)",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -1065,6 +1141,27 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 taxonomy=arguments.get("taxonomy", "gics"),
                 sort_by=arguments.get("sort_by", "market_cap"),
                 sort_order=arguments.get("sort_order", "desc"),
+                limit=arguments.get("limit", 50),
+            )
+        # 52-week extremes screener
+        elif name == "get_52week_extremes":
+            logger.info("  Executing: get_52week_extremes")
+            result = get_52week_extremes(
+                extreme=arguments.get("extreme", "both"),
+                threshold_pct=arguments.get("threshold_pct", 2.0),
+                index=arguments.get("index", "all"),
+                min_volume=arguments.get("min_volume"),
+                limit=arguments.get("limit", 50),
+            )
+        # Daily range screener
+        elif name == "get_daily_range_leaders":
+            logger.info("  Executing: get_daily_range_leaders")
+            result = get_daily_range_leaders(
+                min_range_pct=arguments.get("min_range_pct", 3.0),
+                max_range_pct=arguments.get("max_range_pct"),
+                sector=arguments.get("sector"),
+                min_price=arguments.get("min_price"),
+                min_volume=arguments.get("min_volume"),
                 limit=arguments.get("limit", 50),
             )
         else:
