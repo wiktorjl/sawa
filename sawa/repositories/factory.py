@@ -28,8 +28,10 @@ from sawa.repositories.base import (
     CompanyRepository,
     EconomyRepository,
     FundamentalRepository,
+    NewsRepository,
     RatiosRepository,
     StockPriceRepository,
+    TechnicalIndicatorsRepository,
 )
 from sawa.repositories.cache import InMemoryCache, NullCache
 from sawa.repositories.config import RepositoryConfig
@@ -246,6 +248,74 @@ class RepositoryFactory:
                 )
             else:
                 raise ValueError(f"Unknown economy provider: {provider}")
+
+        return self._instances[cache_key]  # type: ignore[return-value]
+
+    def get_news_repository(
+        self,
+        provider: str | None = None,
+    ) -> NewsRepository:
+        """Get news repository instance.
+
+        Args:
+            provider: Provider name. Defaults to "database".
+
+        Returns:
+            NewsRepository instance
+
+        Raises:
+            ValueError: If provider is unknown or not configured
+        """
+        provider = provider or "database"
+        cache_key = f"news:{provider}"
+
+        if cache_key not in self._instances:
+            if provider == "database":
+                from sawa.repositories.database import DatabaseNewsRepository
+
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
+
+                self._instances[cache_key] = DatabaseNewsRepository(
+                    database_url=self.config.database_url
+                )
+            else:
+                raise ValueError(f"Unknown news provider: {provider}")
+
+        return self._instances[cache_key]  # type: ignore[return-value]
+
+    def get_technical_indicators_repository(
+        self,
+        provider: str | None = None,
+    ) -> TechnicalIndicatorsRepository:
+        """Get technical indicators repository instance.
+
+        Args:
+            provider: Provider name. Defaults to "database".
+
+        Returns:
+            TechnicalIndicatorsRepository instance
+
+        Raises:
+            ValueError: If provider is unknown or not configured
+        """
+        provider = provider or "database"
+        cache_key = f"technical_indicators:{provider}"
+
+        if cache_key not in self._instances:
+            if provider == "database":
+                from sawa.repositories.database import (
+                    DatabaseTechnicalIndicatorsRepository,
+                )
+
+                if not self.config.database_url:
+                    raise ValueError("DATABASE_URL not configured")
+
+                self._instances[cache_key] = DatabaseTechnicalIndicatorsRepository(
+                    database_url=self.config.database_url
+                )
+            else:
+                raise ValueError(f"Unknown technical indicators provider: {provider}")
 
         return self._instances[cache_key]  # type: ignore[return-value]
 

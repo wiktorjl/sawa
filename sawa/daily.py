@@ -72,15 +72,17 @@ def fetch_prices_via_api(
             for r in results:
                 if r.get("t"):
                     price_date = timestamp_to_date(r["t"])
-                    all_prices.append({
-                        "ticker": symbol,
-                        "date": price_date.strftime(DATE_FORMAT),
-                        "open": r.get("o"),
-                        "high": r.get("h"),
-                        "low": r.get("l"),
-                        "close": r.get("c"),
-                        "volume": r.get("v"),
-                    })
+                    all_prices.append(
+                        {
+                            "ticker": symbol,
+                            "date": price_date.strftime(DATE_FORMAT),
+                            "open": r.get("o"),
+                            "high": r.get("h"),
+                            "low": r.get("l"),
+                            "close": r.get("c"),
+                            "volume": r.get("v"),
+                        }
+                    )
 
         except Exception as e:
             logger.debug(f"  {symbol}: {e}")
@@ -113,17 +115,20 @@ def insert_prices(
 
     with conn.cursor() as cur:
         for i in range(0, len(prices), batch_size):
-            batch = prices[i:i + batch_size]
+            batch = prices[i : i + batch_size]
             for p in batch:
-                cur.execute(query, (
-                    p["ticker"],
-                    p["date"],
-                    p["open"],
-                    p["high"],
-                    p["low"],
-                    p["close"],
-                    p["volume"],
-                ))
+                cur.execute(
+                    query,
+                    (
+                        p["ticker"],
+                        p["date"],
+                        p["open"],
+                        p["high"],
+                        p["low"],
+                        p["close"],
+                        p["volume"],
+                    ),
+                )
                 inserted += 1
             conn.commit()
 
@@ -139,11 +144,12 @@ def run_daily(
     output_dir: Path | None = None,
     force_from_date: date | None = None,
     skip_news: bool = False,
+    skip_ta: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """
-    Run daily price and news update using REST API.
+    Run daily price, news, and technical indicator update using REST API.
 
     Args:
         api_key: Polygon/Massive API key
@@ -151,6 +157,7 @@ def run_daily(
         output_dir: Not used (kept for CLI compatibility)
         force_from_date: Optional date to force update from
         skip_news: Skip news update
+        skip_ta: Skip technical indicator calculation
         dry_run: If True, show what would be done without executing
         logger: Logger instance
 
@@ -221,6 +228,8 @@ def run_daily(
                 logger.info("  - No price updates needed")
             if not skip_news:
                 logger.info(f"  - News articles (last {DEFAULT_NEWS_DAYS} days)")
+            if not skip_ta:
+                logger.info(f"  - Technical indicators for {len(symbols)} symbols")
             stats["success"] = True
             stats["dry_run"] = True
             return stats
@@ -228,9 +237,7 @@ def run_daily(
         # Fetch and insert prices if there are trading days
         if trading_days:
             logger.info("\nFetching prices via API...")
-            prices = fetch_prices_via_api(
-                client, symbols, start_str, end_str, logger, rate_limiter
-            )
+            prices = fetch_prices_via_api(client, symbols, start_str, end_str, logger, rate_limiter)
             logger.info(f"  Fetched {len(prices)} price records")
             stats["prices_fetched"] = len(prices)
 
@@ -251,6 +258,80 @@ def run_daily(
         else:
             logger.info("\nSkipping news (--skip-news)")
 
+        # Calculate technical indicators (always, unless skipped)
+        if not skip_ta:
+            logger.info("\nCalculating technical indicators...")
+            try:
+                from sawa.calculation.ta_engine import (
+                    calculate_indicators_for_ticker,
+                    get_required_lookback_days,
+                )
+                from sawa.database.ta_load import (
+                    get_last_ta_date,
+                    get_prices_for_ticker,
+                    load_technical_indicators,
+                )
+
+                lookback_days = get_required_lookback_days()
+                ta_count = 0
+
+                with psycopg.connect(database_url) as conn:
+                    # Check if technical_indicators table exists
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_name = 'technical_indicators'
+                            )
+                        """)
+                        table_exists = cur.fetchone()[0]
+
+                    if not table_exists:
+                        logger.warning("  Table 'technical_indicators' does not exist")
+                        logger.warning("  Run schema migration or coldstart to create it")
+                        stats["ta_skipped"] = "table does not exist"
+                    else:
+                        for i, ticker in enumerate(symbols, 1):
+                            if i % 100 == 0:
+                                logger.info(f"  Progress: {i}/{len(symbols)} tickers")
+
+                            # Get last TA date for this ticker
+                            last_ta = get_last_ta_date(conn, ticker)
+
+                            # Calculate start date for price fetch (need lookback for warm-up)
+                            if last_ta:
+                                price_start = last_ta - timedelta(days=lookback_days)
+                            else:
+                                price_start = None  # Fetch all prices
+
+                            # Fetch prices
+                            prices = get_prices_for_ticker(conn, ticker, start_date=price_start)
+                            if not prices:
+                                continue
+
+                            # Calculate indicators
+                            indicators = calculate_indicators_for_ticker(ticker, prices, logger)
+                            if not indicators:
+                                continue
+
+                            # Filter to only new dates (after last_ta)
+                            if last_ta:
+                                indicators = [ind for ind in indicators if ind.date > last_ta]
+
+                            if indicators:
+                                inserted = load_technical_indicators(conn, indicators, logger)
+                                ta_count += inserted
+
+                        stats["ta_calculated"] = ta_count
+                        logger.info(f"  Calculated {ta_count} indicator records")
+
+            except ImportError as e:
+                logger.warning(f"Skipping TA calculation: {e}")
+                logger.warning("  Install ta-lib to enable: pip install TA-Lib")
+                stats["ta_skipped"] = "ta-lib not installed"
+        else:
+            logger.info("\nSkipping technical indicators (--skip-ta)")
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info("DAILY UPDATE COMPLETE")
@@ -258,6 +339,8 @@ def run_daily(
         logger.info(f"  Price records: {stats.get('prices_inserted', 0)}")
         if not skip_news:
             logger.info(f"  News articles: {stats.get('news', 0)}")
+        if not skip_ta and "ta_calculated" in stats:
+            logger.info(f"  TA indicators: {stats.get('ta_calculated', 0)}")
 
     except Exception as e:
         logger.error(f"Daily update failed: {e}")

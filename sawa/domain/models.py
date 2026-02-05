@@ -59,25 +59,25 @@ class NewsArticle:
 
     Attributes:
         id: Unique article identifier
-        ticker: Related stock symbol
         title: Article title
-        content: Article body (may be None if not available)
-        published_at: Publication timestamp
-        source: News source name
-        url: Link to original article (optional)
-        sentiment_score: Sentiment score from -1.0 (bearish) to 1.0 (bullish)
-        sentiment_label: Categorical sentiment label
+        published_utc: Publication timestamp
+        article_url: Link to original article
+        author: Article author (optional)
+        description: Article description/snippet (optional)
+        publisher_name: News publisher name (optional)
+        sentiment: Categorical sentiment label (positive/negative/neutral)
+        sentiment_reasoning: Explanation for sentiment classification (optional)
     """
 
     id: str
-    ticker: str
     title: str
-    content: str | None
-    published_at: datetime
-    source: str
-    url: str | None = None
-    sentiment_score: float | None = None
-    sentiment_label: Literal["positive", "negative", "neutral"] | None = None
+    published_utc: datetime
+    article_url: str | None = None
+    author: str | None = None
+    description: str | None = None
+    publisher_name: str | None = None
+    sentiment: Literal["positive", "negative", "neutral"] | None = None
+    sentiment_reasoning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -31,15 +31,19 @@ from sawa.domain.models import (
     IncomeStatement,
     InflationData,
     LaborMarketData,
+    NewsArticle,
     StockPrice,
     TreasuryYield,
 )
+from sawa.domain.technical_indicators import TechnicalIndicators
 from sawa.repositories.base import (
     CompanyRepository,
     EconomyRepository,
     FundamentalRepository,
+    NewsRepository,
     RatiosRepository,
     StockPriceRepository,
+    TechnicalIndicatorsRepository,
 )
 
 
@@ -808,3 +812,356 @@ class DatabaseEconomyRepository(EconomyRepository):
             indicator=row["indicator"],
             value=Decimal(str(row["value"])),
         )
+
+
+class DatabaseNewsRepository(NewsRepository):
+    """Read news and sentiment data from PostgreSQL.
+
+    This repository queries the news_articles, news_article_tickers,
+    and news_sentiment tables.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    async def get_news(
+        self,
+        ticker: str,
+        limit: int = 20,
+        days_back: int = 30,
+    ) -> list[NewsArticle]:
+        """Get news articles for a ticker with sentiment.
+
+        Args:
+            ticker: Stock symbol
+            limit: Maximum number of articles to return
+            days_back: Number of days to look back
+
+        Returns:
+            List of NewsArticle objects, sorted by date descending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_news_sync, ticker, limit, days_back)
+
+    def _get_news_sync(
+        self,
+        ticker: str,
+        limit: int,
+        days_back: int,
+    ) -> list[NewsArticle]:
+        """Synchronous implementation of get_news."""
+        query = """
+            SELECT
+                na.id,
+                na.title,
+                na.author,
+                na.description,
+                na.article_url,
+                na.published_utc,
+                na.publisher_name,
+                ns.sentiment,
+                ns.sentiment_reasoning
+            FROM news_articles na
+            JOIN news_article_tickers nat ON na.id = nat.article_id
+            LEFT JOIN news_sentiment ns ON na.id = ns.article_id AND nat.ticker = ns.ticker
+            WHERE nat.ticker = %s
+              AND na.published_utc >= NOW() - INTERVAL '%s days'
+            ORDER BY na.published_utc DESC
+            LIMIT %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (ticker, days_back, limit))
+                rows = cur.fetchall()
+
+        return [self._row_to_article(row) for row in rows]
+
+    def _row_to_article(self, row: dict[str, Any]) -> NewsArticle:
+        """Convert database row to NewsArticle domain model."""
+        return NewsArticle(
+            id=row["id"],
+            title=row["title"],
+            published_utc=row["published_utc"],
+            author=row.get("author"),
+            description=row.get("description"),
+            article_url=row.get("article_url"),
+            publisher_name=row.get("publisher_name"),
+            sentiment=row.get("sentiment"),
+            sentiment_reasoning=row.get("sentiment_reasoning"),
+        )
+
+    async def get_news_sentiment_summary(
+        self,
+        ticker: str,
+        days: int = 30,
+    ) -> dict[str, int]:
+        """Get sentiment summary counts for a ticker.
+
+        Args:
+            ticker: Stock symbol
+            days: Number of days to look back
+
+        Returns:
+            Dict mapping sentiment label to count (e.g., {"positive": 5, "negative": 2})
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_sentiment_summary_sync, ticker, days)
+
+    def _get_sentiment_summary_sync(
+        self,
+        ticker: str,
+        days: int,
+    ) -> dict[str, int]:
+        """Synchronous implementation of get_news_sentiment_summary."""
+        query = """
+            SELECT
+                ns.sentiment,
+                COUNT(*) as count
+            FROM news_sentiment ns
+            JOIN news_articles na ON ns.article_id = na.id
+            WHERE ns.ticker = %s
+              AND na.published_utc >= NOW() - INTERVAL '%s days'
+            GROUP BY ns.sentiment
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (ticker, days))
+                rows = cur.fetchall()
+
+        return {row["sentiment"]: row["count"] for row in rows if row.get("sentiment")}
+
+    def get_news_stream(
+        self,
+        tickers: list[str],
+    ) -> AsyncIterator[NewsArticle]:
+        """Stream news as it arrives (not implemented for database).
+
+        Note: Streaming is not supported for database repository.
+        Use Polygon API repository for real-time news streaming.
+
+        Args:
+            tickers: List of stock symbols to monitor
+
+        Raises:
+            NotImplementedError: Database doesn't support real-time streaming
+        """
+        raise NotImplementedError("News streaming not supported for database repository")
+
+
+class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
+    """Read technical indicators from PostgreSQL.
+
+    This repository queries the technical_indicators table which contains
+    calculated indicators (SMA, RSI, MACD, etc.) from OHLCV data.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    # Valid indicator columns for filtering
+    VALID_INDICATORS = {
+        "sma_5",
+        "sma_10",
+        "sma_20",
+        "sma_50",
+        "ema_12",
+        "ema_26",
+        "ema_50",
+        "vwap",
+        "rsi_14",
+        "rsi_21",
+        "macd_line",
+        "macd_signal",
+        "macd_histogram",
+        "bb_upper",
+        "bb_middle",
+        "bb_lower",
+        "atr_14",
+        "obv",
+        "volume_sma_20",
+        "volume_ratio",
+    }
+
+    async def get_indicators(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[TechnicalIndicators]:
+        """Get technical indicators for a ticker.
+
+        Args:
+            ticker: Stock symbol
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            List of TechnicalIndicators objects, sorted by date ascending
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._get_indicators_sync, ticker, start_date, end_date
+        )
+
+    def _get_indicators_sync(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[TechnicalIndicators]:
+        """Synchronous implementation of get_indicators."""
+        query = """
+            SELECT *
+            FROM technical_indicators
+            WHERE ticker = %s AND date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (ticker.upper(), start_date, end_date))
+                rows = cur.fetchall()
+
+        return [self._row_to_indicators(row) for row in rows]
+
+    def _row_to_indicators(self, row: dict[str, Any]) -> TechnicalIndicators:
+        """Convert database row to TechnicalIndicators domain model."""
+        return TechnicalIndicators(
+            ticker=row["ticker"],
+            date=row["date"],
+            # Trend
+            sma_5=_to_decimal(row.get("sma_5")),
+            sma_10=_to_decimal(row.get("sma_10")),
+            sma_20=_to_decimal(row.get("sma_20")),
+            sma_50=_to_decimal(row.get("sma_50")),
+            ema_12=_to_decimal(row.get("ema_12")),
+            ema_26=_to_decimal(row.get("ema_26")),
+            ema_50=_to_decimal(row.get("ema_50")),
+            vwap=_to_decimal(row.get("vwap")),
+            # Momentum
+            rsi_14=_to_decimal(row.get("rsi_14")),
+            rsi_21=_to_decimal(row.get("rsi_21")),
+            macd_line=_to_decimal(row.get("macd_line")),
+            macd_signal=_to_decimal(row.get("macd_signal")),
+            macd_histogram=_to_decimal(row.get("macd_histogram")),
+            # Volatility
+            bb_upper=_to_decimal(row.get("bb_upper")),
+            bb_middle=_to_decimal(row.get("bb_middle")),
+            bb_lower=_to_decimal(row.get("bb_lower")),
+            atr_14=_to_decimal(row.get("atr_14")),
+            # Volume
+            obv=row.get("obv"),
+            volume_sma_20=row.get("volume_sma_20"),
+            volume_ratio=_to_decimal(row.get("volume_ratio")),
+        )
+
+    async def get_latest_indicators(self, ticker: str) -> TechnicalIndicators | None:
+        """Get most recent technical indicators for a ticker.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            Most recent TechnicalIndicators, or None if not found
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_latest_sync, ticker)
+
+    def _get_latest_sync(self, ticker: str) -> TechnicalIndicators | None:
+        """Synchronous implementation of get_latest_indicators."""
+        query = """
+            SELECT *
+            FROM technical_indicators
+            WHERE ticker = %s
+            ORDER BY date DESC
+            LIMIT 1
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (ticker.upper(),))
+                row = cur.fetchone()
+
+        return self._row_to_indicators(row) if row else None
+
+    async def screen_by_indicators(
+        self,
+        filters: dict[str, tuple[float | None, float | None]],
+        target_date: date | None = None,
+        limit: int = 100,
+    ) -> list[TechnicalIndicators]:
+        """Screen stocks by technical indicator values.
+
+        Args:
+            filters: Dict mapping indicator name to (min, max) tuple.
+            target_date: Date to screen (defaults to most recent)
+            limit: Maximum number of results
+
+        Returns:
+            List of TechnicalIndicators matching all filters
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._screen_sync, filters, target_date, limit)
+
+    def _screen_sync(
+        self,
+        filters: dict[str, tuple[float | None, float | None]],
+        target_date: date | None,
+        limit: int,
+    ) -> list[TechnicalIndicators]:
+        """Synchronous implementation of screen_by_indicators."""
+        limit = min(limit, 500)
+
+        # Build WHERE conditions
+        conditions = []
+        params: list[Any] = []
+
+        if target_date:
+            conditions.append("date = %s")
+            params.append(target_date)
+        else:
+            # Use most recent date
+            conditions.append("date = (SELECT MAX(date) FROM technical_indicators)")
+
+        # Add filter conditions
+        for indicator, (min_val, max_val) in filters.items():
+            if indicator not in self.VALID_INDICATORS:
+                continue
+
+            if min_val is not None and max_val is not None:
+                conditions.append(f"{indicator} BETWEEN %s AND %s")
+                params.extend([min_val, max_val])
+            elif min_val is not None:
+                conditions.append(f"{indicator} >= %s")
+                params.append(min_val)
+            elif max_val is not None:
+                conditions.append(f"{indicator} <= %s")
+                params.append(max_val)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        params.append(limit)
+
+        query = f"""
+            SELECT *
+            FROM technical_indicators
+            WHERE {where_clause}
+            ORDER BY ticker
+            LIMIT %s
+        """
+
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_indicators(row) for row in rows]

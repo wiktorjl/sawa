@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from sawa.domain import models as domain
+from sawa.domain.technical_indicators import TechnicalIndicators
 
 
 def _decimal_to_float(value: Decimal | None) -> float | None:
@@ -202,4 +203,39 @@ def labor_market_to_dict(records: list[domain.LaborMarketData]) -> dict[str, Any
         ),
         "avg_hourly_earnings": _decimal_to_float(indicator_map.get("avg_hourly_earnings")),
         "job_openings": _decimal_to_float(indicator_map.get("job_openings")),
+    }
+
+
+def technical_indicators_to_dict(ind: TechnicalIndicators) -> dict[str, Any]:
+    """Convert TechnicalIndicators domain model to MCP dict.
+
+    Returns dict matching technical_indicators SQL query result format.
+    """
+    return {
+        "ticker": ind.ticker,
+        "date": ind.date,
+        # Trend (8 indicators)
+        "sma_5": _decimal_to_float(ind.sma_5),
+        "sma_10": _decimal_to_float(ind.sma_10),
+        "sma_20": _decimal_to_float(ind.sma_20),
+        "sma_50": _decimal_to_float(ind.sma_50),
+        "ema_12": _decimal_to_float(ind.ema_12),
+        "ema_26": _decimal_to_float(ind.ema_26),
+        "ema_50": _decimal_to_float(ind.ema_50),
+        "vwap": _decimal_to_float(ind.vwap),
+        # Momentum (5 indicators)
+        "rsi_14": _decimal_to_float(ind.rsi_14),
+        "rsi_21": _decimal_to_float(ind.rsi_21),
+        "macd_line": _decimal_to_float(ind.macd_line),
+        "macd_signal": _decimal_to_float(ind.macd_signal),
+        "macd_histogram": _decimal_to_float(ind.macd_histogram),
+        # Volatility (4 indicators)
+        "bb_upper": _decimal_to_float(ind.bb_upper),
+        "bb_middle": _decimal_to_float(ind.bb_middle),
+        "bb_lower": _decimal_to_float(ind.bb_lower),
+        "atr_14": _decimal_to_float(ind.atr_14),
+        # Volume (3 indicators)
+        "obv": ind.obv,
+        "volume_sma_20": ind.volume_sma_20,
+        "volume_ratio": _decimal_to_float(ind.volume_ratio),
     }

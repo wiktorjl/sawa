@@ -34,6 +34,7 @@ from sawa.domain.models import (
     StockPrice,
     TreasuryYield,
 )
+from sawa.domain.technical_indicators import TechnicalIndicators
 
 
 class Repository(ABC):
@@ -394,5 +395,65 @@ class EconomyRepository(Repository):
 
         Returns:
             List of LaborMarketData objects, sorted by date ascending
+        """
+        pass
+
+
+class TechnicalIndicatorsRepository(Repository):
+    """Repository for technical indicator data.
+
+    Provides methods to fetch technical indicators (SMA, RSI, MACD, etc.)
+    calculated from OHLCV price data.
+    """
+
+    @abstractmethod
+    async def get_indicators(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[TechnicalIndicators]:
+        """Get technical indicators for a ticker.
+
+        Args:
+            ticker: Stock symbol
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            List of TechnicalIndicators objects, sorted by date ascending
+        """
+        pass
+
+    @abstractmethod
+    async def get_latest_indicators(self, ticker: str) -> TechnicalIndicators | None:
+        """Get most recent technical indicators for a ticker.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            Most recent TechnicalIndicators, or None if not found
+        """
+        pass
+
+    @abstractmethod
+    async def screen_by_indicators(
+        self,
+        filters: dict[str, tuple[float | None, float | None]],
+        target_date: date | None = None,
+        limit: int = 100,
+    ) -> list[TechnicalIndicators]:
+        """Screen stocks by technical indicator values.
+
+        Args:
+            filters: Dict mapping indicator name to (min, max) tuple.
+                     Use None for unbounded side.
+                     Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
+            target_date: Date to screen (defaults to most recent)
+            limit: Maximum number of results
+
+        Returns:
+            List of TechnicalIndicators matching all filters
         """
         pass
