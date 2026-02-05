@@ -35,7 +35,10 @@ from sawa.utils import calculate_date_range, setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
-from sawa.utils.symbols import fetch_sp500_symbols  # noqa: F401
+from sawa.utils.symbols import (
+    fetch_nasdaq100_symbols,
+    fetch_sp500_symbols,
+)
 
 # Wikipedia URL for S&P 500 constituents
 WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -361,6 +364,81 @@ def download_ratios(
     return len(all_ratios)
 
 
+def populate_index_constituents(
+    conn,
+    logger: logging.Logger,
+) -> dict[str, int]:
+    """
+    Populate index constituents table with S&P 500 and NASDAQ-100 members.
+
+    Args:
+        conn: Database connection
+        logger: Logger instance
+
+    Returns:
+        Dict with index codes and number of constituents added
+    """
+    logger.info("Populating index constituents...")
+    stats: dict[str, int] = {}
+
+    # Fetch current index members from Wikipedia
+    index_data = [
+        ("sp500", fetch_sp500_symbols),
+        ("nasdaq100", fetch_nasdaq100_symbols),
+    ]
+
+    for code, fetcher in index_data:
+        try:
+            logger.info(f"  Fetching {code} symbols...")
+            symbols = fetcher(logger)
+            logger.info(f"    Found {len(symbols)} symbols")
+
+            # Get index ID
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM indices WHERE code = %s", (code,))
+                row = cur.fetchone()
+                if not row:
+                    logger.warning(f"    Index not found in database: {code}")
+                    stats[code] = 0
+                    continue
+                index_id = row[0]
+
+                # Clear existing constituents
+                cur.execute("DELETE FROM index_constituents WHERE index_id = %s", (index_id,))
+
+                # Insert constituents (only those in companies table)
+                added = 0
+                for symbol in symbols:
+                    symbol_upper = symbol.upper()
+                    cur.execute(
+                        """
+                        INSERT INTO index_constituents (index_id, ticker)
+                        SELECT %s, %s
+                        WHERE EXISTS (SELECT 1 FROM companies WHERE ticker = %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (index_id, symbol_upper, symbol_upper),
+                    )
+                    if cur.rowcount > 0:
+                        added += 1
+
+                # Update last_updated
+                cur.execute(
+                    "UPDATE indices SET last_updated = CURRENT_TIMESTAMP WHERE id = %s",
+                    (index_id,),
+                )
+
+                conn.commit()
+                stats[code] = added
+                logger.info(f"    Added {added} constituents to {code}")
+
+        except Exception as e:
+            logger.error(f"    Failed to populate {code}: {e}")
+            stats[code] = 0
+
+    return stats
+
+
 def run_coldstart(
     api_key: str | None,
     s3_access_key: str | None,
@@ -600,8 +678,6 @@ def run_coldstart(
                     logger.info("  - Fetching S&P 500...")
                     sp500_symbols = fetch_sp500_symbols(logger)
                     logger.info("  - Fetching NASDAQ-100...")
-                    from sawa.utils.symbols import fetch_nasdaq100_symbols
-
                     nasdaq100_symbols = fetch_nasdaq100_symbols(logger)
 
                     # Merge and deduplicate
@@ -747,6 +823,11 @@ def run_coldstart(
                     logger.info("\n[9/9] Downloading news articles...")
                     news_count = load_news(conn, client, symbols, days=DEFAULT_NEWS_DAYS)
                     stats["news"] = news_count
+
+            # Step 10: Populate index constituents (run for all modes after companies are loaded)
+            logger.info("\n[10/10] Populating index constituents...")
+            index_stats = populate_index_constituents(conn, logger)
+            stats["indices"] = index_stats
 
         stats["success"] = True
         logger.info("\n" + "=" * 60)
