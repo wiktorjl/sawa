@@ -217,6 +217,7 @@ def cmd_weekly(args) -> int:
             skip_ratios=args.skip_ratios,
             skip_news=args.skip_news,
             skip_corporate_actions=args.skip_corporate_actions,
+            force_fundamentals=args.force_fundamentals,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -490,7 +491,7 @@ def cmd_index_check(args) -> int:
 
 
 def cmd_corporate_actions(args) -> int:
-    """Run corporate actions update (splits, dividends)."""
+    """Run corporate actions update (splits, dividends, earnings)."""
     from sawa.corporate_actions import run_corporate_actions_update
 
     logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="corporate_actions")
@@ -512,14 +513,22 @@ def cmd_corporate_actions(args) -> int:
     # Parse ticker(s)
     tickers = [args.ticker.upper()] if args.ticker else None
 
+    # Determine what to include
+    # --splits-only and --dividends-only exclude earnings
+    # Earnings is off by default (Polygon API doesn't currently provide earnings data)
+    include_splits = not args.dividends_only
+    include_dividends = not args.splits_only
+    include_earnings = args.include_earnings and not args.splits_only and not args.dividends_only
+
     try:
         stats = run_corporate_actions_update(
             api_key=api_key,
             database_url=db_url,
             start_date=start_date,
             tickers=tickers,
-            include_splits=not args.dividends_only,
-            include_dividends=not args.splits_only,
+            include_splits=include_splits,
+            include_dividends=include_dividends,
+            include_earnings=include_earnings,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -735,6 +744,11 @@ Environment Variables:
         "--skip-fundamentals", action="store_true", help="Skip fundamentals update"
     )
     weekly_parser.add_argument(
+        "--force-fundamentals",
+        action="store_true",
+        help="Force fundamentals update even outside reporting months (Jan/Apr/Jul/Oct)",
+    )
+    weekly_parser.add_argument(
         "--skip-economy", action="store_true", help="Skip economy data update"
     )
     weekly_parser.add_argument(
@@ -920,13 +934,18 @@ Environment Variables:
     # Corporate actions subcommand
     corp_parser = subparsers.add_parser(
         "corporate-actions",
-        help="Download stock splits and dividends",
-        description="Download and store corporate actions (splits, dividends) from Polygon.",
+        help="Download splits, dividends, and earnings",
+        description="Download and store corporate actions from Polygon.",
     )
     corp_parser.add_argument("--start-date", help="Fetch data from this date (default: 1 year ago)")
     corp_parser.add_argument("--ticker", help="Single ticker to fetch (default: all active)")
     corp_parser.add_argument("--splits-only", action="store_true", help="Only fetch splits")
     corp_parser.add_argument("--dividends-only", action="store_true", help="Only fetch dividends")
+    corp_parser.add_argument(
+        "--include-earnings",
+        action="store_true",
+        help="Include earnings (experimental, Polygon API may not provide data)",
+    )
     corp_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     corp_parser.add_argument("--api-key", help="Polygon API key")
     corp_parser.add_argument("--database-url", help="PostgreSQL URL")
