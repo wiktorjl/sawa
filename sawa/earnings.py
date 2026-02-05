@@ -40,10 +40,34 @@ def fetch_earnings_yfinance(
         logger: Logger instance
 
     Returns:
-        List of earnings records
+        List of earnings records with EPS and revenue data
     """
+    import math
+
     logger = logger or logging.getLogger(__name__)
     results: list[dict[str, Any]] = []
+
+    def safe_decimal(val: Any) -> Decimal | None:
+        """Convert value to Decimal, returning None for NaN/None."""
+        if val is None:
+            return None
+        try:
+            if math.isnan(val):
+                return None
+            return Decimal(str(val))
+        except (ValueError, TypeError):
+            return None
+
+    def safe_int(val: Any) -> int | None:
+        """Convert value to int, returning None for NaN/None."""
+        if val is None:
+            return None
+        try:
+            if math.isnan(val):
+                return None
+            return int(val)
+        except (ValueError, TypeError):
+            return None
 
     try:
         stock = yf.Ticker(ticker)
@@ -52,6 +76,33 @@ def fetch_earnings_yfinance(
         if earnings_dates is None or len(earnings_dates) == 0:
             logger.debug(f"{ticker}: No earnings data available")
             return results
+
+        # Get quarterly income statement for actual revenue
+        quarterly_revenue: dict[str, int] = {}
+        try:
+            income_stmt = stock.quarterly_income_stmt
+            if income_stmt is not None and len(income_stmt) > 0:
+                # Find Total Revenue row
+                for idx in income_stmt.index:
+                    if "total revenue" in str(idx).lower():
+                        for col in income_stmt.columns:
+                            period_end = col.date() if hasattr(col, "date") else col
+                            revenue = income_stmt.loc[idx, col]
+                            if revenue is not None and not math.isnan(revenue):
+                                # Key by fiscal period end date
+                                quarterly_revenue[str(period_end)] = int(revenue)
+                        break
+        except Exception:
+            pass  # Revenue data is optional
+
+        # Get revenue estimate for upcoming earnings from calendar
+        upcoming_revenue_estimate: int | None = None
+        try:
+            calendar = stock.calendar
+            if calendar and "Revenue Average" in calendar:
+                upcoming_revenue_estimate = safe_int(calendar["Revenue Average"])
+        except Exception:
+            pass
 
         # Calculate cutoff date
         cutoff = datetime.now() - timedelta(days=years * 365)
@@ -64,20 +115,10 @@ def fetch_earnings_yfinance(
             if earnings_dt.replace(tzinfo=None) < cutoff:
                 continue
 
-            # Extract data
-            eps_estimate = row.get("EPS Estimate")
-            eps_actual = row.get("Reported EPS")
-            surprise_pct = row.get("Surprise(%)")
-
-            # Convert NaN to None
-            import math
-
-            if eps_estimate is not None and math.isnan(eps_estimate):
-                eps_estimate = None
-            if eps_actual is not None and math.isnan(eps_actual):
-                eps_actual = None
-            if surprise_pct is not None and math.isnan(surprise_pct):
-                surprise_pct = None
+            # Extract EPS data
+            eps_estimate = safe_decimal(row.get("EPS Estimate"))
+            eps_actual = safe_decimal(row.get("Reported EPS"))
+            surprise_pct = safe_decimal(row.get("Surprise(%)"))
 
             # Derive fiscal quarter and year from earnings date
             # Earnings reported in Q1 (Jan-Mar) are typically for previous Q4
@@ -103,6 +144,30 @@ def fetch_earnings_yfinance(
             else:
                 timing = "DMH"
 
+            # Match revenue to fiscal period
+            # Fiscal period end is typically last day of the quarter
+            revenue_actual: int | None = None
+            revenue_estimate: int | None = None
+
+            # Calculate expected fiscal period end date
+            quarter_end_month = {"Q1": 3, "Q2": 6, "Q3": 9, "Q4": 12}[fiscal_quarter]
+            quarter_end_year = fiscal_year if fiscal_quarter != "Q4" else fiscal_year
+            if fiscal_quarter == "Q4":
+                quarter_end_year = fiscal_year  # Q4 of fiscal_year ends in Dec of fiscal_year
+
+            # Try to find matching revenue in quarterly_revenue
+            # Look for period ends around the expected quarter end
+            for period_str, revenue in quarterly_revenue.items():
+                period_date = datetime.strptime(period_str, "%Y-%m-%d").date()
+                # Check if this period matches our fiscal quarter
+                if period_date.year == quarter_end_year and period_date.month == quarter_end_month:
+                    revenue_actual = revenue
+                    break
+
+            # For upcoming earnings (no actual EPS), use revenue estimate from calendar
+            if eps_actual is None and upcoming_revenue_estimate:
+                revenue_estimate = upcoming_revenue_estimate
+
             results.append(
                 {
                     "ticker": ticker,
@@ -110,13 +175,11 @@ def fetch_earnings_yfinance(
                     "fiscal_quarter": fiscal_quarter,
                     "fiscal_year": fiscal_year,
                     "timing": timing,
-                    "eps_estimate": Decimal(str(eps_estimate))
-                    if eps_estimate is not None
-                    else None,
-                    "eps_actual": Decimal(str(eps_actual)) if eps_actual is not None else None,
-                    "surprise_pct": Decimal(str(surprise_pct))
-                    if surprise_pct is not None
-                    else None,
+                    "eps_estimate": eps_estimate,
+                    "eps_actual": eps_actual,
+                    "surprise_pct": surprise_pct,
+                    "revenue_estimate": revenue_estimate,
+                    "revenue_actual": revenue_actual,
                 }
             )
 
@@ -138,9 +201,10 @@ def load_earnings(
     insert_sql = """
         INSERT INTO earnings (
             ticker, report_date, fiscal_quarter, fiscal_year,
-            timing, eps_estimate, eps_actual, surprise_pct
+            timing, eps_estimate, eps_actual, surprise_pct,
+            revenue_estimate, revenue_actual
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (ticker, report_date) DO UPDATE SET
             fiscal_quarter = EXCLUDED.fiscal_quarter,
             fiscal_year = EXCLUDED.fiscal_year,
@@ -148,6 +212,8 @@ def load_earnings(
             eps_estimate = EXCLUDED.eps_estimate,
             eps_actual = EXCLUDED.eps_actual,
             surprise_pct = EXCLUDED.surprise_pct,
+            revenue_estimate = EXCLUDED.revenue_estimate,
+            revenue_actual = EXCLUDED.revenue_actual,
             updated_at = CURRENT_TIMESTAMP
     """
 
@@ -166,6 +232,8 @@ def load_earnings(
                         earn["eps_estimate"],
                         earn["eps_actual"],
                         earn["surprise_pct"],
+                        earn.get("revenue_estimate"),
+                        earn.get("revenue_actual"),
                     ),
                 )
                 loaded += 1
