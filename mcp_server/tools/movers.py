@@ -284,12 +284,20 @@ def get_market_breadth(
         - above_50dma, above_200dma counts (stocks above moving averages)
         - pct_above_50dma, pct_above_200dma (percentage)
     """
-    # Build index filter
+    # Build index filter (uses index_constituents junction table)
     index_filter = ""
     if index == "sp500":
-        index_filter = "AND c.sp500 = true"
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = 'sp500'
+        )"""
     elif index == "nasdaq100":
-        index_filter = "AND c.nasdaq100 = true"
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = 'nasdaq100'
+        )"""
 
     params: dict[str, Any] = {}
 
