@@ -330,6 +330,7 @@ def cmd_ta_screen(args) -> int:
         results = screen_indicators(
             filters=filters,
             target_date=args.date,
+            index=getattr(args, "index", None),
             limit=args.limit,
         )
 
@@ -783,6 +784,11 @@ Environment Variables:
         type=parse_date,
         metavar="YYYY-MM-DD",
         help="Date to screen (defaults to most recent)",
+    )
+    ta_screen_parser.add_argument(
+        "--index",
+        choices=["sp500", "nasdaq100"],
+        help="Filter by index membership",
     )
     ta_screen_parser.add_argument(
         "--limit",

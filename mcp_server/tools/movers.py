@@ -16,6 +16,7 @@ def get_top_movers(
     period: Literal["1d", "1w", "1m", "ytd"] = "1d",
     limit: int = 20,
     sector: str | None = None,
+    index: str | None = None,
     min_price: float | None = None,
     min_volume: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -27,6 +28,7 @@ def get_top_movers(
         period: Time period - "1d", "1w", "1m", or "ytd"
         limit: Number of results per direction (default: 20, max: 100)
         sector: Optional sector filter (partial match on SIC description or GICS sector)
+        index: Filter by index membership (sp500, nasdaq100)
         min_price: Minimum stock price filter
         min_volume: Minimum volume filter
 
@@ -35,6 +37,7 @@ def get_top_movers(
         - ticker: Stock symbol
         - name: Company name
         - sector: SIC description
+        - indices: List of index memberships
         - price: Current price
         - change_pct: Percentage change for the period
         - volume: Trading volume
@@ -64,6 +67,16 @@ def get_top_movers(
                  ))
         """
         params["sector"] = f"%{sector}%"
+
+    # Build index filter
+    index_filter = ""
+    if index:
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )"""
+        params["index"] = index.lower()
 
     # Build price/volume filters
     price_filter = ""
@@ -101,7 +114,13 @@ def get_top_movers(
                     p_now.volume,
                     CASE WHEN p_prev.close > 0
                          THEN ROUND(((p_now.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
-                         ELSE NULL END as change_pct
+                         ELSE NULL END as change_pct,
+                    ARRAY(
+                        SELECT i.code FROM index_constituents ic
+                        JOIN indices i ON ic.index_id = i.id
+                        WHERE ic.ticker = c.ticker
+                        ORDER BY i.code
+                    ) as indices
                 FROM companies c
                 CROSS JOIN date_refs dr
                 JOIN stock_prices p_now
@@ -110,6 +129,7 @@ def get_top_movers(
                     ON c.ticker = p_prev.ticker AND p_prev.date = dr.compare_date
                 WHERE c.active = true
                 {sector_filter}
+                {index_filter}
                 {price_filter}
             ),
             gainers AS (
@@ -152,7 +172,13 @@ def get_top_movers(
                 p_now.volume,
                 CASE WHEN p_prev.close > 0
                      THEN ROUND(((p_now.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
-                     ELSE NULL END as change_pct
+                     ELSE NULL END as change_pct,
+                ARRAY(
+                    SELECT i.code FROM index_constituents ic
+                    JOIN indices i ON ic.index_id = i.id
+                    WHERE ic.ticker = c.ticker
+                    ORDER BY i.code
+                ) as indices
             FROM companies c
             CROSS JOIN date_refs dr
             JOIN stock_prices p_now
@@ -162,6 +188,7 @@ def get_top_movers(
             WHERE c.active = true
               AND p_prev.close IS NOT NULL
             {sector_filter}
+            {index_filter}
             {price_filter}
             ORDER BY {order_clause}
             LIMIT %(limit)s
@@ -174,6 +201,7 @@ def get_volume_leaders(
     metric: Literal["volume", "dollar_volume", "volume_ratio"] = "dollar_volume",
     limit: int = 20,
     sector: str | None = None,
+    index: str | None = None,
     min_price: float | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -186,6 +214,7 @@ def get_volume_leaders(
             - "volume_ratio": Today's volume vs 20-day average
         limit: Number of results (default: 20, max: 100)
         sector: Optional sector filter (partial match)
+        index: Filter by index membership (sp500, nasdaq100)
         min_price: Minimum stock price filter
 
     Returns:
@@ -193,6 +222,7 @@ def get_volume_leaders(
         - ticker: Stock symbol
         - name: Company name
         - sector: SIC description
+        - indices: List of index memberships
         - price: Current price
         - volume: Trading volume
         - dollar_volume: Volume * price
@@ -214,6 +244,16 @@ def get_volume_leaders(
                  ))
         """
         params["sector"] = f"%{sector}%"
+
+    # Build index filter
+    index_filter = ""
+    if index:
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )"""
+        params["index"] = index.lower()
 
     price_filter = ""
     if min_price is not None:
@@ -248,7 +288,13 @@ def get_volume_leaders(
             ROUND(ti.volume_ratio::numeric, 2) as volume_ratio,
             CASE WHEN p_prev.close > 0
                  THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
-                 ELSE NULL END as change_1d
+                 ELSE NULL END as change_1d,
+            ARRAY(
+                SELECT i.code FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE ic.ticker = c.ticker
+                ORDER BY i.code
+            ) as indices
         FROM companies c
         CROSS JOIN latest_date ld
         CROSS JOIN prev_date pd
@@ -258,6 +304,7 @@ def get_volume_leaders(
         WHERE c.active = true
           AND p.volume > 0
         {sector_filter}
+        {index_filter}
         {price_filter}
         ORDER BY {sort_expr} DESC NULLS LAST
         LIMIT %(limit)s

@@ -443,6 +443,7 @@ class TechnicalIndicatorsRepository(Repository):
         self,
         filters: dict[str, tuple[float | None, float | None]],
         target_date: date | None = None,
+        index: str | None = None,
         limit: int = 100,
     ) -> list[TechnicalIndicators]:
         """Screen stocks by technical indicator values.
@@ -452,6 +453,7 @@ class TechnicalIndicatorsRepository(Repository):
                      Use None for unbounded side.
                      Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
             target_date: Date to screen (defaults to most recent)
+            index: Filter by index membership (sp500, nasdaq100)
             limit: Maximum number of results
 
         Returns:
