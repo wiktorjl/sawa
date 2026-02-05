@@ -311,6 +311,7 @@ def screen_stocks(
             rsi_14,
             volume_ratio,
             sma_50_distance_pct,
+            sma_150_distance_pct,
             sma_200_distance_pct
         FROM base_data
         WHERE {where_clause}

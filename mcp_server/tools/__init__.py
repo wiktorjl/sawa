@@ -7,6 +7,15 @@ from .companies import (
     search_companies,
     search_companies_async,
 )
+from .corporate_actions import (
+    get_dividend_yield_leaders,
+    get_dividends,
+    get_earnings_calendar,
+    get_earnings_history,
+    get_ex_dividend_calendar,
+    get_recent_splits,
+    get_stock_splits,
+)
 from .economy import get_economy_dashboard, get_economy_data, get_economy_data_async
 from .fundamentals import get_fundamentals, get_fundamentals_async
 from .indices import (
@@ -84,4 +93,12 @@ __all__ = [
     "get_index_constituents",
     "check_index_membership",
     "get_index_with_prices",
+    # Corporate actions
+    "get_stock_splits",
+    "get_dividends",
+    "get_ex_dividend_calendar",
+    "get_recent_splits",
+    "get_dividend_yield_leaders",
+    "get_earnings_calendar",
+    "get_earnings_history",
 ]
