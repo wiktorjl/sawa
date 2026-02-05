@@ -59,6 +59,11 @@ VALID_FILTERS = {
     # Technical indicator filters - volume
     "obv",
     "volume_sma_20",
+    # Daily range (intraday volatility)
+    "daily_range_pct",
+    # 52-week position
+    "high_52w_pct",  # % from 52-week high (0 = at high, -10 = 10% below)
+    "low_52w_pct",  # % from 52-week low (0 = at low, +10 = 10% above)
 }
 
 
@@ -333,3 +338,237 @@ def _get_filter_expression(filter_name: str) -> str:
     }
 
     return direct_mappings.get(filter_name, filter_name)
+
+
+def get_52week_extremes(
+    extreme: Literal["highs", "lows", "both"] = "both",
+    threshold_pct: float = 2.0,
+    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    min_volume: int | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """
+    Find stocks at or near 52-week highs or lows.
+
+    Args:
+        extreme: Which extreme to find - "highs", "lows", or "both"
+        threshold_pct: How close to extreme (default 2% = within 2% of high/low)
+        index: Filter by index membership (requires sp500/nasdaq100 columns)
+        min_volume: Minimum volume filter
+        limit: Maximum results (default: 50, max: 200)
+
+    Returns:
+        List of stocks with:
+        - ticker, name, sector, price, volume
+        - high_52w, low_52w, high_52w_pct, low_52w_pct
+        - change_1d, extreme_type ("high" or "low")
+    """
+    limit = min(limit, 200)
+
+    # Index filter (requires sp500/nasdaq100 columns on companies table)
+    index_filter = ""
+    if index == "sp500":
+        index_filter = "AND c.sp500 = true"
+    elif index == "nasdaq100":
+        index_filter = "AND c.nasdaq100 = true"
+
+    # Volume filter
+    volume_filter = ""
+    if min_volume:
+        volume_filter = f"AND p.volume >= {int(min_volume)}"
+
+    # Build extreme filter
+    if extreme == "highs":
+        extreme_filter = "AND high_52w_pct >= %(neg_threshold)s"
+    elif extreme == "lows":
+        extreme_filter = "AND low_52w_pct <= %(threshold)s"
+    else:  # both
+        extreme_filter = """
+            AND (high_52w_pct >= %(neg_threshold)s OR low_52w_pct <= %(threshold)s)
+        """
+
+    sql = f"""
+        WITH latest_date AS (
+            SELECT MAX(date) as dt FROM stock_prices
+        ),
+        prev_date AS (
+            SELECT MAX(date) as dt FROM stock_prices
+            WHERE date < (SELECT dt FROM latest_date)
+        ),
+        year_ago AS (
+            SELECT MIN(date) as dt FROM stock_prices
+            WHERE date >= (SELECT dt FROM latest_date) - INTERVAL '252 trading days'
+        ),
+        extremes_52w AS (
+            SELECT
+                ticker,
+                MAX(high) as high_52w,
+                MIN(low) as low_52w
+            FROM stock_prices
+            WHERE date >= CURRENT_DATE - INTERVAL '1 year'
+            GROUP BY ticker
+        ),
+        stock_data AS (
+            SELECT
+                c.ticker,
+                c.name,
+                c.sic_description as sector,
+                c.market_cap,
+                p.close as price,
+                p.high,
+                p.low,
+                p.volume,
+                p_prev.close as prev_close,
+                e.high_52w,
+                e.low_52w,
+                ROUND(((p.close - e.high_52w) / e.high_52w * 100)::numeric, 2)
+                    as high_52w_pct,
+                ROUND(((p.close - e.low_52w) / e.low_52w * 100)::numeric, 2)
+                    as low_52w_pct,
+                ROUND(((p.high - p.low) / p.close * 100)::numeric, 2)
+                    as daily_range_pct,
+                CASE WHEN p_prev.close > 0
+                     THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
+                     ELSE NULL END as change_1d
+            FROM companies c
+            CROSS JOIN latest_date ld
+            CROSS JOIN prev_date pd
+            JOIN stock_prices p ON c.ticker = p.ticker AND p.date = ld.dt
+            LEFT JOIN stock_prices p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
+            JOIN extremes_52w e ON c.ticker = e.ticker
+            WHERE c.active = true
+            {index_filter}
+            {volume_filter}
+        )
+        SELECT
+            ticker,
+            name,
+            sector,
+            market_cap,
+            price,
+            volume,
+            high_52w,
+            low_52w,
+            high_52w_pct,
+            low_52w_pct,
+            daily_range_pct,
+            change_1d,
+            CASE
+                WHEN high_52w_pct >= %(neg_threshold)s THEN 'high'
+                WHEN low_52w_pct <= %(threshold)s THEN 'low'
+                ELSE NULL
+            END as extreme_type
+        FROM stock_data
+        WHERE 1=1
+        {extreme_filter}
+        ORDER BY
+            CASE
+                WHEN high_52w_pct >= %(neg_threshold)s THEN high_52w_pct
+                ELSE NULL
+            END DESC NULLS LAST,
+            CASE
+                WHEN low_52w_pct <= %(threshold)s THEN low_52w_pct
+                ELSE NULL
+            END ASC NULLS LAST
+        LIMIT %(limit)s
+    """
+
+    params = {
+        "threshold": threshold_pct,
+        "neg_threshold": -threshold_pct,
+        "limit": limit,
+    }
+
+    return execute_query(sql, params)
+
+
+def get_daily_range_leaders(
+    min_range_pct: float = 3.0,
+    max_range_pct: float | None = None,
+    sector: str | None = None,
+    min_price: float | None = None,
+    min_volume: int | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """
+    Find stocks with high intraday volatility (daily range).
+
+    Daily range = (high - low) / close * 100
+
+    Args:
+        min_range_pct: Minimum daily range % (default: 3%)
+        max_range_pct: Maximum daily range % (optional)
+        sector: Optional sector filter
+        min_price: Minimum stock price filter
+        min_volume: Minimum volume filter
+        limit: Maximum results (default: 50, max: 200)
+
+    Returns:
+        List of stocks with:
+        - ticker, name, sector, price, volume
+        - high, low, daily_range_pct, change_1d
+    """
+    limit = min(limit, 200)
+
+    # Build filters
+    filters = []
+    params: dict[str, Any] = {"limit": limit, "min_range": min_range_pct}
+
+    if max_range_pct:
+        filters.append("daily_range_pct <= %(max_range)s")
+        params["max_range"] = max_range_pct
+
+    if sector:
+        filters.append("sector ILIKE %(sector)s")
+        params["sector"] = f"%{sector}%"
+
+    if min_price:
+        filters.append("price >= %(min_price)s")
+        params["min_price"] = min_price
+
+    if min_volume:
+        filters.append("volume >= %(min_volume)s")
+        params["min_volume"] = min_volume
+
+    where_clause = " AND ".join(filters) if filters else "1=1"
+
+    sql = f"""
+        WITH latest_date AS (
+            SELECT MAX(date) as dt FROM stock_prices
+        ),
+        prev_date AS (
+            SELECT MAX(date) as dt FROM stock_prices
+            WHERE date < (SELECT dt FROM latest_date)
+        ),
+        stock_data AS (
+            SELECT
+                c.ticker,
+                c.name,
+                c.sic_description as sector,
+                c.market_cap,
+                p.open,
+                p.high,
+                p.low,
+                p.close as price,
+                p.volume,
+                ROUND(((p.high - p.low) / NULLIF(p.close, 0) * 100)::numeric, 2)
+                    as daily_range_pct,
+                CASE WHEN p_prev.close > 0
+                     THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
+                     ELSE NULL END as change_1d
+            FROM companies c
+            CROSS JOIN latest_date ld
+            CROSS JOIN prev_date pd
+            JOIN stock_prices p ON c.ticker = p.ticker AND p.date = ld.dt
+            LEFT JOIN stock_prices p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
+            WHERE c.active = true
+        )
+        SELECT *
+        FROM stock_data
+        WHERE daily_range_pct >= %(min_range)s
+          AND {where_clause}
+        ORDER BY daily_range_pct DESC
+        LIMIT %(limit)s
+    """
+
+    return execute_query(sql, params)

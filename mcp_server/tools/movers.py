@@ -271,14 +271,18 @@ def get_market_breadth(
     index: Literal["sp500", "nasdaq100", "all"] = "all",
 ) -> dict[str, Any]:
     """
-    Get market breadth statistics (advancers vs decliners).
+    Get market breadth statistics (advancers vs decliners, MA breadth).
 
     Args:
         date: Date in YYYY-MM-DD format (default: latest trading day)
         index: Filter by index membership (default: all active stocks)
 
     Returns:
-        Dict with advancers, decliners, unchanged counts and A/D ratio
+        Dict with:
+        - advancers, decliners, unchanged counts
+        - ad_ratio (advance/decline ratio)
+        - above_50dma, above_200dma counts (stocks above moving averages)
+        - pct_above_50dma, pct_above_200dma (percentage)
     """
     # Build index filter
     index_filter = ""
@@ -311,40 +315,51 @@ def get_market_breadth(
 
     sql = f"""
         {date_cte},
-        price_changes AS (
+        stock_data AS (
             SELECT
                 c.ticker,
+                p_now.close,
+                p_prev.close as prev_close,
+                ti.sma_50,
+                ti.sma_200,
                 CASE
                     WHEN p_now.close > p_prev.close THEN 'advancer'
                     WHEN p_now.close < p_prev.close THEN 'decliner'
                     ELSE 'unchanged'
-                END as direction
+                END as direction,
+                CASE WHEN p_now.close > ti.sma_50 THEN 1 ELSE 0 END as above_50,
+                CASE WHEN p_now.close > ti.sma_200 THEN 1 ELSE 0 END as above_200
             FROM companies c
             CROSS JOIN date_refs dr
             JOIN stock_prices p_now
                 ON c.ticker = p_now.ticker AND p_now.date = dr.latest
             JOIN stock_prices p_prev
                 ON c.ticker = p_prev.ticker AND p_prev.date = dr.previous
+            LEFT JOIN technical_indicators ti
+                ON c.ticker = ti.ticker AND ti.date = dr.latest
             WHERE c.active = true
             {index_filter}
-        ),
-        counts AS (
-            SELECT direction, COUNT(*) as count FROM price_changes GROUP BY direction
         )
         SELECT
             (SELECT latest FROM date_refs) as date,
-            COALESCE(SUM(count) FILTER (WHERE direction = 'advancer'), 0) as advancers,
-            COALESCE(SUM(count) FILTER (WHERE direction = 'decliner'), 0) as decliners,
-            COALESCE(SUM(count) FILTER (WHERE direction = 'unchanged'), 0) as unchanged,
-            SUM(count) as total,
+            COUNT(*) FILTER (WHERE direction = 'advancer') as advancers,
+            COUNT(*) FILTER (WHERE direction = 'decliner') as decliners,
+            COUNT(*) FILTER (WHERE direction = 'unchanged') as unchanged,
+            COUNT(*) as total,
             CASE
-                WHEN SUM(count) FILTER (WHERE direction = 'decliner') > 0
+                WHEN COUNT(*) FILTER (WHERE direction = 'decliner') > 0
                 THEN ROUND(
-                    (SUM(count) FILTER (WHERE direction = 'advancer')::numeric /
-                     SUM(count) FILTER (WHERE direction = 'decliner'))::numeric, 2)
+                    (COUNT(*) FILTER (WHERE direction = 'advancer')::numeric /
+                     COUNT(*) FILTER (WHERE direction = 'decliner'))::numeric, 2)
                 ELSE NULL
-            END as ad_ratio
-        FROM counts
+            END as ad_ratio,
+            SUM(above_50) as above_50dma,
+            SUM(above_200) as above_200dma,
+            ROUND((SUM(above_50)::numeric / NULLIF(COUNT(*), 0) * 100)::numeric, 1)
+                as pct_above_50dma,
+            ROUND((SUM(above_200)::numeric / NULLIF(COUNT(*), 0) * 100)::numeric, 1)
+                as pct_above_200dma
+        FROM stock_data
     """
 
     results = execute_query(sql, params)
@@ -357,4 +372,8 @@ def get_market_breadth(
         "unchanged": 0,
         "total": 0,
         "ad_ratio": None,
+        "above_50dma": 0,
+        "above_200dma": 0,
+        "pct_above_50dma": 0,
+        "pct_above_200dma": 0,
     }
