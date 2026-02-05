@@ -142,8 +142,12 @@ class PolygonClient:
             all_results.extend(data.get("results", []))
             url = data.get("next_url")
 
-            if url and not url.startswith("http"):
-                url = urljoin(BASE_URL, url)
+            if url:
+                # Append API key to pagination URL (Polygon doesn't include it in next_url)
+                separator = "&" if "?" in url else "?"
+                url = f"{url}{separator}apiKey={self.api_key}"
+                if not url.startswith("http"):
+                    url = urljoin(BASE_URL, url)
 
         self.logger.debug(f"Total results: {len(all_results)}")
         return all_results
