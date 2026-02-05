@@ -12,11 +12,15 @@ from .fundamentals import get_fundamentals, get_fundamentals_async
 from .market_data import (
     get_financial_ratios,
     get_financial_ratios_async,
+    get_indicator_metadata,
     get_latest_price,
     get_latest_price_async,
-    get_live_price,
+    get_latest_technical_indicators,
+    get_live_price_async,
     get_stock_prices,
     get_stock_prices_async,
+    get_technical_indicators,
+    screen_by_technical_indicators,
 )
 from .scanner import scan_ytd_performance
 
@@ -41,7 +45,12 @@ __all__ = [
     "get_financial_ratios_async",
     "get_latest_price",
     "get_latest_price_async",
-    "get_live_price",
+    "get_live_price_async",
+    # Technical indicators
+    "get_technical_indicators",
+    "get_latest_technical_indicators",
+    "screen_by_technical_indicators",
+    "get_indicator_metadata",
     # Scanner
     "scan_ytd_performance",
 ]

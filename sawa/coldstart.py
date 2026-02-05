@@ -15,16 +15,10 @@ Steps:
 """
 
 import csv
-import html
 import logging
-import re
-import urllib.error
-import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
-
-from bs4 import BeautifulSoup
 
 from sawa.api import PolygonClient, PolygonS3Client
 from sawa.database.load import (
@@ -41,40 +35,11 @@ from sawa.utils import calculate_date_range, setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
+from sawa.utils.symbols import fetch_sp500_symbols  # noqa: F401
 
 # Wikipedia URL for S&P 500 constituents
 WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 WIKIPEDIA_HEADERS = {"User-Agent": "SP500-Data-Downloader/1.0"}
-
-
-def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
-    """Fetch S&P 500 symbols from Wikipedia."""
-    logger.info("Fetching S&P 500 symbols from Wikipedia...")
-
-    request = urllib.request.Request(WIKIPEDIA_URL, headers=WIKIPEDIA_HEADERS)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        content = response.read().decode("utf-8")
-
-    soup = BeautifulSoup(content, "html.parser")
-    table = soup.find("table", {"id": "constituents"})
-    if not table:
-        raise ValueError("Could not find constituents table")
-
-    symbols: list[str] = []
-    seen: set[str] = set()
-
-    for row in table.find_all("tr")[1:]:
-        cells = row.find_all("td")
-        if cells:
-            text = html.unescape(cells[0].get_text())
-            text = text.replace("\xa0", " ")
-            text = re.sub(r"\[[^\]]*\]", "", text).strip()
-            if text and text not in seen:
-                symbols.append(text)
-                seen.add(text)
-
-    logger.info(f"Found {len(symbols)} symbols")
-    return symbols
 
 
 def _check_date_already_downloaded(date_str: str, output_dir: Path) -> bool:
@@ -89,7 +54,7 @@ def _check_date_already_downloaded(date_str: str, output_dir: Path) -> bool:
 
     for filepath in csv_files[:3]:
         try:
-            with open(filepath, "r") as f:
+            with open(filepath) as f:
                 # Skip header
                 next(f, None)
                 # Check first few lines for this date
@@ -167,7 +132,8 @@ def download_fundamentals(
     logger: logging.Logger,
     rate_limiter: SyncRateLimiter | None = None,
 ) -> dict[str, int]:
-    """Download fundamentals data."""
+    """Download balance sheets, cash flows, income statements."""
+    logger.info("Downloading fundamentals...")
     endpoints = ["balance-sheets", "cash-flow", "income-statements"]
     stats: dict[str, int] = {}
 
@@ -237,6 +203,100 @@ def download_overviews(
     if overviews:
         filepath = output_dir / "overviews.csv"
         write_csv_auto_fields(filepath, overviews, logger)
+
+    return len(overviews)
+
+
+def get_tickers_from_csv_files(data_dir: Path, logger: logging.Logger) -> set[str]:
+    """Extract all unique tickers from downloaded CSV files."""
+    tickers: set[str] = set()
+
+    # Check fundamentals
+    fundamentals_dir = data_dir / "fundamentals"
+    if fundamentals_dir.exists():
+        for csv_file in fundamentals_dir.glob("*.csv"):
+            try:
+                with open(csv_file) as f:
+                    import csv
+
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        ticker = row.get("tickers") or row.get("ticker")
+                        if ticker:
+                            tickers.add(ticker.upper())
+            except Exception as e:
+                logger.warning(f"Error reading {csv_file}: {e}")
+
+    # Check ratios
+    ratios_file = data_dir / "ratios" / "ratios.csv"
+    if ratios_file.exists():
+        try:
+            with open(ratios_file) as f:
+                import csv
+
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ticker = row.get("ticker")
+                    if ticker:
+                        tickers.add(ticker.upper())
+        except Exception as e:
+            logger.warning(f"Error reading {ratios_file}: {e}")
+
+    return tickers
+
+
+def get_existing_tickers_from_db(conn) -> set[str]:
+    """Get all tickers currently in the companies table."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM companies")
+            return {row[0].upper() for row in cur.fetchall()}
+    except Exception:
+        return set()
+
+
+def fetch_missing_companies(
+    client: PolygonClient,
+    missing_tickers: set[str],
+    output_dir: Path,
+    logger: logging.Logger,
+    rate_limiter: SyncRateLimiter | None = None,
+) -> int:
+    """Fetch company info for tickers not in the companies table."""
+    if not missing_tickers:
+        return 0
+
+    logger.info(f"Fetching company info for {len(missing_tickers)} missing tickers...")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    overviews: list[dict[str, Any]] = []
+    for i, symbol in enumerate(sorted(missing_tickers), 1):
+        if i % 20 == 0:
+            logger.info(f"  Progress: {i}/{len(missing_tickers)}")
+        try:
+            if rate_limiter:
+                rate_limiter.acquire()
+            data = client.get_ticker_details(symbol)
+            if data:
+                # Flatten nested fields
+                flat = {k: v for k, v in data.items() if not isinstance(v, dict)}
+                if "address" in data and data["address"]:
+                    for k, v in data["address"].items():
+                        flat[f"address_{k}"] = v
+                if "branding" in data and data["branding"]:
+                    for k, v in data["branding"].items():
+                        flat[f"branding_{k}"] = v
+                overviews.append(flat)
+        except Exception as e:
+            logger.debug(f"  {symbol}: {e}")  # Debug level - many will be delisted
+
+    if overviews:
+        # Append to existing overviews file or create new one
+        filepath = output_dir / "overviews_missing.csv"
+        write_csv_auto_fields(filepath, overviews, logger)
+        logger.info(
+            f"  Found company info for {len(overviews)} of {len(missing_tickers)} missing tickers"
+        )
 
     return len(overviews)
 
@@ -449,8 +509,35 @@ def run_coldstart(
                     logger.warning(f"  Not found: {overviews_csv}")
                     stats["overviews"] = 0
 
+                # Check for missing companies before loading fundamentals/ratios
+                logger.info("\n[4/9] Checking for missing company records...")
+                tickers_in_data = get_tickers_from_csv_files(output_dir, logger)
+                tickers_in_db = get_existing_tickers_from_db(conn)
+                missing_tickers = tickers_in_data - tickers_in_db
+
+                if missing_tickers and api_key:
+                    logger.info(
+                        f"Found {len(missing_tickers)} tickers in data not in companies table"
+                    )
+                    # Need API client to fetch missing companies
+                    temp_client = PolygonClient(api_key, logger)
+                    temp_limiter = SyncRateLimiter(requests_per_second=5.0)
+                    fetched = fetch_missing_companies(
+                        temp_client, missing_tickers, output_dir / "overviews", logger, temp_limiter
+                    )
+                    if fetched > 0:
+                        missing_csv = output_dir / "overviews" / "overviews_missing.csv"
+                        if missing_csv.exists():
+                            logger.info("Loading missing companies into database...")
+                            load_companies(conn, missing_csv, logger)
+                elif missing_tickers:
+                    logger.warning(
+                        f"Found {len(missing_tickers)} missing tickers but no API key to fetch them"
+                    )
+                    logger.warning("  Run with --api-key to fetch missing company info")
+
                 # Load existing prices
-                logger.info("\n[4/9] Loading existing prices...")
+                logger.info("\n[5/9] Loading existing prices...")
                 prices_dir = output_dir / "prices"
                 if prices_dir.exists():
                     load_prices(conn, prices_dir, logger)
@@ -459,28 +546,32 @@ def run_coldstart(
                     logger.warning(f"  Not found: {prices_dir}")
                     stats["prices"] = 0
 
+                # Get valid tickers from companies table for filtering
+                valid_tickers = get_existing_tickers_from_db(conn)
+                logger.info(f"  {len(valid_tickers)} companies in database")
+
                 # Load existing fundamentals
-                logger.info("\n[5/9] Loading existing fundamentals...")
+                logger.info("\n[6/9] Loading existing fundamentals...")
                 fundamentals_dir = output_dir / "fundamentals"
                 if fundamentals_dir.exists():
-                    load_fundamentals(conn, fundamentals_dir, logger)
+                    load_fundamentals(conn, fundamentals_dir, logger, valid_tickers)
                     stats["fundamentals"] = {"loaded": True}
                 else:
                     logger.warning(f"  Not found: {fundamentals_dir}")
                     stats["fundamentals"] = {}
 
                 # Load existing ratios
-                logger.info("\n[6/9] Loading existing ratios...")
+                logger.info("\n[7/9] Loading existing ratios...")
                 ratios_csv = output_dir / "ratios" / "ratios.csv"
                 if ratios_csv.exists():
-                    load_ratios(conn, ratios_csv, logger)
+                    load_ratios(conn, ratios_csv, logger, valid_tickers)
                     stats["ratios"] = 1
                 else:
                     logger.warning(f"  Not found: {ratios_csv}")
                     stats["ratios"] = 0
 
                 # Load existing economy data
-                logger.info("\n[7/9] Loading existing economy data...")
+                logger.info("\n[8/9] Loading existing economy data...")
                 economy_dir = output_dir / "economy"
                 if economy_dir.exists():
                     load_economy(conn, economy_dir, logger)
@@ -505,11 +596,26 @@ def run_coldstart(
                                 symbols.append(sym)
                     logger.info(f"  Loaded {len(symbols)} symbols from file")
                 else:
-                    logger.info("\n[2/9] Fetching S&P 500 symbols from Wikipedia...")
-                    symbols = fetch_sp500_symbols(logger)
+                    logger.info("\n[2/9] Fetching symbols from Wikipedia...")
+                    logger.info("  - Fetching S&P 500...")
+                    sp500_symbols = fetch_sp500_symbols(logger)
+                    logger.info("  - Fetching NASDAQ-100...")
+                    from sawa.utils.symbols import fetch_nasdaq100_symbols
+
+                    nasdaq100_symbols = fetch_nasdaq100_symbols(logger)
+
+                    # Merge and deduplicate
+                    symbols = list(set(sp500_symbols + nasdaq100_symbols))
+                    symbols.sort()
+                    sp_count = len(sp500_symbols)
+                    nq_count = len(nasdaq100_symbols)
+                    logger.info(
+                        f"  Total unique symbols: {len(symbols)} (S&P 500: {sp_count}, "
+                        f"NASDAQ-100: {nq_count})"
+                    )
 
                 # Save symbols list
-                output_symbols_file = output_dir / "sp500_symbols.txt"
+                output_symbols_file = output_dir / "symbols.txt"
                 output_symbols_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(output_symbols_file, "w") as f:
                     for s in symbols:
@@ -573,11 +679,8 @@ def run_coldstart(
                         rate_limiter,
                     )
                     stats["fundamentals"] = fund_stats
-                    # Load fundamentals into DB
-                    logger.info("Loading fundamentals into database...")
-                    load_fundamentals(conn, output_dir / "fundamentals", logger)
 
-                # Step 7: Download & load ratios
+                # Step 7: Download ratios (download only, load later)
                 if skip_ratios:
                     logger.info("\n[7/9] Skipping ratios (--skip-ratios)")
                     stats["ratios"] = 0
@@ -587,9 +690,40 @@ def run_coldstart(
                         client, symbols, output_dir / "ratios", logger, rate_limiter
                     )
                     stats["ratios"] = ratio_count
-                    # Load ratios into DB
+
+                # Check for tickers in downloaded data that aren't in companies table
+                if not skip_fundamentals or not skip_ratios:
+                    logger.info("\nChecking for missing company records...")
+                    tickers_in_data = get_tickers_from_csv_files(output_dir, logger)
+                    tickers_in_db = get_existing_tickers_from_db(conn)
+                    missing_tickers = tickers_in_data - tickers_in_db
+
+                    if missing_tickers:
+                        logger.info(
+                            f"Found {len(missing_tickers)} tickers in data not in companies table"
+                        )
+                        fetched = fetch_missing_companies(
+                            client, missing_tickers, output_dir / "overviews", logger, rate_limiter
+                        )
+                        if fetched > 0:
+                            # Load the missing companies
+                            missing_csv = output_dir / "overviews" / "overviews_missing.csv"
+                            if missing_csv.exists():
+                                logger.info("Loading missing companies into database...")
+                                load_companies(conn, missing_csv, logger)
+
+                # Now load fundamentals and ratios (FK constraints should be satisfied)
+                # Get valid tickers from companies table for filtering
+                valid_tickers = get_existing_tickers_from_db(conn)
+                logger.info(f"  {len(valid_tickers)} companies in database for FK filtering")
+
+                if not skip_fundamentals:
+                    logger.info("Loading fundamentals into database...")
+                    load_fundamentals(conn, output_dir / "fundamentals", logger, valid_tickers)
+
+                if not skip_ratios and stats.get("ratios", 0) > 0:
                     logger.info("Loading ratios into database...")
-                    load_ratios(conn, output_dir / "ratios" / "ratios.csv", logger)
+                    load_ratios(conn, output_dir / "ratios" / "ratios.csv", logger, valid_tickers)
 
                 # Step 8: Download & load economy data
                 if skip_economy:
@@ -611,9 +745,7 @@ def run_coldstart(
                     stats["news"] = 0
                 else:
                     logger.info("\n[9/9] Downloading news articles...")
-                    news_count = load_news(
-                        conn, client, symbols, days=DEFAULT_NEWS_DAYS, logger=logger
-                    )
+                    news_count = load_news(conn, client, symbols, days=DEFAULT_NEWS_DAYS)
                     stats["news"] = news_count
 
         stats["success"] = True

@@ -29,6 +29,7 @@ def load_csv_to_table(
     column_mapping: dict[str, str],
     log: logging.Logger | None = None,
     upsert: bool = True,
+    valid_tickers: set[str] | None = None,
 ) -> int:
     """
     Load CSV file into PostgreSQL table.
@@ -38,8 +39,10 @@ def load_csv_to_table(
         csv_path: Path to CSV file
         table_name: Target table name
         column_mapping: Dict mapping CSV columns to DB columns
-        logger: Logger instance
+        log: Logger instance
         upsert: Use ON CONFLICT DO UPDATE
+        valid_tickers: Optional set of valid ticker symbols. If provided,
+            rows with tickers not in this set will be skipped.
 
     Returns:
         Number of rows loaded
@@ -51,6 +54,8 @@ def load_csv_to_table(
 
     # Read CSV data
     rows: list[dict[str, Any]] = []
+    skipped_tickers: set[str] = set()
+
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -66,7 +71,21 @@ def load_csv_to_table(
                     val = val[:-2]
                 # Convert empty strings to None
                 mapped_row[db_col] = val if val != "" else None
+
+            # Filter by valid_tickers if provided
+            if valid_tickers is not None and "ticker" in mapped_row:
+                ticker = mapped_row["ticker"]
+                if ticker and ticker.upper() not in valid_tickers:
+                    skipped_tickers.add(ticker)
+                    continue
+
             rows.append(mapped_row)
+
+    # Log skipped tickers summary
+    if skipped_tickers:
+        sample = sorted(skipped_tickers)[:10]
+        suffix = f" (and {len(skipped_tickers) - 10} more)" if len(skipped_tickers) > 10 else ""
+        log.info(f"  Skipped {len(skipped_tickers)} unknown tickers: {', '.join(sample)}{suffix}")
 
     if not rows:
         log.warning(f"No data in {csv_path}")
@@ -293,8 +312,23 @@ def load_prices(conn, prices_dir: Path, log: logging.Logger | None = None) -> in
     return total
 
 
-def load_ratios(conn, csv_path: Path, log: logging.Logger | None = None) -> int:
-    """Load financial ratios."""
+def load_ratios(
+    conn,
+    csv_path: Path,
+    log: logging.Logger | None = None,
+    valid_tickers: set[str] | None = None,
+) -> int:
+    """Load financial ratios.
+
+    Args:
+        conn: Database connection
+        csv_path: Path to ratios CSV file
+        log: Logger instance
+        valid_tickers: Optional set of valid ticker symbols to filter by
+
+    Returns:
+        Number of rows loaded
+    """
     log = log or logger
     log.info("Loading financial ratios...")
 
@@ -305,13 +339,28 @@ def load_ratios(conn, csv_path: Path, log: logging.Logger | None = None) -> int:
             csv_path = found
             log.info(f"  Found: {csv_path}")
 
-    return load_csv_to_table(conn, csv_path, "financial_ratios", RATIO_COLUMNS, log)
+    return load_csv_to_table(
+        conn, csv_path, "financial_ratios", RATIO_COLUMNS, log, valid_tickers=valid_tickers
+    )
 
 
 def load_fundamentals(
-    conn, fundamentals_dir: Path, log: logging.Logger | None = None
+    conn,
+    fundamentals_dir: Path,
+    log: logging.Logger | None = None,
+    valid_tickers: set[str] | None = None,
 ) -> dict[str, int]:
-    """Load fundamentals (balance sheets, income statements, cash flows)."""
+    """Load fundamentals (balance sheets, income statements, cash flows).
+
+    Args:
+        conn: Database connection
+        fundamentals_dir: Directory containing fundamentals CSV files
+        log: Logger instance
+        valid_tickers: Optional set of valid ticker symbols to filter by
+
+    Returns:
+        Dict with count of rows loaded per table
+    """
     log = log or logger
     log.info("Loading fundamentals...")
     stats: dict[str, int] = {}
@@ -319,27 +368,46 @@ def load_fundamentals(
     # Balance sheets
     bs_path = fundamentals_dir / "balance_sheets.csv"
     if bs_path.exists():
-        stats["balance_sheets"] = _load_fundamentals_file(conn, bs_path, "balance_sheets", log)
+        stats["balance_sheets"] = _load_fundamentals_file(
+            conn, bs_path, "balance_sheets", log, valid_tickers
+        )
 
     # Income statements
     is_path = fundamentals_dir / "income_statements.csv"
     if is_path.exists():
         stats["income_statements"] = _load_fundamentals_file(
-            conn, is_path, "income_statements", log
+            conn, is_path, "income_statements", log, valid_tickers
         )
 
     # Cash flows
     cf_path = fundamentals_dir / "cash_flow.csv"
     if cf_path.exists():
-        stats["cash_flows"] = _load_fundamentals_file(conn, cf_path, "cash_flows", log)
+        stats["cash_flows"] = _load_fundamentals_file(
+            conn, cf_path, "cash_flows", log, valid_tickers
+        )
 
     return stats
 
 
 def _load_fundamentals_file(
-    conn, csv_path: Path, table_name: str, log: logging.Logger | None = None
+    conn,
+    csv_path: Path,
+    table_name: str,
+    log: logging.Logger | None = None,
+    valid_tickers: set[str] | None = None,
 ) -> int:
-    """Load a fundamentals CSV file, auto-mapping columns."""
+    """Load a fundamentals CSV file, auto-mapping columns.
+
+    Args:
+        conn: Database connection
+        csv_path: Path to CSV file
+        table_name: Target table name
+        log: Logger instance
+        valid_tickers: Optional set of valid ticker symbols to filter by
+
+    Returns:
+        Number of rows loaded
+    """
     log = log or logger
     if not csv_path.exists():
         return 0
@@ -371,7 +439,9 @@ def _load_fundamentals_file(
             column_mapping[csv_col] = "ticker"
 
     log.info(f"  Loading {table_name} ({len(column_mapping)} columns mapped)...")
-    return load_csv_to_table(conn, csv_path, table_name, column_mapping, log)
+    return load_csv_to_table(
+        conn, csv_path, table_name, column_mapping, log, valid_tickers=valid_tickers
+    )
 
 
 def load_economy(conn, economy_dir: Path, log: logging.Logger | None = None) -> dict[str, int]:

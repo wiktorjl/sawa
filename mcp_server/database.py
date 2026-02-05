@@ -4,6 +4,8 @@ import logging
 import os
 import re
 from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -16,6 +18,39 @@ logger = logging.getLogger(__name__)
 # Configuration
 MAX_ROWS = int(os.environ.get("MCP_MAX_ROWS", "1000"))
 QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "30"))
+
+# Query audit log
+QUERY_LOG_DIR = Path(os.environ.get("MCP_QUERY_LOG_DIR", "logs"))
+QUERY_LOG_FILE = QUERY_LOG_DIR / "execute_query.log"
+
+
+def _ensure_log_dir() -> None:
+    """Ensure log directory exists."""
+    QUERY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def log_execute_query(query: str, params: dict[str, Any] | None = None) -> None:
+    """
+    Log execute_query usage to file for audit/review and console.
+
+    Args:
+        query: SQL query string
+        params: Optional query parameters
+    """
+    _ensure_log_dir()
+    timestamp = datetime.now().isoformat()
+
+    # Log to file
+    with open(QUERY_LOG_FILE, "a") as f:
+        f.write(f"[{timestamp}] QUERY: {query}\n")
+        if params:
+            f.write(f"[{timestamp}] PARAMS: {params}\n")
+        f.write("\n")
+
+    # Log to console via logger (goes to stderr)
+    logger.info(f"[QUERY] {query}")
+    if params:
+        logger.info(f"[QUERY PARAMS] {params}")
 
 
 @contextmanager

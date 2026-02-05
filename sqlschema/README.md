@@ -14,6 +14,8 @@ This directory contains PostgreSQL schema definitions for the stock data project
 | `05_indexes.sql` | Performance indexes for all tables |
 | `06_views.sql` | Common query views |
 | `07_procedures.sql` | Data loading procedures |
+| `10_news.sql` | News articles and sentiment tables |
+| `16_cleanup.sql` | Migration to remove TUI/Web tables |
 
 ## Usage
 
@@ -31,6 +33,13 @@ psql -d your_database -f sqlschema/04_economy.sql
 psql -d your_database -f sqlschema/05_indexes.sql
 psql -d your_database -f sqlschema/06_views.sql
 psql -d your_database -f sqlschema/07_procedures.sql
+psql -d your_database -f sqlschema/10_news.sql
+```
+
+### Option 3: Migration (cleanup old TUI/Web tables)
+If upgrading from an older version with TUI/Web tables:
+```bash
+psql -d your_database -f sqlschema/16_cleanup.sql
 ```
 
 ## Data Loading

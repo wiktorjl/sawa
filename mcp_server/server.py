@@ -2,7 +2,7 @@
 """
 Stock Data MCP Server
 
-An MCP server providing read-only access to S&P 500 stock data in PostgreSQL.
+An MCP server providing read-only access to stock market data in PostgreSQL.
 Includes colorful Unicode charts for data visualization.
 """
 
@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -17,8 +18,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file in project root
+# Find .env relative to this file's location (mcp_server/server.py -> ../.env)
+_project_root = Path(__file__).parent.parent
+_env_file = _project_root / ".env"
+load_dotenv(_env_file)
 
 from .charts.config import ChartDetail, get_chart_config
 from .charts.core.layout import get_layout
@@ -45,9 +49,14 @@ from .tools.fundamentals import get_fundamentals, get_fundamentals_async
 from .tools.market_data import (
     get_financial_ratios,
     get_financial_ratios_async,
-    get_live_price,
+    get_latest_price,
+    get_latest_price_async,
+    get_latest_technical_indicators,
+    get_live_price_async,
     get_stock_prices,
     get_stock_prices_async,
+    get_technical_indicators,
+    screen_by_technical_indicators,
 )
 from .tools.scanner import scan_ytd_performance
 
@@ -152,6 +161,20 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_latest_price",
+            description="Get the most recent closing price from the database (fast, always has latest data)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL, MSFT)",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
             name="get_stock_prices",
             description="Get daily OHLCV prices for a ticker with visual chart",
             inputSchema={
@@ -249,6 +272,89 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_technical_indicators",
+            description="Get technical indicators (SMA, RSI, MACD, Bollinger Bands, etc.) for a ticker",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in YYYY-MM-DD format",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date in YYYY-MM-DD format (defaults to today)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum rows (default: 252, max: 1000)",
+                        "default": 252,
+                        "minimum": 1,
+                        "maximum": 1000,
+                    },
+                },
+                "required": ["ticker", "start_date"],
+            },
+        ),
+        Tool(
+            name="get_latest_technical_indicators",
+            description="Get the most recent technical indicators for a ticker",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="screen_technical_indicators",
+            description="Screen stocks by technical indicator values (e.g., RSI < 30)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rsi_14_max": {
+                        "type": "number",
+                        "description": "Maximum RSI-14 value (e.g., 30 for oversold)",
+                    },
+                    "rsi_14_min": {
+                        "type": "number",
+                        "description": "Minimum RSI-14 value (e.g., 70 for overbought)",
+                    },
+                    "volume_ratio_min": {
+                        "type": "number",
+                        "description": "Minimum volume ratio (today vs 20-day avg)",
+                    },
+                    "macd_histogram_min": {
+                        "type": "number",
+                        "description": "Minimum MACD histogram (positive = bullish)",
+                    },
+                    "macd_histogram_max": {
+                        "type": "number",
+                        "description": "Maximum MACD histogram (negative = bearish)",
+                    },
+                    "target_date": {
+                        "type": "string",
+                        "description": "Date to screen (defaults to most recent)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 100, max: 500)",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
+                    },
+                },
             },
         ),
         Tool(
@@ -363,7 +469,9 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
-    logger.debug(f"Tool called: {name} with arguments: {arguments}")
+    logger.info(f"Calling function: {name}")
+    if arguments:
+        logger.info(f"  Arguments: {arguments}")
 
     try:
         # Get chart configuration
@@ -393,13 +501,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         use_services = use_service_layer()
 
         if name == "list_companies":
-            # list_companies not available in service layer (no async version)
+            logger.info("  Executing: list_companies")
             result = list_companies(
                 limit=arguments.get("limit", 100),
                 offset=arguments.get("offset", 0),
                 sector=arguments.get("sector"),
             )
         elif name == "get_company_details":
+            logger.info("  Executing: get_company_details")
             if use_services:
                 result = await get_company_details_async(arguments["ticker"])
             else:
@@ -407,6 +516,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             if result is None:
                 return [TextContent(type="text", text=f"Company {arguments['ticker']} not found")]
         elif name == "search_companies":
+            logger.info("  Executing: search_companies")
             if use_services:
                 result = await search_companies_async(
                     query=arguments["query"],
@@ -418,12 +528,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     limit=arguments.get("limit", 20),
                 )
         elif name == "get_live_price":
-            # Live price lookup from Polygon API (always synchronous, no chart)
-            result = get_live_price(
+            logger.info("  Executing: get_live_price")
+            result = await get_live_price_async(
                 ticker=arguments["ticker"],
                 days=arguments.get("days", 7),
             )
+        elif name == "get_latest_price":
+            logger.info("  Executing: get_latest_price")
+            if use_services:
+                result = await get_latest_price_async(ticker=arguments["ticker"])
+            else:
+                result = get_latest_price(ticker=arguments["ticker"])
+            if result is None:
+                return [
+                    TextContent(type="text", text=f"No price data found for {arguments['ticker']}")
+                ]
         elif name == "get_stock_prices":
+            logger.info("  Executing: get_stock_prices")
             if use_services:
                 result = await get_stock_prices_async(
                     ticker=arguments["ticker"],
@@ -438,9 +559,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     end_date=arguments.get("end_date"),
                     limit=arguments.get("limit", 252),
                 )
-            # Render price chart
             chart = render_price_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_financial_ratios":
+            logger.info("  Executing: get_financial_ratios")
             if use_services:
                 result = await get_financial_ratios_async(
                     ticker=arguments["ticker"],
@@ -455,9 +576,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     end_date=arguments.get("end_date"),
                     limit=arguments.get("limit", 100),
                 )
-            # Render ratios chart
             chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_fundamentals":
+            logger.info("  Executing: get_fundamentals")
             if use_services:
                 result = await get_fundamentals_async(
                     ticker=arguments["ticker"],
@@ -470,9 +591,48 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     timeframe=arguments.get("timeframe", "quarterly"),
                     limit=arguments.get("limit", 4),
                 )
-            # Render fundamentals chart
             chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
+        elif name == "get_technical_indicators":
+            logger.info("  Executing: get_technical_indicators")
+            result = get_technical_indicators(
+                ticker=arguments["ticker"],
+                start_date=arguments["start_date"],
+                end_date=arguments.get("end_date"),
+                limit=arguments.get("limit", 252),
+            )
+        elif name == "get_latest_technical_indicators":
+            logger.info("  Executing: get_latest_technical_indicators")
+            result = get_latest_technical_indicators(ticker=arguments["ticker"])
+            if result is None:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"No technical indicators found for {arguments['ticker']}",
+                    )
+                ]
+        elif name == "screen_technical_indicators":
+            logger.info("  Executing: screen_technical_indicators")
+            # Build filters dict from individual arguments
+            filters: dict[str, tuple[float | None, float | None]] = {}
+            if "rsi_14_min" in arguments or "rsi_14_max" in arguments:
+                filters["rsi_14"] = (
+                    arguments.get("rsi_14_min"),
+                    arguments.get("rsi_14_max"),
+                )
+            if "volume_ratio_min" in arguments:
+                filters["volume_ratio"] = (arguments.get("volume_ratio_min"), None)
+            if "macd_histogram_min" in arguments or "macd_histogram_max" in arguments:
+                filters["macd_histogram"] = (
+                    arguments.get("macd_histogram_min"),
+                    arguments.get("macd_histogram_max"),
+                )
+            result = screen_by_technical_indicators(
+                filters=filters,
+                target_date=arguments.get("target_date"),
+                limit=arguments.get("limit", 100),
+            )
         elif name == "get_economy_data":
+            logger.info("  Executing: get_economy_data")
             if use_services:
                 result = await get_economy_data_async(
                     indicator_type=arguments["indicator_type"],
@@ -487,22 +647,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     end_date=arguments.get("end_date"),
                     limit=arguments.get("limit", 100),
                 )
-            # Render economy chart
             chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
         elif name == "get_economy_dashboard":
-            # get_economy_dashboard not available in service layer (no async version)
+            logger.info("  Executing: get_economy_dashboard")
             result = get_economy_dashboard(limit=arguments.get("limit", 10))
-            # Render economy dashboard
             chart = render_economy_dashboard(result, layout, theme)
         elif name == "scan_ytd_performance":
-            # YTD performance scanner (always synchronous, returns formatted tables)
+            logger.info("  Executing: scan_ytd_performance")
             result = scan_ytd_performance(
                 start_date=arguments.get("start_date"),
                 large_cap_threshold=arguments.get("large_cap_threshold", 100.0),
                 top_n=arguments.get("top_n", 10),
                 index=arguments.get("index", "sp500"),
             )
-            # Return formatted output directly (don't convert to JSON)
             return [
                 TextContent(
                     type="text",
@@ -510,7 +667,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 )
             ]
         elif name == "execute_query":
-            result = execute_query(arguments["sql"])
+            logger.info("  Executing: execute_query")
+            from .database import log_execute_query
+
+            sql_query = arguments["sql"]
+            log_execute_query(sql_query, arguments.get("params"))
+            result = execute_query(sql_query)
         else:
             raise ValueError(f"Unknown tool: {name}")
 
@@ -535,13 +697,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text="\n".join(parts))]
 
     except Exception as e:
-        logger.error(f"Error executing tool {name}: {e}")
+        logger.error(f"Error executing tool {name}: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error: {str(e)}")]
+    except BaseException as e:
+        logger.error(f"Unexpected error in tool {name}: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Server error: {str(e)}")]
 
 
 async def main():
     """Main entry point."""
     logger.info("Starting Stock Data MCP Server")
+    logger.info("Press Ctrl-C to exit gracefully")
 
     # Verify database connection
     try:
@@ -554,15 +720,26 @@ async def main():
         sys.exit(1)
 
     # Run server with stdio transport
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options(),
-        )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options(),
+            )
+    except KeyboardInterrupt:
+        logger.info("Shutting down gracefully...")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     import asyncio
 
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExiting...")
+        sys.exit(0)

@@ -1,8 +1,7 @@
-"""Market data MCP tools (prices and financial ratios)."""
+"""Market data MCP tools (prices, financial ratios, and technical indicators)."""
 
 import logging
-import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
 from ..database import execute_query
@@ -74,7 +73,7 @@ def get_stock_prices(
         end_date = date.today().isoformat()
 
     sql = """
-        SELECT 
+        SELECT
             date,
             open,
             high,
@@ -123,7 +122,7 @@ def get_financial_ratios(
         end_date = date.today().isoformat()
 
     sql = """
-        SELECT 
+        SELECT
             date,
             price,
             price_to_earnings as pe_ratio,
@@ -171,7 +170,7 @@ def get_latest_price(ticker: str) -> dict[str, Any] | None:
         Latest price record or None
     """
     sql = """
-        SELECT 
+        SELECT
             date,
             open,
             high,
@@ -188,12 +187,8 @@ def get_latest_price(ticker: str) -> dict[str, Any] | None:
     return results[0] if results else None
 
 
-def get_live_price(ticker: str, days: int = 7) -> dict[str, Any]:
-    """
-    Get live stock price from Polygon API.
-
-    Fetches the most recent price data directly from Polygon API,
-    not from the database. Returns recent price history.
+async def get_live_price_async(ticker: str, days: int = 7) -> dict[str, Any]:
+    """Get live stock price from Polygon API (async wrapper for sawa).
 
     Args:
         ticker: Stock ticker symbol
@@ -202,53 +197,28 @@ def get_live_price(ticker: str, days: int = 7) -> dict[str, Any]:
     Returns:
         Dictionary with latest price info and recent history
     """
-    from sawa.api.client import PolygonClient
-    from sawa.utils.config import get_env
-
-    api_key = get_env("POLYGON_API_KEY")
-    if not api_key:
-        raise ValueError("POLYGON_API_KEY not configured")
-
-    client = PolygonClient(api_key, logger)
-
-    # Calculate date range
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    from sawa import get_live_price as sawa_get_live_price
 
     try:
-        # Fetch recent prices
-        data = client.get(
-            "aggregates",
-            path_params={"ticker": ticker.upper(), "start": start_date, "end": end_date},
-            params={"adjusted": "true", "sort": "desc", "limit": days},
-        )
+        result = await sawa_get_live_price(ticker=ticker, days=days)
 
-        results = data.get("results", [])
+        if result.get("error"):
+            raise ValueError(result["error"])
 
-        if not results:
-            raise ValueError(f"No price data found for {ticker}")
-
-        # Format response
-        latest = results[0]
-        latest_date = datetime.fromtimestamp(latest["t"] / 1000)
-
-        # Calculate price change
-        prev_close = results[1]["c"] if len(results) > 1 else latest["c"]
-        change = latest["c"] - prev_close
-        change_pct = (change / prev_close * 100) if prev_close else 0
+        # Format for MCP display (adapt sawa output to match existing format)
+        history = result.get("history", [])
+        latest = history[-1] if history else {}
 
         return {
-            "ticker": ticker.upper(),
-            "latest_price": latest["c"],
-            "latest_date": latest_date.strftime("%Y-%m-%d %H:%M:%S"),
-            "open": latest["o"],
-            "high": latest["h"],
-            "low": latest["l"],
-            "close": latest["c"],
-            "volume": latest["v"],
-            "change": round(change, 2),
-            "change_percent": round(change_pct, 2),
-            "previous_close": prev_close,
+            "ticker": result["ticker"],
+            "latest_price": result["current_price"],
+            "latest_date": result["current_date"],
+            "open": latest.get("o"),
+            "high": latest.get("h"),
+            "low": latest.get("l"),
+            "close": latest.get("c", result["current_price"]),
+            "volume": latest.get("v"),
+            "change_percent": result["change_percent"],
             "history": [
                 {
                     "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
@@ -258,12 +228,219 @@ def get_live_price(ticker: str, days: int = 7) -> dict[str, Any]:
                     "close": bar["c"],
                     "volume": bar["v"],
                 }
-                for bar in results
+                for bar in history
             ],
             "source": "polygon_api",
             "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-
     except Exception as e:
-        logger.error(f"Error fetching live price for {ticker}: {e}")
+        logger.error(f"Live price error: {e}")
         raise
+
+
+# --- Technical Indicators ---
+
+
+def get_technical_indicators(
+    ticker: str,
+    start_date: str,
+    end_date: str | None = None,
+    limit: int = 252,
+) -> list[dict[str, Any]]:
+    """
+    Get technical indicators for a ticker.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "AAPL")
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format (defaults to today)
+        limit: Maximum rows to return (default: 252, max: 1000)
+
+    Returns:
+        List of technical indicator records with all 20 indicators
+    """
+    limit = min(limit, 1000)
+
+    if end_date is None:
+        end_date = date.today().isoformat()
+
+    sql = """
+        SELECT
+            date,
+            -- Trend
+            sma_5, sma_10, sma_20, sma_50,
+            ema_12, ema_26, ema_50, vwap,
+            -- Momentum
+            rsi_14, rsi_21,
+            macd_line, macd_signal, macd_histogram,
+            -- Volatility
+            bb_upper, bb_middle, bb_lower, atr_14,
+            -- Volume
+            obv, volume_sma_20, volume_ratio
+        FROM technical_indicators
+        WHERE ticker = %(ticker)s
+            AND date >= %(start_date)s
+            AND date <= %(end_date)s
+        ORDER BY date ASC
+        LIMIT %(limit)s
+    """
+
+    params = {
+        "ticker": ticker.upper(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "limit": limit,
+    }
+
+    return execute_query(sql, params)
+
+
+def get_latest_technical_indicators(ticker: str) -> dict[str, Any] | None:
+    """
+    Get the most recent technical indicators for a ticker.
+
+    Args:
+        ticker: Stock ticker symbol
+
+    Returns:
+        Latest technical indicators record or None
+    """
+    sql = """
+        SELECT
+            date,
+            -- Trend
+            sma_5, sma_10, sma_20, sma_50,
+            ema_12, ema_26, ema_50, vwap,
+            -- Momentum
+            rsi_14, rsi_21,
+            macd_line, macd_signal, macd_histogram,
+            -- Volatility
+            bb_upper, bb_middle, bb_lower, atr_14,
+            -- Volume
+            obv, volume_sma_20, volume_ratio
+        FROM technical_indicators
+        WHERE ticker = %(ticker)s
+        ORDER BY date DESC
+        LIMIT 1
+    """
+
+    results = execute_query(sql, {"ticker": ticker.upper()})
+    return results[0] if results else None
+
+
+def screen_by_technical_indicators(
+    filters: dict[str, tuple[float | None, float | None]],
+    target_date: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    Screen stocks by technical indicator values.
+
+    Args:
+        filters: Dict mapping indicator name to (min, max) tuple.
+                 Use None for unbounded side.
+                 Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
+        target_date: Date to screen (defaults to most recent)
+        limit: Maximum results (default: 100, max: 500)
+
+    Returns:
+        List of tickers matching all filters with their indicator values
+    """
+    limit = min(limit, 500)
+
+    # Valid indicator columns
+    valid_indicators = {
+        "sma_5",
+        "sma_10",
+        "sma_20",
+        "sma_50",
+        "ema_12",
+        "ema_26",
+        "ema_50",
+        "vwap",
+        "rsi_14",
+        "rsi_21",
+        "macd_line",
+        "macd_signal",
+        "macd_histogram",
+        "bb_upper",
+        "bb_middle",
+        "bb_lower",
+        "atr_14",
+        "obv",
+        "volume_sma_20",
+        "volume_ratio",
+    }
+
+    # Build WHERE conditions
+    conditions = []
+    params: dict[str, Any] = {"limit": limit}
+
+    if target_date:
+        conditions.append("date = %(target_date)s")
+        params["target_date"] = target_date
+    else:
+        # Use most recent date
+        conditions.append("date = (SELECT MAX(date) FROM technical_indicators)")
+
+    # Add filter conditions
+    for i, (indicator, (min_val, max_val)) in enumerate(filters.items()):
+        if indicator not in valid_indicators:
+            continue
+
+        if min_val is not None and max_val is not None:
+            conditions.append(f"{indicator} BETWEEN %(min_{i})s AND %(max_{i})s")
+            params[f"min_{i}"] = min_val
+            params[f"max_{i}"] = max_val
+        elif min_val is not None:
+            conditions.append(f"{indicator} >= %(min_{i})s")
+            params[f"min_{i}"] = min_val
+        elif max_val is not None:
+            conditions.append(f"{indicator} <= %(max_{i})s")
+            params[f"max_{i}"] = max_val
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    sql = f"""
+        SELECT
+            ticker,
+            date,
+            rsi_14, rsi_21,
+            macd_line, macd_histogram,
+            sma_20, sma_50,
+            bb_upper, bb_lower,
+            atr_14,
+            volume_ratio
+        FROM technical_indicators
+        WHERE {where_clause}
+        ORDER BY ticker
+        LIMIT %(limit)s
+    """
+
+    return execute_query(sql, params)
+
+
+def get_indicator_metadata() -> list[dict[str, Any]]:
+    """
+    Get metadata for all technical indicators.
+
+    Returns:
+        List of indicator metadata records
+    """
+    sql = """
+        SELECT
+            indicator_name,
+            column_name,
+            category,
+            description,
+            validation_min,
+            validation_max,
+            is_bounded,
+            min_periods_required,
+            display_name,
+            unit
+        FROM technical_indicator_metadata
+        ORDER BY sort_order
+    """
+
+    return execute_query(sql)

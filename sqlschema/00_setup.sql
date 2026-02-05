@@ -34,3 +34,10 @@ ORDER BY table_name;
 --   inflation
 --   inflation_expectations
 --   labor_market
+--   news_articles
+--   news_article_tickers
+--   news_sentiment
+--   v_economy_dashboard (view)
+--   v_company_summary (view)
+--   v_latest_fundamentals (view)
+--   v_sector_summary (view)

@@ -117,6 +117,7 @@ def cmd_daily(args) -> int:
             database_url=db_url,
             force_from_date=args.from_date,
             skip_news=args.skip_news,
+            skip_ta=args.skip_ta,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -226,33 +227,116 @@ def cmd_weekly(args) -> int:
         return 1
 
 
-def cmd_generate_overviews(args) -> int:
-    """Generate AI company overviews for top tickers."""
-    from sawa.ai_batch import run_overview_batch
+def cmd_ta_backfill(args) -> int:
+    """Run technical indicator backfill."""
+    from sawa.ta_backfill import run_ta_backfill
 
-    logger = setup_logging(args.verbose)
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="ta_backfill")
 
-    zai_key = args.zai_api_key or os.environ.get("ZAI_API_KEY")
+    # Get credentials
     db_url = args.database_url or os.environ.get("DATABASE_URL")
 
-    if not zai_key:
-        logger.error("ZAI_API_KEY required (env var or --zai-api-key)")
-        return 1
     if not db_url:
         logger.error("DATABASE_URL required (env var or --database-url)")
         return 1
 
+    # Single ticker or all
+    tickers = [args.ticker] if args.ticker else None
+
     try:
-        stats = run_overview_batch(
-            zai_api_key=zai_key,
+        stats = run_ta_backfill(
             database_url=db_url,
-            limit=args.limit,
-            delay=args.delay,
-            logger=logger,
+            tickers=tickers,
+            workers=args.workers,
+            dry_run=args.dry_run,
+            estimate_only=args.estimate,
+            log=logger,
         )
         return 0 if stats.get("success") else 1
     except Exception as e:
-        logger.error(f"Batch generation failed: {e}")
+        logger.error(f"TA backfill failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_ta_show(args) -> int:
+    """Show technical indicators for a ticker."""
+    from sawa.ta_query import (
+        format_indicators_table,
+        get_indicators_history,
+        get_latest_indicators,
+    )
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="ta_show")
+
+    ticker = args.ticker.upper()
+
+    try:
+        if args.from_date:
+            # Show history
+            results = get_indicators_history(
+                ticker,
+                start_date=args.from_date,
+                end_date=args.to_date,
+            )
+            if not results:
+                logger.error(f"No technical indicators found for {ticker}")
+                return 1
+
+            for r in results:
+                print(format_indicators_table(r))
+                print()
+        else:
+            # Show latest
+            result = get_latest_indicators(ticker)
+            if result is None:
+                logger.error(f"No technical indicators found for {ticker}")
+                return 1
+
+            print(format_indicators_table(result))
+
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to get indicators: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_ta_screen(args) -> int:
+    """Screen stocks by technical indicators."""
+    from sawa.ta_query import format_screen_results, screen_indicators
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="ta_screen")
+
+    # Build filters from args
+    filters: dict[str, tuple[float | None, float | None]] = {}
+
+    if args.rsi_max is not None or args.rsi_min is not None:
+        filters["rsi_14"] = (args.rsi_min, args.rsi_max)
+
+    if args.volume_min is not None:
+        filters["volume_ratio"] = (args.volume_min, None)
+
+    if args.macd_min is not None or args.macd_max is not None:
+        filters["macd_histogram"] = (args.macd_min, args.macd_max)
+
+    if not filters:
+        logger.error("At least one filter is required (--rsi-max, --rsi-min, --volume-min, etc.)")
+        return 1
+
+    try:
+        results = screen_indicators(
+            filters=filters,
+            target_date=args.date,
+            limit=args.limit,
+        )
+
+        print(format_screen_results(results, filters))
+        return 0
+    except Exception as e:
+        logger.error(f"Screen failed: {e}")
         if args.verbose:
             raise
         return 1
@@ -311,22 +395,28 @@ Commands:
   weekly              Weekly fundamentals/economy update
   update              Legacy: combined daily + weekly update
   add-symbol          Add new symbols to database
-  generate-overviews  Batch generate AI company overviews
+  ta-backfill         Calculate technical indicators for all history
+  ta-show             Show technical indicators for a ticker
+  ta-screen           Screen stocks by technical indicators
 
 Examples:
   sawa coldstart --years 5
   sawa daily
   sawa weekly --skip-news
   sawa daily --dry-run
+  sawa daily --skip-ta
   sawa add-symbol PLTR COIN
-  sawa generate-overviews --limit 100
+  sawa ta-backfill --workers 8
+  sawa ta-show AAPL
+  sawa ta-show AAPL --from-date 2025-01-01
+  sawa ta-screen --rsi-max 30
+  sawa ta-screen --rsi-max 30 --volume-min 2.0
 
 Environment Variables:
   POLYGON_API_KEY         Polygon/Massive API key
   POLYGON_S3_ACCESS_KEY   Polygon S3 access key
   POLYGON_S3_SECRET_KEY   Polygon S3 secret key
   DATABASE_URL            PostgreSQL connection URL
-  ZAI_API_KEY             Z.AI API key (for AI overviews)
 """,
     )
 
@@ -399,6 +489,7 @@ Environment Variables:
     daily_parser.add_argument("--api-key", help="Polygon API key")
     daily_parser.add_argument("--database-url", help="PostgreSQL URL")
     daily_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
+    daily_parser.add_argument("--skip-ta", action="store_true", help="Skip technical indicators")
     daily_parser.add_argument("--log-dir", help="Directory for log files")
     daily_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     daily_parser.add_argument("-v", "--verbose", action="store_true")
@@ -461,6 +552,97 @@ Environment Variables:
     weekly_parser.add_argument("-v", "--verbose", action="store_true")
     weekly_parser.set_defaults(func=cmd_weekly)
 
+    # Technical indicator backfill subcommand
+    ta_parser = subparsers.add_parser(
+        "ta-backfill",
+        help="Calculate technical indicators for all history",
+        description="Calculate technical indicators (SMA, RSI, MACD, etc.) for all stocks.",
+    )
+    ta_parser.add_argument("--ticker", help="Single ticker to process (default: all)")
+    ta_parser.add_argument(
+        "--workers", type=int, default=4, help="Number of parallel workers (default: 4)"
+    )
+    ta_parser.add_argument("--database-url", help="PostgreSQL URL")
+    ta_parser.add_argument("--log-dir", help="Directory for log files")
+    ta_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    ta_parser.add_argument(
+        "--estimate", action="store_true", help="Estimate time on 10 tickers and exit"
+    )
+    ta_parser.add_argument("-v", "--verbose", action="store_true")
+    ta_parser.set_defaults(func=cmd_ta_backfill)
+
+    # Technical indicator show subcommand
+    ta_show_parser = subparsers.add_parser(
+        "ta-show",
+        help="Show technical indicators for a ticker",
+        description="Display technical indicators (SMA, RSI, MACD, etc.) for a stock.",
+    )
+    ta_show_parser.add_argument("ticker", help="Stock ticker symbol (e.g., AAPL)")
+    ta_show_parser.add_argument(
+        "--from-date",
+        type=parse_date,
+        metavar="YYYY-MM-DD",
+        help="Start date for history (shows latest if not specified)",
+    )
+    ta_show_parser.add_argument(
+        "--to-date",
+        type=parse_date,
+        metavar="YYYY-MM-DD",
+        help="End date for history (defaults to today)",
+    )
+    ta_show_parser.add_argument("--database-url", help="PostgreSQL URL")
+    ta_show_parser.add_argument("--log-dir", help="Directory for log files")
+    ta_show_parser.add_argument("-v", "--verbose", action="store_true")
+    ta_show_parser.set_defaults(func=cmd_ta_show)
+
+    # Technical indicator screen subcommand
+    ta_screen_parser = subparsers.add_parser(
+        "ta-screen",
+        help="Screen stocks by technical indicators",
+        description="Find stocks matching technical indicator criteria.",
+    )
+    ta_screen_parser.add_argument(
+        "--rsi-max",
+        type=float,
+        help="Maximum RSI-14 (e.g., 30 for oversold)",
+    )
+    ta_screen_parser.add_argument(
+        "--rsi-min",
+        type=float,
+        help="Minimum RSI-14 (e.g., 70 for overbought)",
+    )
+    ta_screen_parser.add_argument(
+        "--volume-min",
+        type=float,
+        help="Minimum volume ratio (today vs 20-day avg)",
+    )
+    ta_screen_parser.add_argument(
+        "--macd-min",
+        type=float,
+        help="Minimum MACD histogram (positive = bullish)",
+    )
+    ta_screen_parser.add_argument(
+        "--macd-max",
+        type=float,
+        help="Maximum MACD histogram (negative = bearish)",
+    )
+    ta_screen_parser.add_argument(
+        "--date",
+        type=parse_date,
+        metavar="YYYY-MM-DD",
+        help="Date to screen (defaults to most recent)",
+    )
+    ta_screen_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum results (default: 100)",
+    )
+    ta_screen_parser.add_argument("--database-url", help="PostgreSQL URL")
+    ta_screen_parser.add_argument("--log-dir", help="Directory for log files")
+    ta_screen_parser.add_argument("-v", "--verbose", action="store_true")
+    ta_screen_parser.set_defaults(func=cmd_ta_screen)
+
     # Legacy update subcommand
     update_parser = subparsers.add_parser(
         "update",
@@ -481,23 +663,6 @@ Environment Variables:
     update_parser.add_argument("--log-dir", help="Directory for log files")
     update_parser.add_argument("-v", "--verbose", action="store_true")
     update_parser.set_defaults(func=cmd_update)
-
-    # Generate overviews subcommand
-    overview_parser = subparsers.add_parser(
-        "generate-overviews",
-        help="Generate AI company overviews for top tickers",
-        description="Batch generate AI-powered company overviews using Z.AI.",
-    )
-    overview_parser.add_argument(
-        "--limit", type=int, default=50, help="Max tickers to process (default: 50)"
-    )
-    overview_parser.add_argument(
-        "--delay", type=float, default=2.0, help="Delay between API calls in seconds (default: 2.0)"
-    )
-    overview_parser.add_argument("--zai-api-key", help="Z.AI API key")
-    overview_parser.add_argument("--database-url", help="PostgreSQL URL")
-    overview_parser.add_argument("-v", "--verbose", action="store_true")
-    overview_parser.set_defaults(func=cmd_generate_overviews)
 
     args = parser.parse_args()
 

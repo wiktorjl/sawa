@@ -17,6 +17,7 @@ from mcp_server.services.converters import (
     financial_ratio_to_dict,
     income_statement_to_dict,
     stock_price_to_dict,
+    technical_indicators_to_dict,
 )
 
 
@@ -161,3 +162,71 @@ class StockService:
             "balance_sheets": [balance_sheet_to_dict(b) for b in balance],
             "cash_flows": [cash_flow_to_dict(c) for c in cash],
         }
+
+    async def get_technical_indicators(
+        self,
+        ticker: str,
+        start_date: str,
+        end_date: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Get technical indicators for a ticker.
+
+        Args:
+            ticker: Stock symbol
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD), defaults to today
+            limit: Maximum rows (default: 100)
+
+        Returns:
+            List of indicator dicts matching MCP format
+        """
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date) if end_date else date.today()
+
+        repo = self._factory.get_technical_indicators_repository()
+        indicators = await repo.get_indicators(ticker, start, end)
+
+        result = [technical_indicators_to_dict(ind) for ind in indicators]
+        return result[:limit]
+
+    async def get_latest_technical_indicators(
+        self,
+        ticker: str,
+    ) -> dict[str, Any] | None:
+        """Get most recent technical indicators for a ticker.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            Indicator dict or None
+        """
+        repo = self._factory.get_technical_indicators_repository()
+        indicators = await repo.get_latest_indicators(ticker)
+        return technical_indicators_to_dict(indicators) if indicators else None
+
+    async def screen_technical_indicators(
+        self,
+        filters: dict[str, tuple[float | None, float | None]],
+        target_date: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Screen stocks by technical indicator values.
+
+        Args:
+            filters: Dict mapping indicator name to (min, max) tuple.
+                     Use None for unbounded side.
+                     Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
+            target_date: Date to screen (YYYY-MM-DD), defaults to most recent
+            limit: Maximum number of results
+
+        Returns:
+            List of matching indicator dicts
+        """
+        target = date.fromisoformat(target_date) if target_date else None
+
+        repo = self._factory.get_technical_indicators_repository()
+        indicators = await repo.screen_by_indicators(filters, target, limit)
+
+        return [technical_indicators_to_dict(ind) for ind in indicators]

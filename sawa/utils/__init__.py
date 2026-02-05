@@ -16,7 +16,20 @@ from .dates import (
     timestamp_to_date,
 )
 from .logging import setup_logging
-from .symbols import load_symbols, validate_ticker
+from .sic_mapping import (
+    clear_cache as clear_sic_cache,
+    get_sic_industry,
+    get_sic_mapping,
+    load_mappings_from_db as load_sic_mappings,
+    map_sic_to_gics,
+)
+from .symbols import (
+    fetch_index_symbols,
+    fetch_nasdaq100_symbols,
+    fetch_sp500_symbols,
+    load_symbols,
+    validate_ticker,
+)
 from .xdg import (
     ensure_dirs,
     get_cache_dir,
@@ -49,9 +62,18 @@ __all__ = [
     "timestamp_to_date",
     # logging
     "setup_logging",
+    # sic_mapping
+    "map_sic_to_gics",
+    "get_sic_mapping",
+    "get_sic_industry",
+    "load_sic_mappings",
+    "clear_sic_cache",
     # symbols
     "validate_ticker",
     "load_symbols",
+    "fetch_sp500_symbols",
+    "fetch_nasdaq100_symbols",
+    "fetch_index_symbols",
     # xdg
     "get_config_dir",
     "get_data_dir",
