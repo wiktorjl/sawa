@@ -125,10 +125,13 @@ def get_top_movers(
                 WHERE change_pct IS NOT NULL
                 ORDER BY change_pct ASC
                 LIMIT %(limit)s
+            ),
+            combined AS (
+                SELECT * FROM gainers
+                UNION ALL
+                SELECT * FROM losers
             )
-            SELECT * FROM gainers
-            UNION ALL
-            SELECT * FROM losers
+            SELECT * FROM combined
             ORDER BY direction,
                      CASE WHEN direction = 'gainer' THEN -change_pct ELSE change_pct END
         """
