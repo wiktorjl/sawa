@@ -264,3 +264,97 @@ def get_volume_leaders(
     """
 
     return execute_query(sql, params)
+
+
+def get_market_breadth(
+    date: str | None = None,
+    index: Literal["sp500", "nasdaq100", "all"] = "all",
+) -> dict[str, Any]:
+    """
+    Get market breadth statistics (advancers vs decliners).
+
+    Args:
+        date: Date in YYYY-MM-DD format (default: latest trading day)
+        index: Filter by index membership (default: all active stocks)
+
+    Returns:
+        Dict with advancers, decliners, unchanged counts and A/D ratio
+    """
+    # Build index filter
+    index_filter = ""
+    if index == "sp500":
+        index_filter = "AND c.sp500 = true"
+    elif index == "nasdaq100":
+        index_filter = "AND c.nasdaq100 = true"
+
+    params: dict[str, Any] = {}
+
+    if date:
+        # Use specific date
+        date_cte = """
+            WITH date_refs AS (
+                SELECT
+                    %(target_date)s::date as latest,
+                    (SELECT MAX(date) FROM stock_prices
+                     WHERE date < %(target_date)s::date) as previous
+            )"""
+        params["target_date"] = date
+    else:
+        # Use latest two trading days
+        date_cte = """
+            WITH latest_dates AS (
+                SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT 2
+            ),
+            date_refs AS (
+                SELECT MAX(date) as latest, MIN(date) as previous FROM latest_dates
+            )"""
+
+    sql = f"""
+        {date_cte},
+        price_changes AS (
+            SELECT
+                c.ticker,
+                CASE
+                    WHEN p_now.close > p_prev.close THEN 'advancer'
+                    WHEN p_now.close < p_prev.close THEN 'decliner'
+                    ELSE 'unchanged'
+                END as direction
+            FROM companies c
+            CROSS JOIN date_refs dr
+            JOIN stock_prices p_now
+                ON c.ticker = p_now.ticker AND p_now.date = dr.latest
+            JOIN stock_prices p_prev
+                ON c.ticker = p_prev.ticker AND p_prev.date = dr.previous
+            WHERE c.active = true
+            {index_filter}
+        ),
+        counts AS (
+            SELECT direction, COUNT(*) as count FROM price_changes GROUP BY direction
+        )
+        SELECT
+            (SELECT latest FROM date_refs) as date,
+            COALESCE(SUM(count) FILTER (WHERE direction = 'advancer'), 0) as advancers,
+            COALESCE(SUM(count) FILTER (WHERE direction = 'decliner'), 0) as decliners,
+            COALESCE(SUM(count) FILTER (WHERE direction = 'unchanged'), 0) as unchanged,
+            SUM(count) as total,
+            CASE
+                WHEN SUM(count) FILTER (WHERE direction = 'decliner') > 0
+                THEN ROUND(
+                    (SUM(count) FILTER (WHERE direction = 'advancer')::numeric /
+                     SUM(count) FILTER (WHERE direction = 'decliner'))::numeric, 2)
+                ELSE NULL
+            END as ad_ratio
+        FROM counts
+    """
+
+    results = execute_query(sql, params)
+    if results:
+        return results[0]
+    return {
+        "date": date,
+        "advancers": 0,
+        "decliners": 0,
+        "unchanged": 0,
+        "total": 0,
+        "ad_ratio": None,
+    }
