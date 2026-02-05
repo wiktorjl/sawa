@@ -30,6 +30,7 @@ from sawa.domain.models import (
     IncomeStatement,
     InflationData,
     LaborMarketData,
+    MarketIndex,
     NewsArticle,
     StockPrice,
     TreasuryYield,
@@ -455,5 +456,87 @@ class TechnicalIndicatorsRepository(Repository):
 
         Returns:
             List of TechnicalIndicators matching all filters
+        """
+        pass
+
+
+class IndexRepository(Repository):
+    """Repository for market index data.
+
+    Provides methods to query market indices (S&P 500, NASDAQ-100, etc.)
+    and their constituent stocks.
+    """
+
+    @abstractmethod
+    async def list_indices(self) -> list[MarketIndex]:
+        """List all available market indices.
+
+        Returns:
+            List of MarketIndex objects with constituent counts
+        """
+        pass
+
+    @abstractmethod
+    async def get_index(self, code: str) -> MarketIndex | None:
+        """Get a specific index by code.
+
+        Args:
+            code: Index code (e.g., 'sp500', 'nasdaq100')
+
+        Returns:
+            MarketIndex object, or None if not found
+        """
+        pass
+
+    @abstractmethod
+    async def get_constituents(self, code: str) -> list[str]:
+        """Get all tickers in an index.
+
+        Args:
+            code: Index code (e.g., 'sp500', 'nasdaq100')
+
+        Returns:
+            List of ticker symbols in the index
+        """
+        pass
+
+    @abstractmethod
+    async def is_member(self, ticker: str, index_code: str) -> bool:
+        """Check if a ticker is a member of an index.
+
+        Args:
+            ticker: Stock symbol
+            index_code: Index code
+
+        Returns:
+            True if ticker is in the index
+        """
+        pass
+
+    @abstractmethod
+    async def get_ticker_indices(self, ticker: str) -> list[str]:
+        """Get all indices a ticker belongs to.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            List of index codes the ticker is a member of
+        """
+        pass
+
+    @abstractmethod
+    async def update_constituents(self, code: str, tickers: list[str]) -> int:
+        """Update index constituents (replace existing).
+
+        Args:
+            code: Index code
+            tickers: List of ticker symbols to set as constituents
+
+        Returns:
+            Number of constituents added
+
+        Raises:
+            ValueError: If index code not found
         """
         pass

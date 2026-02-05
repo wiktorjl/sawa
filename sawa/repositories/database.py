@@ -31,6 +31,7 @@ from sawa.domain.models import (
     IncomeStatement,
     InflationData,
     LaborMarketData,
+    MarketIndex,
     NewsArticle,
     StockPrice,
     TreasuryYield,
@@ -40,6 +41,7 @@ from sawa.repositories.base import (
     CompanyRepository,
     EconomyRepository,
     FundamentalRepository,
+    IndexRepository,
     NewsRepository,
     RatiosRepository,
     StockPriceRepository,
@@ -1176,3 +1178,239 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
                 rows = cur.fetchall()
 
         return [self._row_to_indicators(row) for row in rows]
+
+
+class DatabaseIndexRepository(IndexRepository):
+    """Read market index data from PostgreSQL.
+
+    This repository queries the indices and index_constituents tables
+    which track market index membership (S&P 500, NASDAQ-100, etc.).
+    """
+
+    def __init__(self, database_url: str) -> None:
+        """Initialize with database URL."""
+        self.database_url = database_url
+
+    @property
+    def provider_name(self) -> str:
+        """Return provider name."""
+        return "database"
+
+    async def list_indices(self) -> list[MarketIndex]:
+        """List all available market indices.
+
+        Returns:
+            List of MarketIndex objects with constituent counts
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._list_indices_sync)
+
+    def _list_indices_sync(self) -> list[MarketIndex]:
+        """Synchronous implementation of list_indices."""
+        query = """
+            SELECT
+                i.id,
+                i.code,
+                i.name,
+                i.description,
+                i.source_url,
+                i.last_updated,
+                COUNT(ic.ticker) as constituent_count
+            FROM indices i
+            LEFT JOIN index_constituents ic ON i.id = ic.index_id
+            GROUP BY i.id, i.code, i.name, i.description, i.source_url, i.last_updated
+            ORDER BY i.name
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
+
+        return [self._row_to_index(row) for row in rows]
+
+    def _row_to_index(self, row: dict[str, Any]) -> MarketIndex:
+        """Convert database row to MarketIndex domain model."""
+        return MarketIndex(
+            id=row["id"],
+            code=row["code"],
+            name=row["name"],
+            description=row.get("description"),
+            source_url=row.get("source_url"),
+            last_updated=row.get("last_updated"),
+            constituent_count=row.get("constituent_count", 0),
+        )
+
+    async def get_index(self, code: str) -> MarketIndex | None:
+        """Get a specific index by code.
+
+        Args:
+            code: Index code (e.g., 'sp500', 'nasdaq100')
+
+        Returns:
+            MarketIndex object, or None if not found
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_index_sync, code)
+
+    def _get_index_sync(self, code: str) -> MarketIndex | None:
+        """Synchronous implementation of get_index."""
+        query = """
+            SELECT
+                i.id,
+                i.code,
+                i.name,
+                i.description,
+                i.source_url,
+                i.last_updated,
+                COUNT(ic.ticker) as constituent_count
+            FROM indices i
+            LEFT JOIN index_constituents ic ON i.id = ic.index_id
+            WHERE i.code = %s
+            GROUP BY i.id, i.code, i.name, i.description, i.source_url, i.last_updated
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (code.lower(),))
+                row = cur.fetchone()
+
+        return self._row_to_index(row) if row else None
+
+    async def get_constituents(self, code: str) -> list[str]:
+        """Get all tickers in an index.
+
+        Args:
+            code: Index code (e.g., 'sp500', 'nasdaq100')
+
+        Returns:
+            List of ticker symbols in the index
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_constituents_sync, code)
+
+    def _get_constituents_sync(self, code: str) -> list[str]:
+        """Synchronous implementation of get_constituents."""
+        query = """
+            SELECT ic.ticker
+            FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %s
+            ORDER BY ic.ticker
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (code.lower(),))
+                rows = cur.fetchall()
+
+        return [row["ticker"] for row in rows]
+
+    async def is_member(self, ticker: str, index_code: str) -> bool:
+        """Check if a ticker is a member of an index.
+
+        Args:
+            ticker: Stock symbol
+            index_code: Index code
+
+        Returns:
+            True if ticker is in the index
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._is_member_sync, ticker, index_code)
+
+    def _is_member_sync(self, ticker: str, index_code: str) -> bool:
+        """Synchronous implementation of is_member."""
+        query = """
+            SELECT 1
+            FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE ic.ticker = %s AND i.code = %s
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (ticker.upper(), index_code.lower()))
+                row = cur.fetchone()
+
+        return row is not None
+
+    async def get_ticker_indices(self, ticker: str) -> list[str]:
+        """Get all indices a ticker belongs to.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            List of index codes the ticker is a member of
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_ticker_indices_sync, ticker)
+
+    def _get_ticker_indices_sync(self, ticker: str) -> list[str]:
+        """Synchronous implementation of get_ticker_indices."""
+        query = """
+            SELECT i.code
+            FROM indices i
+            JOIN index_constituents ic ON i.id = ic.index_id
+            WHERE ic.ticker = %s
+            ORDER BY i.name
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (ticker.upper(),))
+                rows = cur.fetchall()
+
+        return [row["code"] for row in rows]
+
+    async def update_constituents(self, code: str, tickers: list[str]) -> int:
+        """Update index constituents (replace existing).
+
+        Args:
+            code: Index code
+            tickers: List of ticker symbols to set as constituents
+
+        Returns:
+            Number of constituents added
+
+        Raises:
+            ValueError: If index code not found
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._update_constituents_sync, code, tickers)
+
+    def _update_constituents_sync(self, code: str, tickers: list[str]) -> int:
+        """Synchronous implementation of update_constituents."""
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                # Get index ID
+                cur.execute("SELECT id FROM indices WHERE code = %s", (code.lower(),))
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(f"Index not found: {code}")
+                index_id = row["id"]
+
+                # Delete existing constituents
+                cur.execute("DELETE FROM index_constituents WHERE index_id = %s", (index_id,))
+
+                # Insert new constituents (only those that exist in companies table)
+                added = 0
+                for ticker in tickers:
+                    ticker_upper = ticker.upper()
+                    cur.execute(
+                        """
+                        INSERT INTO index_constituents (index_id, ticker)
+                        SELECT %s, %s
+                        WHERE EXISTS (SELECT 1 FROM companies WHERE ticker = %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (index_id, ticker_upper, ticker_upper),
+                    )
+                    if cur.rowcount > 0:
+                        added += 1
+
+                # Update last_updated timestamp
+                cur.execute(
+                    "UPDATE indices SET last_updated = CURRENT_TIMESTAMP WHERE id = %s",
+                    (index_id,),
+                )
+
+                conn.commit()
+
+        return added
