@@ -1,7 +1,7 @@
 """
-Corporate actions: Download and store stock splits and dividends.
+Corporate actions: Download and store stock splits, dividends, and earnings.
 
-Purpose: Update splits and dividends tables from Polygon API.
+Purpose: Update splits, dividends, and earnings tables from Polygon API.
 Re-entrant: Safe to run multiple times (upsert on unique constraints).
 """
 
@@ -12,7 +12,7 @@ from typing import Any
 import psycopg
 
 from sawa.api import PolygonClient
-from sawa.domain.corporate_actions import Dividend, StockSplit
+from sawa.domain.corporate_actions import Dividend, Earnings, StockSplit
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
@@ -95,6 +95,49 @@ def load_dividends(
     return loaded
 
 
+def load_earnings(
+    conn,
+    earnings: list[Earnings],
+    logger: logging.Logger,
+) -> int:
+    """Load earnings into database using upsert."""
+    if not earnings:
+        return 0
+
+    insert_sql = """
+        INSERT INTO earnings (
+            ticker, report_date, fiscal_quarter, fiscal_year,
+            timing, eps_estimate, eps_actual, revenue_estimate, revenue_actual
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (ticker, fiscal_year, fiscal_quarter) DO UPDATE SET
+            report_date = EXCLUDED.report_date,
+            timing = EXCLUDED.timing,
+            eps_estimate = EXCLUDED.eps_estimate,
+            eps_actual = EXCLUDED.eps_actual,
+            revenue_estimate = EXCLUDED.revenue_estimate,
+            revenue_actual = EXCLUDED.revenue_actual
+    """
+
+    loaded = 0
+    with conn.cursor() as cur:
+        for earn in earnings:
+            # Skip if missing fiscal period info (required for unique constraint)
+            if not earn.fiscal_year or not earn.fiscal_quarter:
+                logger.debug(f"Skipping earnings without fiscal period: {earn.ticker}")
+                continue
+            try:
+                cur.execute(insert_sql, earn.to_tuple())
+                loaded += 1
+            except psycopg.errors.ForeignKeyViolation:
+                conn.rollback()
+                logger.debug(f"Skipping earnings for unknown ticker: {earn.ticker}")
+                continue
+
+    conn.commit()
+    return loaded
+
+
 def run_corporate_actions_update(
     api_key: str,
     database_url: str,
@@ -102,11 +145,12 @@ def run_corporate_actions_update(
     tickers: list[str] | None = None,
     include_splits: bool = True,
     include_dividends: bool = True,
+    include_earnings: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """
-    Download and store corporate actions (splits, dividends) from Polygon.
+    Download and store corporate actions (splits, dividends, earnings) from Polygon.
 
     Args:
         api_key: Polygon API key
@@ -115,6 +159,8 @@ def run_corporate_actions_update(
         tickers: List of tickers to fetch (default: all active)
         include_splits: Whether to fetch splits
         include_dividends: Whether to fetch dividends
+        include_earnings: Whether to fetch earnings (experimental, Polygon ticker-events
+            API currently only returns ticker_change events, not earnings)
         dry_run: If True, show what would be done without writing
         logger: Logger instance
 
@@ -128,6 +174,8 @@ def run_corporate_actions_update(
         "splits_loaded": 0,
         "dividends_fetched": 0,
         "dividends_loaded": 0,
+        "earnings_fetched": 0,
+        "earnings_loaded": 0,
     }
 
     # Default start date: 1 year ago
@@ -186,6 +234,35 @@ def run_corporate_actions_update(
                 logger.info(f"  Loaded {stats['dividends_loaded']} dividends")
             elif dry_run:
                 logger.info("  [DRY RUN] Would load dividends")
+
+        # Fetch and load earnings (per-ticker API, slower)
+        if include_earnings:
+            logger.info(f"Fetching earnings for {len(tickers)} tickers...")
+            all_earnings: list[Earnings] = []
+
+            for i, ticker in enumerate(tickers, 1):
+                if i % 50 == 0:
+                    logger.info(f"  Progress: {i}/{len(tickers)}")
+
+                try:
+                    rate_limiter.acquire()
+                    events_data = client.get_ticker_events(ticker, event_types=["earnings"])
+                    if events_data and "events" in events_data:
+                        for event in events_data["events"]:
+                            earn = Earnings.from_polygon_event(ticker, event)
+                            if earn:
+                                all_earnings.append(earn)
+                except Exception as e:
+                    logger.debug(f"  {ticker}: {e}")
+
+            stats["earnings_fetched"] = len(all_earnings)
+            logger.info(f"  Found {len(all_earnings)} earnings records")
+
+            if all_earnings and not dry_run:
+                stats["earnings_loaded"] = load_earnings(conn, all_earnings, logger)
+                logger.info(f"  Loaded {stats['earnings_loaded']} earnings")
+            elif dry_run:
+                logger.info("  [DRY RUN] Would load earnings")
 
     stats["success"] = True
     logger.info("Corporate actions update complete")
