@@ -20,9 +20,14 @@ from .market_data import (
     get_stock_prices,
     get_stock_prices_async,
     get_technical_indicators,
+    list_technical_indicators,
     screen_by_technical_indicators,
 )
+from .movers import get_top_movers, get_volume_leaders
 from .scanner import scan_ytd_performance
+from .schema import describe_database, describe_table
+from .screener import screen_stocks
+from .sectors import get_sector_performance, list_sectors
 
 __all__ = [
     # Companies
@@ -51,6 +56,18 @@ __all__ = [
     "get_latest_technical_indicators",
     "screen_by_technical_indicators",
     "get_indicator_metadata",
+    "list_technical_indicators",
     # Scanner
     "scan_ytd_performance",
+    # Schema discovery
+    "describe_database",
+    "describe_table",
+    # Sectors
+    "list_sectors",
+    "get_sector_performance",
+    # Market movers
+    "get_top_movers",
+    "get_volume_leaders",
+    # Screener
+    "screen_stocks",
 ]
