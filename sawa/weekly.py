@@ -1,7 +1,7 @@
 """
-Weekly update: Pull slow-changing data (fundamentals, economy, etc).
+Weekly update: Pull economy data, overviews, news, and corporate actions.
 
-Purpose: Update fundamentals, economy data, company overviews, ratios, news.
+Purpose: Update data that changes frequently (economy, news, corporate actions).
 Re-entrant: Safe to run multiple times (upsert on primary keys).
 """
 
@@ -15,13 +15,7 @@ from psycopg import sql
 
 from sawa.api import PolygonClient
 from sawa.corporate_actions import run_corporate_actions_update
-from sawa.database.load import (
-    load_companies,
-    load_economy,
-    load_fundamentals,
-    load_news,
-    load_ratios,
-)
+from sawa.database.load import load_companies, load_economy, load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
@@ -48,67 +42,6 @@ def get_symbols_from_db(conn) -> list[str]:
     with conn.cursor() as cur:
         cur.execute("SELECT ticker FROM companies ORDER BY ticker")
         return [row[0] for row in cur.fetchall()]
-
-
-def is_reporting_month(check_date: date | None = None) -> bool:
-    """Check if we're in a quarterly reporting month.
-
-    Quarterly earnings are typically reported in January, April, July, and October,
-    covering Q4, Q1, Q2, and Q3 respectively. Running fundamentals updates
-    outside these months is usually wasteful.
-
-    Args:
-        check_date: Date to check (defaults to today)
-
-    Returns:
-        True if the month is a reporting month (Jan, Apr, Jul, Oct)
-    """
-    check_date = check_date or date.today()
-    return check_date.month in (1, 4, 7, 10)
-
-
-def download_fundamentals(
-    client: PolygonClient,
-    symbols: list[str],
-    start_date: str,
-    end_date: str,
-    output_dir: Path,
-    logger: logging.Logger,
-    rate_limiter: SyncRateLimiter | None = None,
-) -> dict[str, int]:
-    """Download fundamentals data."""
-    endpoints = ["balance-sheets", "cash-flow", "income-statements"]
-    stats: dict[str, int] = {}
-
-    for endpoint in endpoints:
-        logger.info(f"Downloading {endpoint}...")
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        all_data: list[dict[str, Any]] = []
-        for i, symbol in enumerate(symbols, 1):
-            if i % 50 == 0:
-                logger.info(f"  Progress: {i}/{len(symbols)}")
-            try:
-                if rate_limiter:
-                    rate_limiter.acquire()
-                data = client.get_fundamentals(
-                    endpoint, ticker=symbol, start_date=start_date, end_date=end_date
-                )
-                # Clean up tickers field
-                for record in data:
-                    if "tickers" in record and isinstance(record["tickers"], list):
-                        record["tickers"] = record["tickers"][0] if record["tickers"] else ""
-                all_data.extend(data)
-            except Exception as e:
-                logger.debug(f"  {symbol}: {e}")
-
-        if all_data:
-            filepath = output_dir / f"{endpoint.replace('-', '_')}.csv"
-            write_csv_auto_fields(filepath, all_data, logger)
-
-        stats[endpoint] = len(all_data)
-
-    return stats
 
 
 def download_overviews(
@@ -178,49 +111,14 @@ def download_economy(
     return stats
 
 
-def download_ratios(
-    client: PolygonClient,
-    symbols: list[str],
-    output_dir: Path,
-    logger: logging.Logger,
-    rate_limiter: SyncRateLimiter | None = None,
-) -> int:
-    """Download financial ratios."""
-    logger.info("Downloading financial ratios...")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    all_ratios: list[dict[str, Any]] = []
-    for i, symbol in enumerate(symbols, 1):
-        if i % 50 == 0:
-            logger.info(f"  Progress: {i}/{len(symbols)}")
-        try:
-            if rate_limiter:
-                rate_limiter.acquire()
-            ratios = client.get_ratios(symbol)
-            for r in ratios:
-                r["ticker"] = symbol
-            all_ratios.extend(ratios)
-        except Exception as e:
-            logger.warning(f"  {symbol}: {e}")
-
-    if all_ratios:
-        filepath = output_dir / "ratios.csv"
-        write_csv_auto_fields(filepath, all_ratios, logger)
-
-    return len(all_ratios)
-
-
 def run_weekly(
     api_key: str,
     database_url: str,
     output_dir: Path,
-    skip_fundamentals: bool = False,
     skip_economy: bool = False,
     skip_overviews: bool = False,
-    skip_ratios: bool = False,
     skip_news: bool = False,
     skip_corporate_actions: bool = False,
-    force_fundamentals: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -231,13 +129,10 @@ def run_weekly(
         api_key: Polygon/Massive API key
         database_url: PostgreSQL connection URL
         output_dir: Directory to save downloaded data
-        skip_fundamentals: Skip fundamentals update
         skip_economy: Skip economy data update
         skip_overviews: Skip company overviews update
-        skip_ratios: Skip financial ratios update
         skip_news: Skip news update
         skip_corporate_actions: Skip corporate actions (splits/dividends) update
-        force_fundamentals: Force fundamentals update even outside reporting months
         dry_run: If True, show what would be done without executing
         logger: Logger instance
 
@@ -248,7 +143,7 @@ def run_weekly(
     stats: dict[str, Any] = {"success": False}
 
     logger.info("=" * 60)
-    logger.info("WEEKLY UPDATE - Fundamentals & Economy")
+    logger.info("WEEKLY UPDATE - Economy & Corporate Actions")
     logger.info("=" * 60)
 
     # Initialize client and rate limiter
@@ -265,41 +160,25 @@ def run_weekly(
             logger.info(f"Found {len(symbols)} symbols in database")
             stats["symbols"] = len(symbols)
 
-            # Get last dates for incremental updates
-            last_fundamental_date = get_last_date(conn, "balance_sheets", "period_end")
+            # Get last date for incremental updates
             last_treasury_date = get_last_date(conn, "treasury_yields")
 
-            # Calculate date range (default: last 90 days for fundamentals)
+            # Calculate date range
             end_date = date.today()
-            if last_fundamental_date:
-                fund_start = last_fundamental_date - timedelta(days=30)  # Overlap for safety
-            else:
-                fund_start = end_date - timedelta(days=365)  # 1 year if no data
-
             if last_treasury_date:
                 econ_start = last_treasury_date
             else:
                 econ_start = end_date - timedelta(days=365)
 
-            fund_start_str = fund_start.strftime(DATE_FORMAT)
             econ_start_str = econ_start.strftime(DATE_FORMAT)
             end_str = end_date.strftime(DATE_FORMAT)
 
-            logger.info(f"Fundamentals date range: {fund_start_str} to {end_str}")
             logger.info(f"Economy date range: {econ_start_str} to {end_str}")
 
         if dry_run:
             logger.info("\n[DRY RUN] Would update:")
             if not skip_overviews:
                 logger.info(f"  - Company overviews for {len(symbols)} symbols")
-            if not skip_fundamentals:
-                should_run = force_fundamentals or is_reporting_month()
-                if should_run:
-                    logger.info(f"  - Fundamentals from {fund_start_str}")
-                else:
-                    logger.info("  - Fundamentals: SKIP (not a reporting month)")
-            if not skip_ratios:
-                logger.info(f"  - Financial ratios for {len(symbols)} symbols")
             if not skip_economy:
                 logger.info(f"  - Economy data from {econ_start_str}")
             if not skip_news:
@@ -311,11 +190,9 @@ def run_weekly(
             return stats
 
         step = 1
-        total_steps = 6 - sum(
+        total_steps = 4 - sum(
             [
                 skip_overviews,
-                skip_fundamentals,
-                skip_ratios,
                 skip_economy,
                 skip_news,
                 skip_corporate_actions,
@@ -333,45 +210,6 @@ def run_weekly(
             # Load into database
             with psycopg.connect(database_url) as conn:
                 load_companies(conn, output_dir / "overviews" / "overviews.csv", logger)
-
-        # Step: Update fundamentals (quarterly - only in Jan/Apr/Jul/Oct)
-        if not skip_fundamentals:
-            should_run = force_fundamentals or is_reporting_month()
-            if not should_run:
-                logger.info(
-                    f"\n[{step}/{total_steps}] Skipping fundamentals (not a reporting month)"
-                )
-                logger.info("  Fundamentals are quarterly; use --force-fundamentals to override")
-                step += 1
-                stats["fundamentals"] = {"skipped": "not_reporting_month"}
-            else:
-                logger.info(f"\n[{step}/{total_steps}] Updating fundamentals...")
-                step += 1
-                fund_stats = download_fundamentals(
-                    client,
-                    symbols,
-                    fund_start_str,
-                    end_str,
-                    output_dir / "fundamentals",
-                    logger,
-                    rate_limiter,
-                )
-                stats["fundamentals"] = fund_stats
-                # Load into database
-                with psycopg.connect(database_url) as conn:
-                    load_fundamentals(conn, output_dir / "fundamentals", logger)
-
-        # Step: Update ratios
-        if not skip_ratios:
-            logger.info(f"\n[{step}/{total_steps}] Updating financial ratios...")
-            step += 1
-            ratio_count = download_ratios(
-                client, symbols, output_dir / "ratios", logger, rate_limiter
-            )
-            stats["ratios"] = ratio_count
-            # Load into database
-            with psycopg.connect(database_url) as conn:
-                load_ratios(conn, output_dir / "ratios" / "ratios.csv", logger)
 
         # Step: Update economy data
         if not skip_economy:
@@ -412,15 +250,6 @@ def run_weekly(
 
         if "overviews" in stats:
             logger.info(f"  Overviews: {stats['overviews']}")
-        if "fundamentals" in stats:
-            fund_stats = stats["fundamentals"]
-            if "skipped" in fund_stats:
-                logger.info(f"  Fundamentals: skipped ({fund_stats['skipped']})")
-            else:
-                total = sum(int(v) for v in fund_stats.values())
-                logger.info(f"  Fundamentals: {total} records")
-        if "ratios" in stats:
-            logger.info(f"  Ratios: {stats['ratios']}")
         if "economy" in stats:
             logger.info(f"  Economy: {sum(stats['economy'].values())} records")
         if "news" in stats:
