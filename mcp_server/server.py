@@ -46,6 +46,12 @@ from .tools.companies import (
 )
 from .tools.economy import get_economy_dashboard, get_economy_data, get_economy_data_async
 from .tools.fundamentals import get_fundamentals, get_fundamentals_async
+from .tools.indices import (
+    check_index_membership,
+    get_index_constituents,
+    get_index_with_prices,
+    list_indices,
+)
 from .tools.market_data import (
     get_financial_ratios,
     get_financial_ratios_async,
@@ -872,6 +878,64 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # Index tools
+        Tool(
+            name="list_indices",
+            description="List all market indices (S&P 500, NASDAQ-100) with constituent counts",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_index_constituents",
+            description="Get all constituent stocks of a market index",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Index code (e.g., 'sp500', 'nasdaq100')",
+                    },
+                },
+                "required": ["code"],
+            },
+        ),
+        Tool(
+            name="check_index_membership",
+            description="Check which market indices a stock belongs to",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_index_with_prices",
+            description="Get index constituents with latest price data, sorted by market cap",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Index code (e.g., 'sp500', 'nasdaq100')",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum constituents to return (default: 50, max: 500)",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 500,
+                    },
+                },
+                "required": ["code"],
+            },
+        ),
     ]
 
 
@@ -1162,6 +1226,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 sector=arguments.get("sector"),
                 min_price=arguments.get("min_price"),
                 min_volume=arguments.get("min_volume"),
+                limit=arguments.get("limit", 50),
+            )
+        # Index tools
+        elif name == "list_indices":
+            logger.info("  Executing: list_indices")
+            result = list_indices()
+        elif name == "get_index_constituents":
+            logger.info("  Executing: get_index_constituents")
+            result = get_index_constituents(code=arguments["code"])
+        elif name == "check_index_membership":
+            logger.info("  Executing: check_index_membership")
+            result = check_index_membership(ticker=arguments["ticker"])
+        elif name == "get_index_with_prices":
+            logger.info("  Executing: get_index_with_prices")
+            result = get_index_with_prices(
+                code=arguments["code"],
                 limit=arguments.get("limit", 50),
             )
         else:
