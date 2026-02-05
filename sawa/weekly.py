@@ -14,6 +14,7 @@ import psycopg
 from psycopg import sql
 
 from sawa.api import PolygonClient
+from sawa.corporate_actions import run_corporate_actions_update
 from sawa.database.load import (
     load_companies,
     load_economy,
@@ -201,6 +202,7 @@ def run_weekly(
     skip_overviews: bool = False,
     skip_ratios: bool = False,
     skip_news: bool = False,
+    skip_corporate_actions: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -216,6 +218,7 @@ def run_weekly(
         skip_overviews: Skip company overviews update
         skip_ratios: Skip financial ratios update
         skip_news: Skip news update
+        skip_corporate_actions: Skip corporate actions (splits/dividends) update
         dry_run: If True, show what would be done without executing
         logger: Logger instance
 
@@ -278,12 +281,23 @@ def run_weekly(
                 logger.info(f"  - Economy data from {econ_start_str}")
             if not skip_news:
                 logger.info(f"  - News articles (last {DEFAULT_NEWS_DAYS} days)")
+            if not skip_corporate_actions:
+                logger.info("  - Corporate actions (splits, dividends)")
             stats["success"] = True
             stats["dry_run"] = True
             return stats
 
         step = 1
-        total_steps = 5 - sum([skip_overviews, skip_fundamentals, skip_ratios, skip_economy, skip_news])
+        total_steps = 6 - sum(
+            [
+                skip_overviews,
+                skip_fundamentals,
+                skip_ratios,
+                skip_economy,
+                skip_news,
+                skip_corporate_actions,
+            ]
+        )
 
         # Step: Update company overviews
         if not skip_overviews:
@@ -302,8 +316,13 @@ def run_weekly(
             logger.info(f"\n[{step}/{total_steps}] Updating fundamentals...")
             step += 1
             fund_stats = download_fundamentals(
-                client, symbols, fund_start_str, end_str,
-                output_dir / "fundamentals", logger, rate_limiter
+                client,
+                symbols,
+                fund_start_str,
+                end_str,
+                output_dir / "fundamentals",
+                logger,
+                rate_limiter,
             )
             stats["fundamentals"] = fund_stats
             # Load into database
@@ -339,10 +358,20 @@ def run_weekly(
             logger.info(f"\n[{step}/{total_steps}] Updating news articles...")
             step += 1
             with psycopg.connect(database_url) as conn:
-                news_count = load_news(
-                    conn, client, symbols, days=DEFAULT_NEWS_DAYS, log=logger
-                )
+                news_count = load_news(conn, client, symbols, days=DEFAULT_NEWS_DAYS, log=logger)
             stats["news"] = news_count
+
+        # Step: Update corporate actions (splits, dividends)
+        if not skip_corporate_actions:
+            logger.info(f"\n[{step}/{total_steps}] Updating corporate actions...")
+            step += 1
+            ca_stats = run_corporate_actions_update(
+                api_key=api_key,
+                database_url=database_url,
+                dry_run=False,
+                logger=logger,
+            )
+            stats["corporate_actions"] = ca_stats
 
         stats["success"] = True
         logger.info("\n" + "=" * 60)
@@ -359,6 +388,12 @@ def run_weekly(
             logger.info(f"  Economy: {sum(stats['economy'].values())} records")
         if "news" in stats:
             logger.info(f"  News: {stats['news']} articles")
+        if "corporate_actions" in stats:
+            ca = stats["corporate_actions"]
+            logger.info(
+                f"  Corporate actions: {ca.get('splits_loaded', 0)} splits, "
+                f"{ca.get('dividends_loaded', 0)} dividends"
+            )
 
     except Exception as e:
         logger.error(f"Weekly update failed: {e}")
