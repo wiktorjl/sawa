@@ -53,7 +53,7 @@ def get_fundamentals(
 
     # Get balance sheets
     balance_sheets_sql = """
-        SELECT 
+        SELECT
             period_end,
             filing_date,
             fiscal_year,
@@ -74,7 +74,7 @@ def get_fundamentals(
 
     # Get cash flows
     cash_flows_sql = """
-        SELECT 
+        SELECT
             period_end,
             filing_date,
             fiscal_year,
@@ -84,7 +84,8 @@ def get_fundamentals(
             net_cash_from_financing_activities as financing_cash_flow,
             purchase_of_property_plant_and_equipment as capex,
             depreciation_depletion_and_amortization as dda,
-            (net_cash_from_operating_activities + purchase_of_property_plant_and_equipment) as free_cash_flow
+            (net_cash_from_operating_activities
+             + purchase_of_property_plant_and_equipment) as free_cash_flow
         FROM cash_flows
         WHERE ticker = %(ticker)s
             AND timeframe = %(timeframe)s
@@ -94,7 +95,7 @@ def get_fundamentals(
 
     # Get income statements
     income_statements_sql = """
-        SELECT 
+        SELECT
             period_end,
             filing_date,
             fiscal_year,
@@ -153,7 +154,7 @@ def get_balance_sheet(
     limit = min(limit, 20)
 
     sql = """
-        SELECT 
+        SELECT
             period_end,
             filing_date,
             fiscal_year,
@@ -210,7 +211,7 @@ def get_income_statement(
     limit = min(limit, 20)
 
     sql = """
-        SELECT 
+        SELECT
             period_end,
             filing_date,
             fiscal_year,

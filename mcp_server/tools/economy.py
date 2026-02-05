@@ -86,7 +86,7 @@ def _get_treasury_yields(
 ) -> list[dict[str, Any]]:
     """Get treasury yields data."""
     sql = """
-        SELECT 
+        SELECT
             date,
             yield_1_month,
             yield_3_month,
@@ -119,7 +119,7 @@ def _get_inflation(
 ) -> list[dict[str, Any]]:
     """Get inflation data."""
     sql = """
-        SELECT 
+        SELECT
             date,
             cpi,
             cpi_core,
@@ -149,7 +149,7 @@ def _get_inflation_expectations(
 ) -> list[dict[str, Any]]:
     """Get inflation expectations data."""
     sql = """
-        SELECT 
+        SELECT
             date,
             market_5_year,
             market_10_year,
@@ -177,7 +177,7 @@ def _get_labor_market(
 ) -> list[dict[str, Any]]:
     """Get labor market data."""
     sql = """
-        SELECT 
+        SELECT
             date,
             unemployment_rate,
             labor_force_participation_rate,
@@ -212,7 +212,7 @@ def get_economy_dashboard(limit: int = 10) -> list[dict[str, Any]]:
     limit = min(limit, 100)
 
     sql = """
-        SELECT 
+        SELECT
             date,
             yield_1_month,
             yield_3_month,
