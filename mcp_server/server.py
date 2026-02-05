@@ -56,9 +56,14 @@ from .tools.market_data import (
     get_stock_prices,
     get_stock_prices_async,
     get_technical_indicators,
+    list_technical_indicators,
     screen_by_technical_indicators,
 )
+from .tools.movers import get_top_movers, get_volume_leaders
 from .tools.scanner import scan_ytd_performance
+from .tools.schema import describe_database, describe_table
+from .tools.screener import screen_stocks
+from .tools.sectors import get_sector_performance, list_sectors
 
 # Setup logging
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
@@ -162,7 +167,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_latest_price",
-            description="Get the most recent closing price from the database (fast, always has latest data)",
+            description="Get the most recent closing price from the database (fast, always has latest data)",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -210,7 +215,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_financial_ratios",
-            description="Get time-series financial ratios (P/E, ROE, debt/equity, etc.) with visual chart",
+            description="Get time-series financial ratios (P/E, ROE, debt/equity, etc.) with visual chart",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -244,7 +249,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_fundamentals",
-            description="Get latest balance sheet, cash flow, and income statement data with visual charts",
+            description="Get latest balance sheet, cash flow, and income statement data with visual charts",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -276,7 +281,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_technical_indicators",
-            description="Get technical indicators (SMA, RSI, MACD, Bollinger Bands, etc.) for a ticker",
+            description="Get technical indicators (SMA, RSI, MACD, Bollinger Bands, etc.) for a ticker",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -420,17 +425,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="scan_ytd_performance",
-            description="Scan market indices (S&P 500, NASDAQ-100, or both) for YTD performance analysis with sector grouping",
+            description="Scan market indices (S&P 500, NASDAQ-100, or both) for YTD performance analysis with sector grouping",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
                     "start_date": {
                         "type": "string",
-                        "description": "Start date in YYYY-MM-DD format (default: Jan 1 current year)",
+                        "description": "Start date YYYY-MM-DD (default: Jan 1 current year)",
                     },
                     "large_cap_threshold": {
                         "type": "number",
-                        "description": "Market cap threshold in billions for Table B (default: 100)",
+                        "description": "Market cap threshold in billions (default: 100)",
                         "default": 100,
                     },
                     "top_n": {
@@ -461,6 +466,315 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["sql"],
+            },
+        ),
+        # Schema discovery tools
+        Tool(
+            name="describe_database",
+            description="List all tables with column counts, row counts, and descriptions",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="describe_table",
+            description="Get detailed table info: columns, types, samples, foreign keys, indexes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to describe",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        # Sector tools
+        Tool(
+            name="list_sectors",
+            description="List all sectors/industries with stock counts",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "taxonomy": {
+                        "type": "string",
+                        "description": "Classification system: 'sic' (SEC) or 'gics' (S&P)",
+                        "enum": ["sic", "gics"],
+                        "default": "sic",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 100)",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_sector_performance",
+            description="Get sector performance across multiple time periods (1d, 1w, 1m, YTD)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "taxonomy": {
+                        "type": "string",
+                        "description": "Classification system: 'sic' or 'gics' (default: gics)",
+                        "enum": ["sic", "gics"],
+                        "default": "gics",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum sectors (default: 50)",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                },
+            },
+        ),
+        # Market movers tools
+        Tool(
+            name="get_top_movers",
+            description="Get top gaining or losing stocks",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "description": "Direction: 'gainers', 'losers', or 'both'",
+                        "enum": ["gainers", "losers", "both"],
+                        "default": "both",
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Time period: '1d', '1w', '1m', or 'ytd'",
+                        "enum": ["1d", "1w", "1m", "ytd"],
+                        "default": "1d",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results per direction (default: 20)",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "sector": {
+                        "type": "string",
+                        "description": "Optional sector filter (partial match)",
+                    },
+                    "min_price": {
+                        "type": "number",
+                        "description": "Minimum stock price filter",
+                    },
+                    "min_volume": {
+                        "type": "integer",
+                        "description": "Minimum volume filter",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_volume_leaders",
+            description="Get stocks with highest trading volume",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "Metric: 'volume', 'dollar_volume', or 'volume_ratio'",
+                        "enum": ["volume", "dollar_volume", "volume_ratio"],
+                        "default": "dollar_volume",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results (default: 20)",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "sector": {
+                        "type": "string",
+                        "description": "Optional sector filter",
+                    },
+                    "min_price": {
+                        "type": "number",
+                        "description": "Minimum stock price filter",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="list_technical_indicators",
+            description="List available technical indicators with descriptions",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Category: 'trend', 'momentum', 'volatility', 'volume'",
+                        "enum": ["trend", "momentum", "volatility", "volume"],
+                    },
+                },
+            },
+        ),
+        # Flexible screener
+        Tool(
+            name="screen_stocks",
+            description="Multi-criteria screener with price, volume, and technical filters",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filters": {
+                        "type": "object",
+                        "description": "Filters: {name: [min, max]} (null = unbounded)",
+                        "properties": {
+                            "price": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Price range [min, max]",
+                            },
+                            "price_change_1d": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "1-day change % [min, max]",
+                            },
+                            "price_change_1w": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "1-week change % [min, max]",
+                            },
+                            "price_change_1m": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "1-month change % [min, max]",
+                            },
+                            "price_change_ytd": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "YTD change % [min, max]",
+                            },
+                            "market_cap": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Market cap [min, max]",
+                            },
+                            "volume": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Volume [min, max]",
+                            },
+                            "volume_ratio": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Volume ratio vs 20-day avg [min, max]",
+                            },
+                            "rsi_14": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "RSI-14 [min, max], e.g. [null, 30] for oversold",
+                            },
+                            "rsi_21": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "RSI-21 [min, max]",
+                            },
+                            "sma_50_distance_pct": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "% distance from SMA-50 [min, max]",
+                            },
+                            "sma_150_distance_pct": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "% distance from SMA-150 [min, max]",
+                            },
+                            "sma_200_distance_pct": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "% distance from SMA-200 [min, max]",
+                            },
+                            "macd_histogram": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "MACD histogram [min, max]",
+                            },
+                        },
+                        "additionalProperties": {
+                            "type": "array",
+                            "items": {"type": ["number", "null"]},
+                            "minItems": 2,
+                            "maxItems": 2,
+                        },
+                    },
+                    "sector": {
+                        "type": "string",
+                        "description": "Optional sector filter (partial match)",
+                    },
+                    "taxonomy": {
+                        "type": "string",
+                        "description": "Sector taxonomy: 'sic' or 'gics'",
+                        "enum": ["sic", "gics"],
+                        "default": "gics",
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "Column to sort by",
+                        "enum": [
+                            "market_cap",
+                            "price",
+                            "volume",
+                            "change_1d",
+                            "change_1w",
+                            "rsi_14",
+                        ],
+                        "default": "market_cap",
+                    },
+                    "sort_order": {
+                        "type": "string",
+                        "description": "Sort direction",
+                        "enum": ["asc", "desc"],
+                        "default": "desc",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 50, max: 500)",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 500,
+                    },
+                },
             },
         ),
     ]
@@ -673,6 +987,61 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             sql_query = arguments["sql"]
             log_execute_query(sql_query, arguments.get("params"))
             result = execute_query(sql_query)
+        # Schema discovery tools
+        elif name == "describe_database":
+            logger.info("  Executing: describe_database")
+            result = describe_database()
+        elif name == "describe_table":
+            logger.info("  Executing: describe_table")
+            result = describe_table(table_name=arguments["table_name"])
+        # Sector tools
+        elif name == "list_sectors":
+            logger.info("  Executing: list_sectors")
+            result = list_sectors(
+                taxonomy=arguments.get("taxonomy", "sic"),
+                limit=arguments.get("limit", 100),
+            )
+        elif name == "get_sector_performance":
+            logger.info("  Executing: get_sector_performance")
+            result = get_sector_performance(
+                taxonomy=arguments.get("taxonomy", "gics"),
+                limit=arguments.get("limit", 50),
+            )
+        # Market movers tools
+        elif name == "get_top_movers":
+            logger.info("  Executing: get_top_movers")
+            result = get_top_movers(
+                direction=arguments.get("direction", "both"),
+                period=arguments.get("period", "1d"),
+                limit=arguments.get("limit", 20),
+                sector=arguments.get("sector"),
+                min_price=arguments.get("min_price"),
+                min_volume=arguments.get("min_volume"),
+            )
+        elif name == "get_volume_leaders":
+            logger.info("  Executing: get_volume_leaders")
+            result = get_volume_leaders(
+                metric=arguments.get("metric", "dollar_volume"),
+                limit=arguments.get("limit", 20),
+                sector=arguments.get("sector"),
+                min_price=arguments.get("min_price"),
+            )
+        elif name == "list_technical_indicators":
+            logger.info("  Executing: list_technical_indicators")
+            result = list_technical_indicators(
+                category=arguments.get("category"),
+            )
+        # Flexible screener
+        elif name == "screen_stocks":
+            logger.info("  Executing: screen_stocks")
+            result = screen_stocks(
+                filters=arguments.get("filters", {}),
+                sector=arguments.get("sector"),
+                taxonomy=arguments.get("taxonomy", "gics"),
+                sort_by=arguments.get("sort_by", "market_cap"),
+                sort_order=arguments.get("sort_order", "desc"),
+                limit=arguments.get("limit", 50),
+            )
         else:
             raise ValueError(f"Unknown tool: {name}")
 

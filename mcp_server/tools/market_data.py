@@ -354,9 +354,14 @@ def screen_by_technical_indicators(
         "sma_10",
         "sma_20",
         "sma_50",
+        "sma_100",
+        "sma_150",
+        "sma_200",
         "ema_12",
         "ema_26",
         "ema_50",
+        "ema_100",
+        "ema_200",
         "vwap",
         "rsi_14",
         "rsi_21",
@@ -444,3 +449,64 @@ def get_indicator_metadata() -> list[dict[str, Any]]:
     """
 
     return execute_query(sql)
+
+
+def list_technical_indicators(
+    category: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    List available technical indicators with descriptions.
+
+    Args:
+        category: Optional filter by category:
+            - "trend": Moving averages (SMA, EMA, VWAP)
+            - "momentum": RSI, MACD
+            - "volatility": Bollinger Bands, ATR
+            - "volume": OBV, volume ratios
+
+    Returns:
+        List of indicator info dicts with:
+        - name: Indicator name (e.g., "sma_50", "rsi_14")
+        - display_name: Human-readable name
+        - category: Category (trend/momentum/volatility/volume)
+        - description: What the indicator measures
+        - min_periods: Days of data required to calculate
+        - is_bounded: Whether indicator has fixed range (e.g., RSI 0-100)
+        - bounds: [min, max] if bounded, null otherwise
+        - unit: Value unit (dollars/percent/ratio/count)
+    """
+    if category:
+        sql = """
+            SELECT
+                indicator_name as name,
+                display_name,
+                category,
+                description,
+                min_periods_required as min_periods,
+                is_bounded,
+                CASE WHEN is_bounded
+                     THEN jsonb_build_array(validation_min, validation_max)
+                     ELSE NULL END as bounds,
+                unit
+            FROM technical_indicator_metadata
+            WHERE category = %(category)s
+            ORDER BY sort_order
+        """
+        return execute_query(sql, {"category": category})
+    else:
+        sql = """
+            SELECT
+                indicator_name as name,
+                display_name,
+                category,
+                description,
+                min_periods_required as min_periods,
+                is_bounded,
+                CASE WHEN is_bounded
+                     THEN jsonb_build_array(validation_min, validation_max)
+                     ELSE NULL END as bounds,
+                unit
+            FROM technical_indicator_metadata
+            ORDER BY sort_order
+        """
+        return execute_query(sql)
