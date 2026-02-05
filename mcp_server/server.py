@@ -59,7 +59,7 @@ from .tools.market_data import (
     list_technical_indicators,
     screen_by_technical_indicators,
 )
-from .tools.movers import get_top_movers, get_volume_leaders
+from .tools.movers import get_market_breadth, get_top_movers, get_volume_leaders
 from .tools.scanner import scan_ytd_performance
 from .tools.schema import describe_database, describe_table
 from .tools.screener import screen_stocks
@@ -608,6 +608,25 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_market_breadth",
+            description="Get market breadth: advancers, decliners, unchanged, A/D ratio",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Date YYYY-MM-DD (default: latest trading day)",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index: sp500, nasdaq100, or all",
+                        "enum": ["sp500", "nasdaq100", "all"],
+                        "default": "all",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="list_technical_indicators",
             description="List available technical indicators with descriptions",
             inputSchema={
@@ -1025,6 +1044,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=arguments.get("limit", 20),
                 sector=arguments.get("sector"),
                 min_price=arguments.get("min_price"),
+            )
+        elif name == "get_market_breadth":
+            logger.info("  Executing: get_market_breadth")
+            result = get_market_breadth(
+                date=arguments.get("date"),
+                index=arguments.get("index", "all"),
             )
         elif name == "list_technical_indicators":
             logger.info("  Executing: list_technical_indicators")
