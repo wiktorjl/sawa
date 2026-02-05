@@ -361,3 +361,26 @@ class MarketSentiment:
     source: str
     bullish_count: int = 0
     bearish_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MarketIndex:
+    """Market index definition.
+
+    Attributes:
+        id: Database ID
+        code: Short code (e.g., 'sp500', 'nasdaq100')
+        name: Full name (e.g., 'S&P 500', 'NASDAQ-100')
+        description: Index description
+        source_url: URL for constituent data source
+        last_updated: When constituents were last updated
+        constituent_count: Number of stocks in the index
+    """
+
+    id: int
+    code: str
+    name: str
+    description: str | None = None
+    source_url: str | None = None
+    last_updated: datetime | None = None
+    constituent_count: int = 0
