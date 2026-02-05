@@ -13,22 +13,27 @@ from decimal import Decimal
 class TechnicalIndicators:
     """Technical indicators for a ticker on a date.
 
-    All 20 core indicators calculated daily from OHLCV data using ta-lib.
+    All 25 core indicators calculated daily from OHLCV data using ta-lib.
     Optional types used - indicators are NULL when insufficient historical data
-    (e.g., SMA-50 requires 50 days of history).
+    (e.g., SMA-200 requires 200 days of history).
 
     Attributes:
         ticker: Stock symbol (normalized to uppercase)
         date: Trading date
 
-        # Trend (8 indicators)
+        # Trend (13 indicators)
         sma_5: 5-day Simple Moving Average
         sma_10: 10-day Simple Moving Average
         sma_20: 20-day Simple Moving Average
         sma_50: 50-day Simple Moving Average
+        sma_100: 100-day Simple Moving Average
+        sma_150: 150-day Simple Moving Average (6-month trend)
+        sma_200: 200-day Simple Moving Average (long-term trend)
         ema_12: 12-day Exponential Moving Average
         ema_26: 26-day Exponential Moving Average
         ema_50: 50-day Exponential Moving Average
+        ema_100: 100-day Exponential Moving Average
+        ema_200: 200-day Exponential Moving Average (long-term trend)
         vwap: Volume Weighted Average Price (cumulative)
 
         # Momentum (5 indicators)
@@ -53,14 +58,19 @@ class TechnicalIndicators:
     ticker: str
     date: date
 
-    # Trend (8 indicators)
+    # Trend (13 indicators)
     sma_5: Decimal | None = None
     sma_10: Decimal | None = None
     sma_20: Decimal | None = None
     sma_50: Decimal | None = None
+    sma_100: Decimal | None = None
+    sma_150: Decimal | None = None
+    sma_200: Decimal | None = None
     ema_12: Decimal | None = None
     ema_26: Decimal | None = None
     ema_50: Decimal | None = None
+    ema_100: Decimal | None = None
+    ema_200: Decimal | None = None
     vwap: Decimal | None = None
 
     # Momentum (5 indicators)
@@ -96,9 +106,14 @@ class TechnicalIndicators:
             "sma_10",
             "sma_20",
             "sma_50",
+            "sma_100",
+            "sma_150",
+            "sma_200",
             "ema_12",
             "ema_26",
             "ema_50",
+            "ema_100",
+            "ema_200",
             "vwap",
             # Momentum
             "rsi_14",
@@ -127,9 +142,14 @@ class TechnicalIndicators:
             self.sma_10,
             self.sma_20,
             self.sma_50,
+            self.sma_100,
+            self.sma_150,
+            self.sma_200,
             self.ema_12,
             self.ema_26,
             self.ema_50,
+            self.ema_100,
+            self.ema_200,
             self.vwap,
             # Momentum
             self.rsi_14,

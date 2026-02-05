@@ -170,7 +170,7 @@ class TestTechnicalIndicatorsModel:
         assert "sma_5" in columns
         assert "rsi_14" in columns
         assert "obv" in columns
-        assert len(columns) == 22  # 2 keys + 20 indicators
+        assert len(columns) == 27  # 2 keys + 25 indicators
 
     def test_to_tuple_order(self):
         """to_tuple() should return values in column order."""

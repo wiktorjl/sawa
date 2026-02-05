@@ -214,14 +214,20 @@ def technical_indicators_to_dict(ind: TechnicalIndicators) -> dict[str, Any]:
     return {
         "ticker": ind.ticker,
         "date": ind.date,
-        # Trend (8 indicators)
+        # Trend - SMAs (7 indicators)
         "sma_5": _decimal_to_float(ind.sma_5),
         "sma_10": _decimal_to_float(ind.sma_10),
         "sma_20": _decimal_to_float(ind.sma_20),
         "sma_50": _decimal_to_float(ind.sma_50),
+        "sma_100": _decimal_to_float(ind.sma_100),
+        "sma_150": _decimal_to_float(ind.sma_150),
+        "sma_200": _decimal_to_float(ind.sma_200),
+        # Trend - EMAs (5 indicators)
         "ema_12": _decimal_to_float(ind.ema_12),
         "ema_26": _decimal_to_float(ind.ema_26),
         "ema_50": _decimal_to_float(ind.ema_50),
+        "ema_100": _decimal_to_float(ind.ema_100),
+        "ema_200": _decimal_to_float(ind.ema_200),
         "vwap": _decimal_to_float(ind.vwap),
         # Momentum (5 indicators)
         "rsi_14": _decimal_to_float(ind.rsi_14),
