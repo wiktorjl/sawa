@@ -71,11 +71,11 @@ def load_dividends(
             cash_amount, declaration_date, dividend_type, frequency
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ticker, ex_dividend_date, COALESCE(cash_amount, 0)) DO UPDATE SET
+        ON CONFLICT (ticker, ex_dividend_date, dividend_type) DO UPDATE SET
             record_date = EXCLUDED.record_date,
             pay_date = EXCLUDED.pay_date,
+            cash_amount = EXCLUDED.cash_amount,
             declaration_date = EXCLUDED.declaration_date,
-            dividend_type = EXCLUDED.dividend_type,
             frequency = EXCLUDED.frequency
     """
 
