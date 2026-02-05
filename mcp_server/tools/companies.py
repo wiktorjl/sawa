@@ -41,6 +41,7 @@ def list_companies(
     limit: int = 100,
     offset: int = 0,
     sector: str | None = None,
+    index: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     List companies with optional filtering.
@@ -49,45 +50,51 @@ def list_companies(
         limit: Maximum number of results (default: 100, max: 1000)
         offset: Number of results to skip
         sector: Filter by SIC description (partial match)
+        index: Filter by index membership (sp500, nasdaq100)
 
     Returns:
-        List of company records
+        List of company records with indices array
     """
     limit = min(limit, 1000)
 
+    # Build WHERE clauses
+    where_clauses = ["c.active = TRUE"]
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+
     if sector:
-        sql = """
-            SELECT
-                ticker,
-                name,
-                market_cap,
-                sic_description as sector,
-                primary_exchange as exchange
-            FROM companies
-            WHERE active = TRUE
-                AND sic_description ILIKE %(sector)s
-            ORDER BY market_cap DESC NULLS LAST
-            LIMIT %(limit)s OFFSET %(offset)s
-        """
-        params = {
-            "sector": f"%{sector}%",
-            "limit": limit,
-            "offset": offset,
-        }
-    else:
-        sql = """
-            SELECT
-                ticker,
-                name,
-                market_cap,
-                sic_description as sector,
-                primary_exchange as exchange
-            FROM companies
-            WHERE active = TRUE
-            ORDER BY market_cap DESC NULLS LAST
-            LIMIT %(limit)s OFFSET %(offset)s
-        """
-        params = {"limit": limit, "offset": offset}
+        where_clauses.append("c.sic_description ILIKE %(sector)s")
+        params["sector"] = f"%{sector}%"
+
+    if index:
+        where_clauses.append("""
+            c.ticker IN (
+                SELECT ic.ticker FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE i.code = %(index)s
+            )
+        """)
+        params["index"] = index.lower()
+
+    where_sql = " AND ".join(where_clauses)
+
+    sql = f"""
+        SELECT
+            c.ticker,
+            c.name,
+            c.market_cap,
+            c.sic_description as sector,
+            c.primary_exchange as exchange,
+            ARRAY(
+                SELECT i.code FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE ic.ticker = c.ticker
+                ORDER BY i.code
+            ) as indices
+        FROM companies c
+        WHERE {where_sql}
+        ORDER BY c.market_cap DESC NULLS LAST
+        LIMIT %(limit)s OFFSET %(offset)s
+    """
 
     return execute_query(sql, params)
 
@@ -100,7 +107,7 @@ def get_company_details(ticker: str) -> dict[str, Any] | None:
         ticker: Stock ticker symbol (e.g., "AAPL")
 
     Returns:
-        Company details or None if not found
+        Company details with indices array, or None if not found
     """
     sql = """
         SELECT
@@ -121,7 +128,13 @@ def get_company_details(ticker: str) -> dict[str, Any] | None:
             fr.debt_to_equity,
             fr.return_on_equity as roe,
             fr.dividend_yield,
-            fr.market_cap as latest_market_cap
+            fr.market_cap as latest_market_cap,
+            ARRAY(
+                SELECT i.code FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE ic.ticker = c.ticker
+                ORDER BY i.code
+            ) as indices
         FROM companies c
         LEFT JOIN LATERAL (
             SELECT close, date
@@ -148,6 +161,7 @@ def get_company_details(ticker: str) -> dict[str, Any] | None:
 def search_companies(
     query: str,
     limit: int = 20,
+    index: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Search companies by name or ticker.
@@ -155,41 +169,60 @@ def search_companies(
     Args:
         query: Search term
         limit: Maximum results (default: 20, max: 100)
+        index: Filter by index membership (sp500, nasdaq100)
 
     Returns:
-        List of matching companies
+        List of matching companies with indices array
     """
     limit = min(limit, 100)
     search_term = f"%{query}%"
 
-    sql = """
-        SELECT
-            ticker,
-            name,
-            market_cap,
-            sic_description as sector
-        FROM companies
-        WHERE active = TRUE
-            AND (
-                ticker ILIKE %(query)s
-                OR name ILIKE %(query)s
-                OR sic_description ILIKE %(query)s
-            )
-        ORDER BY
-            CASE
-                WHEN ticker ILIKE %(exact)s THEN 1
-                WHEN name ILIKE %(exact)s THEN 2
-                WHEN ticker ILIKE %(query)s THEN 3
-                ELSE 4
-            END,
-            market_cap DESC NULLS LAST
-        LIMIT %(limit)s
-    """
-
-    params = {
+    # Build WHERE clauses
+    where_clauses = [
+        "c.active = TRUE",
+        "(c.ticker ILIKE %(query)s OR c.name ILIKE %(query)s OR c.sic_description ILIKE %(query)s)",
+    ]
+    params: dict[str, Any] = {
         "query": search_term,
         "exact": query,
         "limit": limit,
     }
+
+    if index:
+        where_clauses.append("""
+            c.ticker IN (
+                SELECT ic.ticker FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE i.code = %(index)s
+            )
+        """)
+        params["index"] = index.lower()
+
+    where_sql = " AND ".join(where_clauses)
+
+    sql = f"""
+        SELECT
+            c.ticker,
+            c.name,
+            c.market_cap,
+            c.sic_description as sector,
+            ARRAY(
+                SELECT i.code FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE ic.ticker = c.ticker
+                ORDER BY i.code
+            ) as indices
+        FROM companies c
+        WHERE {where_sql}
+        ORDER BY
+            CASE
+                WHEN c.ticker ILIKE %(exact)s THEN 1
+                WHEN c.name ILIKE %(exact)s THEN 2
+                WHEN c.ticker ILIKE %(query)s THEN 3
+                ELSE 4
+            END,
+            c.market_cap DESC NULLS LAST
+        LIMIT %(limit)s
+    """
 
     return execute_query(sql, params)

@@ -70,6 +70,7 @@ VALID_FILTERS = {
 def screen_stocks(
     filters: dict[str, list[float | None]],
     sector: str | None = None,
+    index: str | None = None,
     taxonomy: Literal["sic", "gics"] = "gics",
     sort_by: str = "market_cap",
     sort_order: Literal["asc", "desc"] = "desc",
@@ -94,6 +95,7 @@ def screen_stocks(
                  - Volatility: bb_upper/middle/lower, atr_14
 
         sector: Optional sector filter (partial match on SIC or GICS)
+        index: Filter by index membership (sp500, nasdaq100)
         taxonomy: Sector taxonomy - "sic" or "gics" (default: gics)
         sort_by: Column to sort by (default: market_cap)
         sort_order: Sort direction - "asc" or "desc" (default: desc)
@@ -101,7 +103,7 @@ def screen_stocks(
 
     Returns:
         List of matching stocks with:
-        - ticker, name, sector, price, market_cap
+        - ticker, name, sector, indices, price, market_cap
         - change_1d, change_1w, change_1m, change_ytd
         - volume, dollar_volume, volume_ratio
         - Key technical indicators based on filters used
@@ -124,6 +126,16 @@ def screen_stocks(
     if sector:
         sector_filter = f"AND {sector_expr} ILIKE %(sector)s"
         params["sector"] = f"%{sector}%"
+
+    # Index filter
+    index_filter = ""
+    if index:
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )"""
+        params["index"] = index.lower()
 
     # Build filter conditions
     where_conditions = []
@@ -258,7 +270,14 @@ def screen_stocks(
                      ELSE NULL END as sma_150_distance_pct,
                 CASE WHEN ti.sma_200 > 0
                      THEN ROUND(((p.close - ti.sma_200) / ti.sma_200 * 100)::numeric, 2)
-                     ELSE NULL END as sma_200_distance_pct
+                     ELSE NULL END as sma_200_distance_pct,
+                -- Index membership
+                ARRAY(
+                    SELECT i.code FROM index_constituents ic
+                    JOIN indices i ON ic.index_id = i.id
+                    WHERE ic.ticker = c.ticker
+                    ORDER BY i.code
+                ) as indices
             FROM companies c
             {sector_join}
             CROSS JOIN date_refs dr
@@ -274,11 +293,13 @@ def screen_stocks(
             LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = dr.latest
             WHERE c.active = true
             {sector_filter}
+            {index_filter}
         )
         SELECT
             ticker,
             name,
             sector,
+            indices,
             market_cap,
             price,
             volume,
@@ -494,6 +515,7 @@ def get_daily_range_leaders(
     min_range_pct: float = 3.0,
     max_range_pct: float | None = None,
     sector: str | None = None,
+    index: str | None = None,
     min_price: float | None = None,
     min_volume: int | None = None,
     limit: int = 50,
@@ -507,13 +529,14 @@ def get_daily_range_leaders(
         min_range_pct: Minimum daily range % (default: 3%)
         max_range_pct: Maximum daily range % (optional)
         sector: Optional sector filter
+        index: Filter by index membership (sp500, nasdaq100)
         min_price: Minimum stock price filter
         min_volume: Minimum volume filter
         limit: Maximum results (default: 50, max: 200)
 
     Returns:
         List of stocks with:
-        - ticker, name, sector, price, volume
+        - ticker, name, sector, indices, price, volume
         - high, low, daily_range_pct, change_1d
     """
     limit = min(limit, 200)
@@ -540,6 +563,16 @@ def get_daily_range_leaders(
 
     where_clause = " AND ".join(filters) if filters else "1=1"
 
+    # Index filter (applied in the CTE)
+    index_filter = ""
+    if index:
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )"""
+        params["index"] = index.lower()
+
     sql = f"""
         WITH latest_date AS (
             SELECT MAX(date) as dt FROM stock_prices
@@ -563,15 +596,24 @@ def get_daily_range_leaders(
                     as daily_range_pct,
                 CASE WHEN p_prev.close > 0
                      THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
-                     ELSE NULL END as change_1d
+                     ELSE NULL END as change_1d,
+                ARRAY(
+                    SELECT i.code FROM index_constituents ic
+                    JOIN indices i ON ic.index_id = i.id
+                    WHERE ic.ticker = c.ticker
+                    ORDER BY i.code
+                ) as indices
             FROM companies c
             CROSS JOIN latest_date ld
             CROSS JOIN prev_date pd
             JOIN stock_prices p ON c.ticker = p.ticker AND p.date = ld.dt
             LEFT JOIN stock_prices p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
             WHERE c.active = true
+            {index_filter}
         )
-        SELECT *
+        SELECT
+            ticker, name, sector, indices, market_cap, open, high, low, price,
+            volume, daily_range_pct, change_1d
         FROM stock_data
         WHERE daily_range_pct >= %(min_range)s
           AND {where_clause}

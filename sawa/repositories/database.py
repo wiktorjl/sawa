@@ -1111,6 +1111,7 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         self,
         filters: dict[str, tuple[float | None, float | None]],
         target_date: date | None = None,
+        index: str | None = None,
         limit: int = 100,
     ) -> list[TechnicalIndicators]:
         """Screen stocks by technical indicator values.
@@ -1118,18 +1119,22 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         Args:
             filters: Dict mapping indicator name to (min, max) tuple.
             target_date: Date to screen (defaults to most recent)
+            index: Filter by index membership (sp500, nasdaq100)
             limit: Maximum number of results
 
         Returns:
             List of TechnicalIndicators matching all filters
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._screen_sync, filters, target_date, limit)
+        return await loop.run_in_executor(
+            None, self._screen_sync, filters, target_date, index, limit
+        )
 
     def _screen_sync(
         self,
         filters: dict[str, tuple[float | None, float | None]],
         target_date: date | None,
+        index: str | None,
         limit: int,
     ) -> list[TechnicalIndicators]:
         """Synchronous implementation of screen_by_indicators."""
@@ -1145,6 +1150,15 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         else:
             # Use most recent date
             conditions.append("date = (SELECT MAX(date) FROM technical_indicators)")
+
+        # Index filter
+        if index:
+            conditions.append("""ticker IN (
+                SELECT ic.ticker FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE i.code = %s
+            )""")
+            params.append(index.lower())
 
         # Add filter conditions
         for indicator, (min_val, max_val) in filters.items():

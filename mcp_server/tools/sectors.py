@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 def list_sectors(
     taxonomy: Literal["sic", "gics"] = "sic",
+    index: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """
@@ -21,6 +22,7 @@ def list_sectors(
 
     Args:
         taxonomy: Classification system - "sic" (SEC) or "gics" (S&P Global)
+        index: Filter by index membership (sp500, nasdaq100)
         limit: Maximum results (default: 100)
 
     Returns:
@@ -33,8 +35,19 @@ def list_sectors(
     """
     limit = min(limit, 500)
 
+    # Build index filter
+    params: dict[str, Any] = {"limit": limit}
+    index_filter = ""
+    if index:
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )"""
+        params["index"] = index.lower()
+
     if taxonomy == "gics":
-        sql = """
+        sql = f"""
             SELECT
                 COALESCE(m.gics_sector, 'Unclassified') as sector,
                 COUNT(DISTINCT c.ticker) as stock_count,
@@ -43,12 +56,13 @@ def list_sectors(
             FROM companies c
             LEFT JOIN sic_gics_mapping m ON c.sic_code = m.sic_code
             WHERE c.active = true
+            {index_filter}
             GROUP BY COALESCE(m.gics_sector, 'Unclassified')
             ORDER BY stock_count DESC
             LIMIT %(limit)s
         """
     else:  # SIC
-        sql = """
+        sql = f"""
             SELECT
                 c.sic_code,
                 c.sic_description as sector,
@@ -57,16 +71,18 @@ def list_sectors(
             FROM companies c
             WHERE c.active = true
               AND c.sic_description IS NOT NULL
+            {index_filter}
             GROUP BY c.sic_code, c.sic_description
             ORDER BY stock_count DESC, c.sic_description
             LIMIT %(limit)s
         """
 
-    return execute_query(sql, {"limit": limit})
+    return execute_query(sql, params)
 
 
 def get_sector_performance(
     taxonomy: Literal["sic", "gics"] = "gics",
+    index: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """
@@ -74,6 +90,7 @@ def get_sector_performance(
 
     Args:
         taxonomy: Classification system - "sic" or "gics" (default: gics)
+        index: Filter by index membership (sp500, nasdaq100)
         limit: Maximum sectors to return (default: 50)
 
     Returns:
@@ -98,6 +115,17 @@ def get_sector_performance(
     else:
         sector_expr = "c.sic_description"
         join_clause = ""
+
+    # Build index filter
+    params: dict[str, Any] = {"limit": limit}
+    index_filter = ""
+    if index:
+        index_filter = """AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )"""
+        params["index"] = index.lower()
 
     sql = f"""
         WITH date_refs AS (
@@ -141,6 +169,7 @@ def get_sector_performance(
                 ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
             WHERE c.active = true
               AND {sector_expr} IS NOT NULL
+            {index_filter}
         ),
         sector_stats AS (
             SELECT
@@ -184,4 +213,4 @@ def get_sector_performance(
         LIMIT %(limit)s
     """
 
-    return execute_query(sql, {"limit": limit})
+    return execute_query(sql, params)

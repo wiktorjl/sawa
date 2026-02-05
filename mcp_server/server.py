@@ -112,6 +112,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Filter by sector/SIC description (partial match)",
                     },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
+                    },
                 },
             },
         ),
@@ -145,6 +150,11 @@ async def list_tools() -> list[Tool]:
                         "default": 20,
                         "minimum": 1,
                         "maximum": 100,
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
                     },
                 },
                 "required": ["query"],
@@ -358,6 +368,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Date to screen (defaults to most recent)",
                     },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (default: 100, max: 500)",
@@ -510,6 +525,11 @@ async def list_tools() -> list[Tool]:
                         "enum": ["sic", "gics"],
                         "default": "sic",
                     },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (default: 100)",
@@ -531,6 +551,11 @@ async def list_tools() -> list[Tool]:
                         "description": "Classification system: 'sic' or 'gics' (default: gics)",
                         "enum": ["sic", "gics"],
                         "default": "gics",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
                     },
                     "limit": {
                         "type": "integer",
@@ -572,6 +597,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector filter (partial match)",
                     },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
+                    },
                     "min_price": {
                         "type": "number",
                         "description": "Minimum stock price filter",
@@ -605,6 +635,11 @@ async def list_tools() -> list[Tool]:
                     "sector": {
                         "type": "string",
                         "description": "Optional sector filter",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
                     },
                     "min_price": {
                         "type": "number",
@@ -767,6 +802,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector filter (partial match)",
                     },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
+                    },
                     "taxonomy": {
                         "type": "string",
                         "description": "Sector taxonomy: 'sic' or 'gics'",
@@ -859,6 +899,11 @@ async def list_tools() -> list[Tool]:
                     "sector": {
                         "type": "string",
                         "description": "Optional sector filter",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq100)",
+                        "enum": ["sp500", "nasdaq100"],
                     },
                     "min_price": {
                         "type": "number",
@@ -979,6 +1024,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=arguments.get("limit", 100),
                 offset=arguments.get("offset", 0),
                 sector=arguments.get("sector"),
+                index=arguments.get("index"),
             )
         elif name == "get_company_details":
             logger.info("  Executing: get_company_details")
@@ -999,6 +1045,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = search_companies(
                     query=arguments["query"],
                     limit=arguments.get("limit", 20),
+                    index=arguments.get("index"),
                 )
         elif name == "get_live_price":
             logger.info("  Executing: get_live_price")
@@ -1102,6 +1149,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = screen_by_technical_indicators(
                 filters=filters,
                 target_date=arguments.get("target_date"),
+                index=arguments.get("index"),
                 limit=arguments.get("limit", 100),
             )
         elif name == "get_economy_data":
@@ -1158,12 +1206,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             logger.info("  Executing: list_sectors")
             result = list_sectors(
                 taxonomy=arguments.get("taxonomy", "sic"),
+                index=arguments.get("index"),
                 limit=arguments.get("limit", 100),
             )
         elif name == "get_sector_performance":
             logger.info("  Executing: get_sector_performance")
             result = get_sector_performance(
                 taxonomy=arguments.get("taxonomy", "gics"),
+                index=arguments.get("index"),
                 limit=arguments.get("limit", 50),
             )
         # Market movers tools
@@ -1174,6 +1224,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 period=arguments.get("period", "1d"),
                 limit=arguments.get("limit", 20),
                 sector=arguments.get("sector"),
+                index=arguments.get("index"),
                 min_price=arguments.get("min_price"),
                 min_volume=arguments.get("min_volume"),
             )
@@ -1183,6 +1234,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 metric=arguments.get("metric", "dollar_volume"),
                 limit=arguments.get("limit", 20),
                 sector=arguments.get("sector"),
+                index=arguments.get("index"),
                 min_price=arguments.get("min_price"),
             )
         elif name == "get_market_breadth":
@@ -1202,6 +1254,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = screen_stocks(
                 filters=arguments.get("filters", {}),
                 sector=arguments.get("sector"),
+                index=arguments.get("index"),
                 taxonomy=arguments.get("taxonomy", "gics"),
                 sort_by=arguments.get("sort_by", "market_cap"),
                 sort_order=arguments.get("sort_order", "desc"),
@@ -1224,6 +1277,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 min_range_pct=arguments.get("min_range_pct", 3.0),
                 max_range_pct=arguments.get("max_range_pct"),
                 sector=arguments.get("sector"),
+                index=arguments.get("index"),
                 min_price=arguments.get("min_price"),
                 min_volume=arguments.get("min_volume"),
                 limit=arguments.get("limit", 50),

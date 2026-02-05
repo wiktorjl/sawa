@@ -331,6 +331,7 @@ def get_latest_technical_indicators(ticker: str) -> dict[str, Any] | None:
 def screen_by_technical_indicators(
     filters: dict[str, tuple[float | None, float | None]],
     target_date: str | None = None,
+    index: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """
@@ -341,10 +342,11 @@ def screen_by_technical_indicators(
                  Use None for unbounded side.
                  Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
         target_date: Date to screen (defaults to most recent)
+        index: Filter by index membership (sp500, nasdaq100)
         limit: Maximum results (default: 100, max: 500)
 
     Returns:
-        List of tickers matching all filters with their indicator values
+        List of tickers matching all filters with their indicator values and indices
     """
     limit = min(limit, 500)
 
@@ -382,11 +384,20 @@ def screen_by_technical_indicators(
     params: dict[str, Any] = {"limit": limit}
 
     if target_date:
-        conditions.append("date = %(target_date)s")
+        conditions.append("ti.date = %(target_date)s")
         params["target_date"] = target_date
     else:
         # Use most recent date
-        conditions.append("date = (SELECT MAX(date) FROM technical_indicators)")
+        conditions.append("ti.date = (SELECT MAX(date) FROM technical_indicators)")
+
+    # Index filter
+    if index:
+        conditions.append("""ti.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )""")
+        params["index"] = index.lower()
 
     # Add filter conditions
     for i, (indicator, (min_val, max_val)) in enumerate(filters.items()):
@@ -394,31 +405,37 @@ def screen_by_technical_indicators(
             continue
 
         if min_val is not None and max_val is not None:
-            conditions.append(f"{indicator} BETWEEN %(min_{i})s AND %(max_{i})s")
+            conditions.append(f"ti.{indicator} BETWEEN %(min_{i})s AND %(max_{i})s")
             params[f"min_{i}"] = min_val
             params[f"max_{i}"] = max_val
         elif min_val is not None:
-            conditions.append(f"{indicator} >= %(min_{i})s")
+            conditions.append(f"ti.{indicator} >= %(min_{i})s")
             params[f"min_{i}"] = min_val
         elif max_val is not None:
-            conditions.append(f"{indicator} <= %(max_{i})s")
+            conditions.append(f"ti.{indicator} <= %(max_{i})s")
             params[f"max_{i}"] = max_val
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
 
     sql = f"""
         SELECT
-            ticker,
-            date,
-            rsi_14, rsi_21,
-            macd_line, macd_histogram,
-            sma_20, sma_50,
-            bb_upper, bb_lower,
-            atr_14,
-            volume_ratio
-        FROM technical_indicators
+            ti.ticker,
+            ti.date,
+            ti.rsi_14, ti.rsi_21,
+            ti.macd_line, ti.macd_histogram,
+            ti.sma_20, ti.sma_50,
+            ti.bb_upper, ti.bb_lower,
+            ti.atr_14,
+            ti.volume_ratio,
+            ARRAY(
+                SELECT i.code FROM index_constituents ic
+                JOIN indices i ON ic.index_id = i.id
+                WHERE ic.ticker = ti.ticker
+                ORDER BY i.code
+            ) as indices
+        FROM technical_indicators ti
         WHERE {where_clause}
-        ORDER BY ticker
+        ORDER BY ti.ticker
         LIMIT %(limit)s
     """
 

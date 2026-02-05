@@ -69,6 +69,7 @@ def get_indicators_history(
 def screen_indicators(
     filters: dict[str, tuple[float | None, float | None]],
     target_date: date | None = None,
+    index: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Screen stocks by technical indicator values.
@@ -76,6 +77,7 @@ def screen_indicators(
     Args:
         filters: Dict mapping indicator name to (min, max) tuple.
         target_date: Date to screen (defaults to most recent)
+        index: Filter by index membership (sp500, nasdaq100)
         limit: Maximum results
 
     Returns:
@@ -85,7 +87,7 @@ def screen_indicators(
     repo = factory.get_technical_indicators_repository()
 
     async def _fetch():
-        return await repo.screen_by_indicators(filters, target_date, limit)
+        return await repo.screen_by_indicators(filters, target_date, index, limit)
 
     results = asyncio.get_event_loop().run_until_complete(_fetch())
     return [_indicators_to_dict(r) for r in results]
