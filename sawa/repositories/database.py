@@ -976,9 +976,14 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         "sma_10",
         "sma_20",
         "sma_50",
+        "sma_100",
+        "sma_150",
+        "sma_200",
         "ema_12",
         "ema_26",
         "ema_50",
+        "ema_100",
+        "ema_200",
         "vwap",
         "rsi_14",
         "rsi_21",
@@ -1040,14 +1045,20 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         return TechnicalIndicators(
             ticker=row["ticker"],
             date=row["date"],
-            # Trend
+            # Trend - SMAs
             sma_5=_to_decimal(row.get("sma_5")),
             sma_10=_to_decimal(row.get("sma_10")),
             sma_20=_to_decimal(row.get("sma_20")),
             sma_50=_to_decimal(row.get("sma_50")),
+            sma_100=_to_decimal(row.get("sma_100")),
+            sma_150=_to_decimal(row.get("sma_150")),
+            sma_200=_to_decimal(row.get("sma_200")),
+            # Trend - EMAs
             ema_12=_to_decimal(row.get("ema_12")),
             ema_26=_to_decimal(row.get("ema_26")),
             ema_50=_to_decimal(row.get("ema_50")),
+            ema_100=_to_decimal(row.get("ema_100")),
+            ema_200=_to_decimal(row.get("ema_200")),
             vwap=_to_decimal(row.get("vwap")),
             # Momentum
             rsi_14=_to_decimal(row.get("rsi_14")),

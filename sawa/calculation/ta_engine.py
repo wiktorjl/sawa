@@ -36,9 +36,14 @@ MIN_PERIODS: dict[str, int] = {
     "sma_10": 10,
     "sma_20": 20,
     "sma_50": 50,
+    "sma_100": 100,
+    "sma_150": 150,
+    "sma_200": 200,
     "ema_12": 12,
     "ema_26": 26,
     "ema_50": 50,
+    "ema_100": 100,
+    "ema_200": 200,
     "vwap": 1,
     "rsi_14": 14,
     "rsi_21": 21,
@@ -142,7 +147,7 @@ def calculate_indicators_for_ticker(
     prices: list[dict[str, Any]],
     log: logging.Logger | None = None,
 ) -> list[TechnicalIndicators]:
-    """Calculate all 20 technical indicators for one ticker.
+    """Calculate all 25 technical indicators for one ticker.
 
     Args:
         ticker: Stock symbol
@@ -174,14 +179,20 @@ def calculate_indicators_for_ticker(
     volumes = np.array([float(p["volume"]) for p in prices], dtype=np.float64)
 
     # Calculate all indicators
-    # Trend
+    # Trend - SMAs
     sma_5 = talib.SMA(close_prices, timeperiod=5)
     sma_10 = talib.SMA(close_prices, timeperiod=10)
     sma_20 = talib.SMA(close_prices, timeperiod=20)
     sma_50 = talib.SMA(close_prices, timeperiod=50)
+    sma_100 = talib.SMA(close_prices, timeperiod=100)
+    sma_150 = talib.SMA(close_prices, timeperiod=150)
+    sma_200 = talib.SMA(close_prices, timeperiod=200)
+    # Trend - EMAs
     ema_12 = talib.EMA(close_prices, timeperiod=12)
     ema_26 = talib.EMA(close_prices, timeperiod=26)
     ema_50 = talib.EMA(close_prices, timeperiod=50)
+    ema_100 = talib.EMA(close_prices, timeperiod=100)
+    ema_200 = talib.EMA(close_prices, timeperiod=200)
 
     # VWAP (cumulative - we calculate a rolling approximation)
     # True VWAP resets daily, but for daily data we use cumulative typical price * volume
@@ -225,14 +236,20 @@ def calculate_indicators_for_ticker(
             indicators = TechnicalIndicators(
                 ticker=ticker,
                 date=price_date,
-                # Trend
+                # Trend - SMAs
                 sma_5=_to_decimal(validate_indicator("sma_5", sma_5[i], log)),
                 sma_10=_to_decimal(validate_indicator("sma_10", sma_10[i], log)),
                 sma_20=_to_decimal(validate_indicator("sma_20", sma_20[i], log)),
                 sma_50=_to_decimal(validate_indicator("sma_50", sma_50[i], log)),
+                sma_100=_to_decimal(validate_indicator("sma_100", sma_100[i], log)),
+                sma_150=_to_decimal(validate_indicator("sma_150", sma_150[i], log)),
+                sma_200=_to_decimal(validate_indicator("sma_200", sma_200[i], log)),
+                # Trend - EMAs
                 ema_12=_to_decimal(validate_indicator("ema_12", ema_12[i], log)),
                 ema_26=_to_decimal(validate_indicator("ema_26", ema_26[i], log)),
                 ema_50=_to_decimal(validate_indicator("ema_50", ema_50[i], log)),
+                ema_100=_to_decimal(validate_indicator("ema_100", ema_100[i], log)),
+                ema_200=_to_decimal(validate_indicator("ema_200", ema_200[i], log)),
                 vwap=_to_decimal(validate_indicator("vwap", vwap[i], log)),
                 # Momentum
                 rsi_14=_to_decimal(validate_indicator("rsi_14", rsi_14[i], log), precision=6),
@@ -264,8 +281,8 @@ def calculate_indicators_for_ticker(
 def get_required_lookback_days() -> int:
     """Get the number of calendar days needed for lookback.
 
-    Returns calendar days (trading days * 1.4 for weekends/holidays).
-    Based on longest indicator period (SMA-50 = 50 trading days).
+    Returns calendar days (trading days * 1.5 for weekends/holidays).
+    Based on longest indicator period (SMA-200 = 200 trading days).
     """
     max_period = max(MIN_PERIODS.values())
-    return int(max_period * 1.5)  # ~75 calendar days for 50 trading days
+    return int(max_period * 1.5)  # ~300 calendar days for 200 trading days
