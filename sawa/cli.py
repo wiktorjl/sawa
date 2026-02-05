@@ -216,6 +216,7 @@ def cmd_weekly(args) -> int:
             skip_overviews=args.skip_overviews,
             skip_ratios=args.skip_ratios,
             skip_news=args.skip_news,
+            skip_corporate_actions=args.skip_corporate_actions,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -743,6 +744,11 @@ Environment Variables:
         "--skip-ratios", action="store_true", help="Skip financial ratios update"
     )
     weekly_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
+    weekly_parser.add_argument(
+        "--skip-corporate-actions",
+        action="store_true",
+        help="Skip corporate actions (splits, dividends) update",
+    )
     weekly_parser.add_argument("--log-dir", help="Directory for log files")
     weekly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     weekly_parser.add_argument("-v", "--verbose", action="store_true")
