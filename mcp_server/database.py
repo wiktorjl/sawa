@@ -77,7 +77,7 @@ def validate_select_query(query: str) -> bool:
     Validate that a SQL query is a safe SELECT statement.
 
     Checks:
-    - Must start with SELECT
+    - Must start with SELECT or WITH (CTE)
     - No DDL commands (CREATE, DROP, ALTER, etc.)
     - No DML commands (INSERT, UPDATE, DELETE, etc.)
 
@@ -93,9 +93,9 @@ def validate_select_query(query: str) -> bool:
     # Normalize the query
     normalized = query.strip().upper()
 
-    # Must start with SELECT
-    if not normalized.startswith("SELECT"):
-        raise ValueError("Only SELECT queries are allowed")
+    # Must start with SELECT or WITH (CTE)
+    if not (normalized.startswith("SELECT") or normalized.startswith("WITH")):
+        raise ValueError("Only SELECT queries are allowed (WITH/CTE supported)")
 
     # Check for forbidden keywords
     forbidden_patterns = [
