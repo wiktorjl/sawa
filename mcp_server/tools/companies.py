@@ -57,7 +57,7 @@ def list_companies(
 
     if sector:
         sql = """
-            SELECT 
+            SELECT
                 ticker,
                 name,
                 market_cap,
@@ -76,7 +76,7 @@ def list_companies(
         }
     else:
         sql = """
-            SELECT 
+            SELECT
                 ticker,
                 name,
                 market_cap,
@@ -103,7 +103,7 @@ def get_company_details(ticker: str) -> dict[str, Any] | None:
         Company details or None if not found
     """
     sql = """
-        SELECT 
+        SELECT
             c.ticker,
             c.name,
             c.description,
@@ -124,14 +124,14 @@ def get_company_details(ticker: str) -> dict[str, Any] | None:
             fr.market_cap as latest_market_cap
         FROM companies c
         LEFT JOIN LATERAL (
-            SELECT close, date 
-            FROM stock_prices 
-            WHERE ticker = c.ticker 
-            ORDER BY date DESC 
+            SELECT close, date
+            FROM stock_prices
+            WHERE ticker = c.ticker
+            ORDER BY date DESC
             LIMIT 1
         ) sp ON true
         LEFT JOIN LATERAL (
-            SELECT price_to_earnings, debt_to_equity, return_on_equity, 
+            SELECT price_to_earnings, debt_to_equity, return_on_equity,
                    dividend_yield, market_cap
             FROM financial_ratios
             WHERE ticker = c.ticker
@@ -163,7 +163,7 @@ def search_companies(
     search_term = f"%{query}%"
 
     sql = """
-        SELECT 
+        SELECT
             ticker,
             name,
             market_cap,
@@ -175,8 +175,8 @@ def search_companies(
                 OR name ILIKE %(query)s
                 OR sic_description ILIKE %(query)s
             )
-        ORDER BY 
-            CASE 
+        ORDER BY
+            CASE
                 WHEN ticker ILIKE %(exact)s THEN 1
                 WHEN name ILIKE %(exact)s THEN 2
                 WHEN ticker ILIKE %(query)s THEN 3
