@@ -314,6 +314,7 @@ def get_earnings_calendar(
     end_date: str,
     index: Literal["sp500", "nasdaq100", "all"] = "all",
     timing: Literal["BMO", "AMC", "all"] = "all",
+    upcoming_only: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """
@@ -324,10 +325,11 @@ def get_earnings_calendar(
         end_date: End date YYYY-MM-DD
         index: Filter by index membership (default: all)
         timing: Filter by timing (BMO=before market, AMC=after close, all)
+        upcoming_only: If True, only return earnings without actuals yet
         limit: Maximum results (default: 200, max: 500)
 
     Returns:
-        List of earnings reports with dates and estimates
+        List of earnings with dates, EPS estimates, actuals, and surprise %
     """
     limit = min(limit, 500)
 
@@ -340,6 +342,9 @@ def get_earnings_calendar(
     if timing != "all":
         filters.append("e.timing = %(timing)s")
         params["timing"] = timing
+
+    if upcoming_only:
+        filters.append("e.eps_actual IS NULL")
 
     # Index filter
     index_filter = ""
@@ -368,8 +373,7 @@ def get_earnings_calendar(
             e.fiscal_year,
             e.eps_estimate,
             e.eps_actual,
-            e.revenue_estimate,
-            e.revenue_actual
+            e.surprise_pct
         FROM earnings e
         JOIN companies c ON e.ticker = c.ticker
         WHERE {where_clause}
@@ -409,16 +413,10 @@ def get_earnings_history(
             CASE WHEN e.eps_estimate IS NOT NULL AND e.eps_actual IS NOT NULL
                  THEN e.eps_actual - e.eps_estimate
                  ELSE NULL END as eps_surprise,
-            CASE WHEN e.eps_estimate IS NOT NULL AND e.eps_estimate != 0
-                      AND e.eps_actual IS NOT NULL
-                 THEN ROUND(
-                     ((e.eps_actual - e.eps_estimate) / ABS(e.eps_estimate) * 100)::numeric, 2)
-                 ELSE NULL END as eps_surprise_pct,
-            e.revenue_estimate,
-            e.revenue_actual
+            e.surprise_pct as eps_surprise_pct
         FROM earnings e
         WHERE e.ticker = %(ticker)s
-        ORDER BY e.fiscal_year DESC, e.fiscal_quarter DESC
+        ORDER BY e.report_date DESC
         LIMIT %(limit)s
     """
 

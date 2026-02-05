@@ -21,6 +21,8 @@ dependencies = [
     "tomli-w>=1.0",
     "numpy>=1.20.0",
     "tqdm>=4.65.0",
+    "yfinance>=0.2.0",
+    "lxml>=4.9.0",
 ]
 
 [project.optional-dependencies]
