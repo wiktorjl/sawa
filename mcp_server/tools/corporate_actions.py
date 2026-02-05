@@ -373,7 +373,9 @@ def get_earnings_calendar(
             e.fiscal_year,
             e.eps_estimate,
             e.eps_actual,
-            e.surprise_pct
+            e.surprise_pct,
+            e.revenue_estimate,
+            e.revenue_actual
         FROM earnings e
         JOIN companies c ON e.ticker = c.ticker
         WHERE {where_clause}
@@ -413,7 +415,9 @@ def get_earnings_history(
             CASE WHEN e.eps_estimate IS NOT NULL AND e.eps_actual IS NOT NULL
                  THEN e.eps_actual - e.eps_estimate
                  ELSE NULL END as eps_surprise,
-            e.surprise_pct as eps_surprise_pct
+            e.surprise_pct as eps_surprise_pct,
+            e.revenue_estimate,
+            e.revenue_actual
         FROM earnings e
         WHERE e.ticker = %(ticker)s
         ORDER BY e.report_date DESC
