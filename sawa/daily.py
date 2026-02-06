@@ -21,6 +21,7 @@ from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
+from sawa.utils.market_hours import is_after_market_close
 
 
 def fetch_prices_via_api(
@@ -129,6 +130,7 @@ def run_daily(
     force_from_date: date | None = None,
     skip_news: bool = False,
     skip_ta: bool = False,
+    skip_prices: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -142,6 +144,7 @@ def run_daily(
         force_from_date: Optional date to force update from
         skip_news: Skip news update
         skip_ta: Skip technical indicator calculation
+        skip_prices: Skip price update (for --news-only mode)
         dry_run: If True, show what would be done without executing
         logger: Logger instance
 
@@ -177,6 +180,16 @@ def run_daily(
                 return stats
 
             end_date = date.today()
+
+            # Skip today if market hasn't closed yet (before 5 PM ET)
+            # This prevents incomplete data from overriding intraday stream
+            if not is_after_market_close():
+                end_date = end_date - timedelta(days=1)
+                logger.info("Market not yet closed - fetching through yesterday only")
+                logger.info(f"  End date: {end_date}")
+            else:
+                logger.info("Market closed - including today's EOD data")
+
             start_str = start_date.strftime(DATE_FORMAT)
             end_str = end_date.strftime(DATE_FORMAT)
 
@@ -189,10 +202,13 @@ def run_daily(
             stats["symbols"] = len(symbols)
 
         # Check if prices need updating
-        prices_up_to_date = start_date > end_date
+        prices_up_to_date = start_date > end_date or skip_prices
         trading_days: list[str] = []
 
-        if prices_up_to_date:
+        if skip_prices:
+            logger.info("Skipping prices (--news-only)")
+            stats["prices_inserted"] = 0
+        elif prices_up_to_date:
             logger.info("Prices already up to date.")
             stats["prices_inserted"] = 0
         else:
@@ -228,6 +244,17 @@ def run_daily(
             logger.info("\nInserting prices into database...")
             with psycopg.connect(database_url) as conn:
                 inserted = insert_prices(conn, prices, logger)
+
+                # If we just inserted today's EOD, cleanup intraday data for today
+                if end_date == date.today():
+                    try:
+                        from sawa.database.intraday_load import cleanup_today_intraday_data
+
+                        cleanup_today_intraday_data(conn, logger)
+                    except ImportError:
+                        # Intraday module not yet created, skip cleanup
+                        pass
+
             logger.info(f"  Inserted {inserted} records")
             stats["prices_inserted"] = inserted
 
