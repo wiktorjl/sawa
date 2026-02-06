@@ -325,8 +325,8 @@ class RatiosRepository(Repository):
         pass
 
     @abstractmethod
-    async def get_latest_ratios(self, ticker: str) -> FinancialRatio | None:
-        """Get most recent ratios for a ticker.
+    async def get_latest_ratio(self, ticker: str) -> FinancialRatio | None:
+        """Get most recent ratio for a ticker.
 
         Args:
             ticker: Stock symbol

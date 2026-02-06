@@ -188,8 +188,8 @@ class TestMockRatiosRepository:
         assert ratios[0].pe_ratio == Decimal("28.5")
 
     @pytest.mark.asyncio
-    async def test_get_latest_ratios(self) -> None:
-        """Test getting latest ratios."""
+    async def test_get_latest_ratio(self) -> None:
+        """Test getting latest ratio."""
         repo = MockRatiosRepository()
         repo.ratios.append(
             FinancialRatio(ticker="AAPL", date=date(2024, 1, 10), pe_ratio=Decimal("27.0"))
@@ -198,7 +198,7 @@ class TestMockRatiosRepository:
             FinancialRatio(ticker="AAPL", date=date(2024, 1, 20), pe_ratio=Decimal("28.5"))
         )
 
-        latest = await repo.get_latest_ratios("AAPL")
+        latest = await repo.get_latest_ratio("AAPL")
         assert latest is not None
         assert latest.date == date(2024, 1, 20)
         assert latest.pe_ratio == Decimal("28.5")
