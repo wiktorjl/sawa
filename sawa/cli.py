@@ -261,38 +261,6 @@ def cmd_quarterly(args) -> int:
         return 1
 
 
-def cmd_earnings(args) -> int:
-    """Run earnings update from Yahoo Finance."""
-    from sawa.earnings import run_earnings_update
-
-    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="earnings")
-
-    # Get credentials
-    db_url = args.database_url or os.environ.get("DATABASE_URL")
-
-    if not db_url:
-        logger.error("DATABASE_URL required (env var or --database-url)")
-        return 1
-
-    # Single ticker or all
-    tickers = [args.ticker.upper()] if args.ticker else None
-
-    try:
-        stats = run_earnings_update(
-            database_url=db_url,
-            tickers=tickers,
-            quarters=args.quarters,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Earnings update failed: {e}")
-        if args.verbose:
-            raise
-        return 1
-
-
 def cmd_ta_backfill(args) -> int:
     """Run technical indicator backfill."""
     from sawa.ta_backfill import run_ta_backfill
@@ -840,22 +808,6 @@ Environment Variables:
     quarterly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     quarterly_parser.add_argument("-v", "--verbose", action="store_true")
     quarterly_parser.set_defaults(func=cmd_quarterly)
-
-    # Earnings subcommand
-    earnings_parser = subparsers.add_parser(
-        "earnings",
-        help="Download earnings data from Yahoo Finance",
-        description="Download EPS estimates, actuals, and surprises from Yahoo Finance.",
-    )
-    earnings_parser.add_argument("--ticker", help="Single ticker to fetch (default: all active)")
-    earnings_parser.add_argument(
-        "--quarters", type=int, default=5, help="Quarters of history to fetch (default: 5)"
-    )
-    earnings_parser.add_argument("--database-url", help="PostgreSQL URL")
-    earnings_parser.add_argument("--log-dir", help="Directory for log files")
-    earnings_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    earnings_parser.add_argument("-v", "--verbose", action="store_true")
-    earnings_parser.set_defaults(func=cmd_earnings)
 
     # Technical indicator backfill subcommand
     ta_parser = subparsers.add_parser(
