@@ -42,8 +42,10 @@ sawa coldstart --years 5              # Full database setup
 sawa coldstart --drop-only            # Drop tables only
 sawa coldstart --schema-only          # Create schema only
 sawa coldstart --skip-downloads       # Load existing CSV data
-sawa update                           # Incremental update
-sawa update --from-date 2024-01-01    # Force update from date
+sawa daily                            # Daily price & news update (skips today before 5 PM ET)
+sawa daily --from-date 2024-01-01     # Force update from date
+sawa intraday                         # Stream live 5-min bars via WebSocket (15-min delayed)
+sawa intraday --bar-size 15           # Stream 15-min bars
 ```
 
 ## Code Style Guidelines

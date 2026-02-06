@@ -68,20 +68,26 @@ Creates database schema, downloads all historical data, and loads into PostgreSQ
 
 ```bash
 # Download 5 years of data (default)
-sp500 coldstart --years 5
+sawa coldstart --years 5
 
 # Use custom symbols file
-sp500 coldstart --years 3 --symbols-file filter.txt
+sawa coldstart --years 3 --symbols-file filter.txt
 
-# Schema only (no data download)
-sp500 coldstart --schema-only
+# Schema updates only (SAFE - preserves existing data)
+sawa coldstart --schema-only
 
 # Load existing CSV files (skip download)
-sp500 coldstart --skip-downloads
+sawa coldstart --skip-downloads
 
 # Skip specific data types
-sp500 coldstart --years 5 --skip-prices --skip-fundamentals
+sawa coldstart --years 5 --skip-prices --skip-fundamentals
 ```
+
+**⚠️ Data Safety:**
+- `--schema-only` now automatically preserves existing data (auto-enables `--no-drop`)
+- `--drop-only` requires interactive confirmation before deleting data
+- Full coldstart with existing data requires typing 'DELETE' to confirm
+- Use `--no-drop` flag when updating schema to prevent accidental data loss
 
 ### Incremental Update
 
@@ -101,6 +107,38 @@ sp500 update --from-date 2024-01-01
 sp500 coldstart --verbose              # Debug logging
 sp500 coldstart --output-dir ./mydata  # Custom output directory
 sp500 coldstart --api-key YOUR_KEY     # Override env var
+```
+
+### Intraday Price Streaming
+
+Stream real-time 5-minute bars during market hours (15-minute delayed):
+
+```bash
+# Start intraday streaming (manual start/stop)
+sawa intraday
+
+# Custom bar size
+sawa intraday --bar-size 15  # 15-minute bars
+```
+
+**Features:**
+- WebSocket connection to Polygon's delayed endpoint (15-min delay)
+- Aggregates 1-minute bars into 5-minute bars
+- Stores in `stock_prices_intraday` table
+- Auto-batches database writes
+- Press Ctrl+C to stop gracefully
+
+**Integration:**
+- `get_stock_prices()` automatically includes today's intraday data (set `use_live=False` for historical only)
+- `get_intraday_bars()` retrieves 5-minute bars for detailed charting
+- `sawa daily` automatically skips today until after 5 PM ET (prevents incomplete data)
+- After market close, EOD data overwrites intraday in queries
+
+**Cleanup:**
+Intraday data older than 7 days is cleaned up via cron job:
+```bash
+# Add to crontab
+0 0 * * * cd /path/to/sawa && .venv/bin/python -m sawa.utils.cleanup_intraday
 ```
 
 ## MCP Server
