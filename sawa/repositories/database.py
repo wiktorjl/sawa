@@ -595,8 +595,8 @@ class DatabaseRatiosRepository(RatiosRepository):
             inventory_turnover=_to_decimal(row.get("inventory_turnover")),
         )
 
-    async def get_latest_ratios(self, ticker: str) -> FinancialRatio | None:
-        """Get most recent ratios for a ticker.
+    async def get_latest_ratio(self, ticker: str) -> FinancialRatio | None:
+        """Get most recent ratio for a ticker.
 
         Args:
             ticker: Stock symbol
@@ -608,7 +608,7 @@ class DatabaseRatiosRepository(RatiosRepository):
         return await loop.run_in_executor(None, self._get_latest_sync, ticker)
 
     def _get_latest_sync(self, ticker: str) -> FinancialRatio | None:
-        """Synchronous implementation of get_latest_ratios."""
+        """Synchronous implementation of get_latest_ratio."""
         query = """
             SELECT *
             FROM financial_ratios

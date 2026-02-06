@@ -247,8 +247,8 @@ class MockRatiosRepository(RatiosRepository):
             if r.ticker == ticker.upper() and start_date <= r.date <= end_date
         ]
 
-    async def get_latest_ratios(self, ticker: str) -> FinancialRatio | None:
-        """Return most recent ratios for ticker."""
+    async def get_latest_ratio(self, ticker: str) -> FinancialRatio | None:
+        """Return most recent ratio for ticker."""
         self.call_count += 1
         ticker_ratios = [r for r in self.ratios if r.ticker == ticker.upper()]
         if not ticker_ratios:
