@@ -19,15 +19,6 @@ from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 
-# Ratios columns mapping
-RATIO_COLUMNS = [
-    "ticker", "date", "average_volume", "cash", "current", "debt_to_equity",
-    "dividend_yield", "earnings_per_share", "enterprise_value", "ev_to_ebitda",
-    "ev_to_sales", "free_cash_flow", "market_cap", "price", "price_to_book",
-    "price_to_cash_flow", "price_to_earnings", "price_to_free_cash_flow",
-    "price_to_sales", "quick", "return_on_assets", "return_on_equity",
-]
-
 
 def get_existing_symbols(conn) -> set[str]:
     """Get set of symbols already in database."""
@@ -142,30 +133,33 @@ def fetch_and_insert_ratios(
         for r in ratios:
             r["ticker"] = symbol
             try:
-                cur.execute(query, (
-                    r.get("ticker"),
-                    r.get("date"),
-                    r.get("average_volume"),
-                    r.get("cash"),
-                    r.get("current"),
-                    r.get("debt_to_equity"),
-                    r.get("dividend_yield"),
-                    r.get("earnings_per_share"),
-                    r.get("enterprise_value"),
-                    r.get("ev_to_ebitda"),
-                    r.get("ev_to_sales"),
-                    r.get("free_cash_flow"),
-                    r.get("market_cap"),
-                    r.get("price"),
-                    r.get("price_to_book"),
-                    r.get("price_to_cash_flow"),
-                    r.get("price_to_earnings"),
-                    r.get("price_to_free_cash_flow"),
-                    r.get("price_to_sales"),
-                    r.get("quick"),
-                    r.get("return_on_assets"),
-                    r.get("return_on_equity"),
-                ))
+                cur.execute(
+                    query,
+                    (
+                        r.get("ticker"),
+                        r.get("date"),
+                        r.get("average_volume"),
+                        r.get("cash"),
+                        r.get("current"),
+                        r.get("debt_to_equity"),
+                        r.get("dividend_yield"),
+                        r.get("earnings_per_share"),
+                        r.get("enterprise_value"),
+                        r.get("ev_to_ebitda"),
+                        r.get("ev_to_sales"),
+                        r.get("free_cash_flow"),
+                        r.get("market_cap"),
+                        r.get("price"),
+                        r.get("price_to_book"),
+                        r.get("price_to_cash_flow"),
+                        r.get("price_to_earnings"),
+                        r.get("price_to_free_cash_flow"),
+                        r.get("price_to_sales"),
+                        r.get("quick"),
+                        r.get("return_on_assets"),
+                        r.get("return_on_equity"),
+                    ),
+                )
                 inserted += 1
             except Exception as e:
                 logger.debug(f"  Ratio insert error: {e}")
@@ -210,10 +204,13 @@ def fetch_and_insert_fundamentals(
 
         # Get table columns
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT column_name FROM information_schema.columns
                 WHERE table_name = %s AND column_name NOT IN ('id', 'created_at')
-            """, (table_name,))
+            """,
+                (table_name,),
+            )
             db_columns = {row[0] for row in cur.fetchall()}
 
         inserted = 0
@@ -300,15 +297,18 @@ def fetch_and_insert_prices(
         for r in results:
             if r.get("t"):
                 price_date = timestamp_to_date(r["t"]).strftime(DATE_FORMAT)
-                cur.execute(query, (
-                    symbol,
-                    price_date,
-                    r.get("o"),
-                    r.get("h"),
-                    r.get("l"),
-                    r.get("c"),
-                    r.get("v"),
-                ))
+                cur.execute(
+                    query,
+                    (
+                        symbol,
+                        price_date,
+                        r.get("o"),
+                        r.get("h"),
+                        r.get("l"),
+                        r.get("c"),
+                        r.get("v"),
+                    ),
+                )
                 inserted += 1
     conn.commit()
     return inserted
