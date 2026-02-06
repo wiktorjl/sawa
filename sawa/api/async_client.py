@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from sawa.domain.exceptions import ProviderError
 from sawa.repositories.rate_limiter import SyncRateLimiter
 
 DEFAULT_TIMEOUT = 30
@@ -97,10 +98,18 @@ class AsyncPolygonClient:
                 return data.get("results", [])
             except httpx.HTTPStatusError as e:
                 self.logger.error(f"HTTP error for {ticker}: {e}")
-                return []
-            except Exception as e:
-                self.logger.error(f"Error fetching {ticker}: {e}")
-                return []
+                raise ProviderError(
+                    f"HTTP error fetching aggregates for {ticker}: {e.response.status_code}",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
+            except httpx.RequestError as e:
+                self.logger.error(f"Request error for {ticker}: {e}")
+                raise ProviderError(
+                    f"Request error fetching aggregates for {ticker}",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
 
     async def get_ticker_details(self, ticker: str) -> dict[str, Any] | None:
         """
@@ -126,12 +135,20 @@ class AsyncPolygonClient:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     self.logger.warning(f"Ticker not found: {ticker}")
-                else:
-                    self.logger.error(f"HTTP error for {ticker}: {e}")
-                return None
-            except Exception as e:
-                self.logger.error(f"Error fetching details for {ticker}: {e}")
-                return None
+                    return None
+                self.logger.error(f"HTTP error for {ticker}: {e}")
+                raise ProviderError(
+                    f"HTTP error fetching details for {ticker}: {e.response.status_code}",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
+            except httpx.RequestError as e:
+                self.logger.error(f"Request error for {ticker}: {e}")
+                raise ProviderError(
+                    f"Request error fetching details for {ticker}",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
 
     async def get_aggregates_batch(
         self,
