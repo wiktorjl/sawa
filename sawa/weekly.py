@@ -11,37 +11,16 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from psycopg import sql
 
 from sawa.api import PolygonClient
 from sawa.corporate_actions import run_corporate_actions_update
+from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.load import load_companies, load_economy, load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
-
-
-def get_last_date(conn, table: str, date_column: str = "date") -> date | None:
-    """Get the most recent date from a table."""
-    query = sql.SQL("SELECT MAX({}) FROM {}").format(
-        sql.Identifier(date_column),
-        sql.Identifier(table),
-    )
-    with conn.cursor() as cur:
-        cur.execute(query)
-        result = cur.fetchone()
-        if result and result[0]:
-            return result[0]
-    return None
-
-
-def get_symbols_from_db(conn) -> list[str]:
-    """Get list of symbols from companies table."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT ticker FROM companies ORDER BY ticker")
-        return [row[0] for row in cur.fetchall()]
 
 
 def download_overviews(

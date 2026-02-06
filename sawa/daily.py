@@ -15,28 +15,12 @@ import psycopg
 from psycopg import sql
 
 from sawa.api import PolygonClient
+from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import fetch_and_load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
-
-
-def get_last_price_date(conn) -> date | None:
-    """Get the most recent date from stock_prices table."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT MAX(date) FROM stock_prices")
-        result = cur.fetchone()
-        if result and result[0]:
-            return result[0]
-    return None
-
-
-def get_symbols_from_db(conn) -> list[str]:
-    """Get list of symbols from companies table."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT ticker FROM companies ORDER BY ticker")
-        return [row[0] for row in cur.fetchall()]
 
 
 def fetch_prices_via_api(
@@ -179,7 +163,7 @@ def run_daily(
         with psycopg.connect(database_url) as conn:
             # Get last price date
             logger.info("Checking last price date...")
-            last_price_date = get_last_price_date(conn)
+            last_price_date = get_last_date(conn, "stock_prices")
 
             if force_from_date:
                 start_date = force_from_date

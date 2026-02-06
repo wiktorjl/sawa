@@ -1,9 +1,11 @@
-"""Shared database connection handling."""
+"""Shared database connection handling and common queries."""
 
 import os
+from datetime import date
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 5432
@@ -67,3 +69,40 @@ def get_connection(conn_params: dict[str, Any]) -> psycopg.Connection[tuple[Any,
         Database connection
     """
     return psycopg.connect(**conn_params)
+
+
+def get_last_date(conn, table: str, date_column: str = "date") -> date | None:
+    """Get the most recent date from a table.
+
+    Args:
+        conn: Database connection
+        table: Table name
+        date_column: Date column name (default: "date")
+
+    Returns:
+        Most recent date, or None if table is empty
+    """
+    query = sql.SQL("SELECT MAX({}) FROM {}").format(
+        sql.Identifier(date_column),
+        sql.Identifier(table),
+    )
+    with conn.cursor() as cur:
+        cur.execute(query)
+        result = cur.fetchone()
+        if result and result[0]:
+            return result[0]
+    return None
+
+
+def get_symbols_from_db(conn) -> list[str]:
+    """Get list of ticker symbols from companies table.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        List of ticker symbols, sorted alphabetically
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT ticker FROM companies ORDER BY ticker")
+        return [row[0] for row in cur.fetchall()]
