@@ -64,6 +64,7 @@ from .tools.indices import (
 from .tools.market_data import (
     get_financial_ratios,
     get_financial_ratios_async,
+    get_intraday_bars,
     get_latest_price,
     get_latest_price_async,
     get_latest_technical_indicators,
@@ -223,6 +224,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Stock ticker symbol (e.g., AAPL, MSFT)",
                     },
+                    "use_live": {
+                        "type": "boolean",
+                        "description": "Include today's intraday data if available (default: true)",
+                        "default": True,
+                    },
                 },
                 "required": ["ticker"],
             },
@@ -251,6 +257,11 @@ async def list_tools() -> list[Tool]:
                         "default": 252,
                         "minimum": 1,
                         "maximum": 1000,
+                    },
+                    "use_live": {
+                        "type": "boolean",
+                        "description": "Include today's intraday data if available (default: true)",
+                        "default": True,
                     },
                     "chart_detail": {
                         "type": "string",
@@ -365,6 +376,31 @@ async def list_tools() -> list[Tool]:
                     "ticker": {
                         "type": "string",
                         "description": "Stock ticker symbol",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_intraday_bars",
+            description="Get intraday 5-minute bars for a ticker (15-min delayed)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Date in YYYY-MM-DD format (default: today)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum bars to return (default: 100, max: 500)",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                 },
                 "required": ["ticker"],
@@ -555,7 +591,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Classification system: 'sic' (SEC) or 'gics' (S&P)",
                         "enum": ["sic", "gics"],
-                        "default": "sic",
+                        "default": "gics",
                     },
                     "index": {
                         "type": "string",
@@ -1282,7 +1318,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             if use_services:
                 result = await get_latest_price_async(ticker=arguments["ticker"])
             else:
-                result = get_latest_price(ticker=arguments["ticker"])
+                result = get_latest_price(
+                    ticker=arguments["ticker"], use_live=arguments.get("use_live", True)
+                )
             if result is None:
                 return [
                     TextContent(type="text", text=f"No price data found for {arguments['ticker']}")
@@ -1302,6 +1340,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     start_date=arguments["start_date"],
                     end_date=arguments.get("end_date"),
                     limit=arguments.get("limit", 252),
+                    use_live=arguments.get("use_live", True),
                 )
             chart = render_price_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_financial_ratios":
@@ -1352,6 +1391,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     TextContent(
                         type="text",
                         text=f"No technical indicators found for {arguments['ticker']}",
+                    )
+                ]
+        elif name == "get_intraday_bars":
+            logger.info("  Executing: get_intraday_bars")
+            result = get_intraday_bars(
+                ticker=arguments["ticker"],
+                date=arguments.get("date"),
+                limit=arguments.get("limit", 100),
+            )
+            if not result:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"No intraday data found for {arguments['ticker']}",
                     )
                 ]
         elif name == "screen_technical_indicators":
@@ -1429,7 +1482,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "list_sectors":
             logger.info("  Executing: list_sectors")
             result = list_sectors(
-                taxonomy=arguments.get("taxonomy", "sic"),
+                taxonomy=arguments.get("taxonomy", "gics"),
                 index=arguments.get("index"),
                 limit=arguments.get("limit", 100),
             )

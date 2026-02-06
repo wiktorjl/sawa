@@ -54,6 +54,7 @@ def get_stock_prices(
     start_date: str,
     end_date: str | None = None,
     limit: int = 252,
+    use_live: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Get daily OHLCV prices for a ticker.
@@ -63,6 +64,8 @@ def get_stock_prices(
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format (defaults to today)
         limit: Maximum rows to return (default: 252, max: 1000)
+        use_live: If True, use stock_prices_live view (includes intraday for today).
+                  If False, use stock_prices table (historical EOD only).
 
     Returns:
         List of price records with date, open, high, low, close, volume
@@ -72,7 +75,9 @@ def get_stock_prices(
     if end_date is None:
         end_date = date.today().isoformat()
 
-    sql = """
+    table_name = "stock_prices_live" if use_live else "stock_prices"
+
+    sql = f"""
         SELECT
             date,
             open,
@@ -80,7 +85,7 @@ def get_stock_prices(
             low,
             close,
             volume
-        FROM stock_prices
+        FROM {table_name}
         WHERE ticker = %(ticker)s
             AND date >= %(start_date)s
             AND date <= %(end_date)s
@@ -159,17 +164,21 @@ def get_financial_ratios(
     return execute_query(sql, params)
 
 
-def get_latest_price(ticker: str) -> dict[str, Any] | None:
+def get_latest_price(ticker: str, use_live: bool = True) -> dict[str, Any] | None:
     """
     Get the most recent stock price for a ticker from database.
 
     Args:
         ticker: Stock ticker symbol
+        use_live: If True, includes today's intraday data if available.
+                  If False, returns only historical EOD data.
 
     Returns:
         Latest price record or None
     """
-    sql = """
+    table_name = "stock_prices_live" if use_live else "stock_prices"
+
+    sql = f"""
         SELECT
             date,
             open,
@@ -177,7 +186,7 @@ def get_latest_price(ticker: str) -> dict[str, Any] | None:
             low,
             close,
             volume
-        FROM stock_prices
+        FROM {table_name}
         WHERE ticker = %(ticker)s
         ORDER BY date DESC
         LIMIT 1
@@ -566,3 +575,50 @@ def list_technical_indicators(
             ORDER BY sort_order
         """
         return execute_query(sql)
+
+
+def get_intraday_bars(
+    ticker: str,
+    date: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    Get intraday 5-minute bars for a ticker.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL)
+        date: Date in YYYY-MM-DD format (defaults to today)
+        limit: Maximum bars to return (default: 100, max: 500)
+
+    Returns:
+        List of intraday bars with timestamp, OHLCV
+    """
+    from datetime import datetime
+
+    if date is None:
+        date = datetime.now().date().isoformat()
+
+    limit = min(limit, 500)
+
+    sql = """
+        SELECT
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            volume
+        FROM stock_prices_intraday
+        WHERE ticker = %(ticker)s
+          AND timestamp::date = %(date)s
+        ORDER BY timestamp ASC
+        LIMIT %(limit)s
+    """
+
+    params = {
+        "ticker": ticker.upper(),
+        "date": date,
+        "limit": limit,
+    }
+
+    return execute_query(sql, params)
