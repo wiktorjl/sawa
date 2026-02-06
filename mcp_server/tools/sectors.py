@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def list_sectors(
-    taxonomy: Literal["sic", "gics"] = "sic",
+    taxonomy: Literal["sic", "gics"] = "gics",
     index: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
@@ -21,7 +21,7 @@ def list_sectors(
     List all sectors with stock counts.
 
     Args:
-        taxonomy: Classification system - "sic" (SEC) or "gics" (S&P Global)
+        taxonomy: Classification system - "gics" (S&P Global) or "sic" (SEC)
         index: Filter by index membership (sp500, nasdaq100)
         limit: Maximum results (default: 100)
 
