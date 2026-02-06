@@ -238,6 +238,71 @@ async def get_live_price_async(ticker: str, days: int = 7) -> dict[str, Any]:
         raise
 
 
+async def get_live_prices_batch_async(
+    tickers: list[str],
+    days: int = 7,
+) -> dict[str, dict[str, Any]]:
+    """Get live stock prices for multiple tickers from Polygon API.
+
+    Args:
+        tickers: List of stock ticker symbols (e.g., ["AAPL", "MSFT", "GOOGL"])
+        days: Number of days of history to fetch per ticker (default: 7)
+
+    Returns:
+        Dictionary mapping ticker -> price info with history
+    """
+    from sawa import get_live_prices_batch as sawa_get_live_prices_batch
+
+    try:
+        results = await sawa_get_live_prices_batch(tickers=tickers, days=days)
+        fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Format each result for MCP display
+        output: dict[str, dict[str, Any]] = {}
+        for ticker, result in results.items():
+            if result.get("error"):
+                output[ticker] = {
+                    "ticker": ticker,
+                    "error": result["error"],
+                    "source": "polygon_api",
+                    "fetched_at": fetched_at,
+                }
+                continue
+
+            history = result.get("history", [])
+            latest = history[-1] if history else {}
+
+            output[ticker] = {
+                "ticker": result["ticker"],
+                "latest_price": result["current_price"],
+                "latest_date": result["current_date"],
+                "open": latest.get("o"),
+                "high": latest.get("h"),
+                "low": latest.get("l"),
+                "close": latest.get("c", result["current_price"]),
+                "volume": latest.get("v"),
+                "change_percent": result["change_percent"],
+                "history": [
+                    {
+                        "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                        "open": bar["o"],
+                        "high": bar["h"],
+                        "low": bar["l"],
+                        "close": bar["c"],
+                        "volume": bar["v"],
+                    }
+                    for bar in history
+                ],
+                "source": "polygon_api",
+                "fetched_at": fetched_at,
+            }
+
+        return output
+    except Exception as e:
+        logger.error(f"Live prices batch error: {e}")
+        raise
+
+
 # --- Technical Indicators ---
 
 
@@ -440,32 +505,6 @@ def screen_by_technical_indicators(
     """
 
     return execute_query(sql, params)
-
-
-def get_indicator_metadata() -> list[dict[str, Any]]:
-    """
-    Get metadata for all technical indicators.
-
-    Returns:
-        List of indicator metadata records
-    """
-    sql = """
-        SELECT
-            indicator_name,
-            column_name,
-            category,
-            description,
-            validation_min,
-            validation_max,
-            is_bounded,
-            min_periods_required,
-            display_name,
-            unit
-        FROM technical_indicator_metadata
-        ORDER BY sort_order
-    """
-
-    return execute_query(sql)
 
 
 def list_technical_indicators(

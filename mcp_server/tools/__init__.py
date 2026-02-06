@@ -27,11 +27,11 @@ from .indices import (
 from .market_data import (
     get_financial_ratios,
     get_financial_ratios_async,
-    get_indicator_metadata,
     get_latest_price,
     get_latest_price_async,
     get_latest_technical_indicators,
     get_live_price_async,
+    get_live_prices_batch_async,
     get_stock_prices,
     get_stock_prices_async,
     get_technical_indicators,
@@ -66,11 +66,11 @@ __all__ = [
     "get_latest_price",
     "get_latest_price_async",
     "get_live_price_async",
+    "get_live_prices_batch_async",
     # Technical indicators
     "get_technical_indicators",
     "get_latest_technical_indicators",
     "screen_by_technical_indicators",
-    "get_indicator_metadata",
     "list_technical_indicators",
     # Scanner
     "scan_ytd_performance",
