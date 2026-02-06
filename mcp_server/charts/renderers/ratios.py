@@ -55,7 +55,7 @@ def _extract_metrics(data: list[dict[str, Any]]) -> dict[str, Any]:
     """Extract key metrics from ratio data."""
 
     def get_series(key: str) -> list[float]:
-        return [d.get(key) for d in data if d.get(key) is not None]
+        return [float(d[key]) for d in data if d.get(key) is not None]
 
     def get_stats(series: list[float]) -> dict[str, float | None]:
         if not series:

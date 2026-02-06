@@ -24,27 +24,27 @@ _project_root = Path(__file__).parent.parent
 _env_file = _project_root / ".env"
 load_dotenv(_env_file)
 
-from .charts.config import ChartDetail, get_chart_config
-from .charts.core.layout import get_layout
-from .charts.core.modal import check_width_and_warn
-from .charts.renderers import (
+from .charts.config import ChartDetail, get_chart_config  # noqa: E402
+from .charts.core.layout import get_layout  # noqa: E402
+from .charts.core.modal import check_width_and_warn  # noqa: E402
+from .charts.renderers import (  # noqa: E402
     render_economy_chart,
     render_economy_dashboard,
     render_fundamentals_chart,
     render_price_chart,
     render_ratios_chart,
 )
-from .charts.themes import get_theme
-from .database import execute_query
-from .services import use_service_layer
-from .tools.companies import (
+from .charts.themes import get_theme  # noqa: E402
+from .database import execute_query  # noqa: E402
+from .services import use_service_layer  # noqa: E402
+from .tools.companies import (  # noqa: E402
     get_company_details,
     get_company_details_async,
     list_companies,
     search_companies,
     search_companies_async,
 )
-from .tools.corporate_actions import (
+from .tools.corporate_actions import (  # noqa: E402
     get_dividend_yield_leaders,
     get_dividends,
     get_earnings_calendar,
@@ -53,15 +53,19 @@ from .tools.corporate_actions import (
     get_recent_splits,
     get_stock_splits,
 )
-from .tools.economy import get_economy_dashboard, get_economy_data, get_economy_data_async
-from .tools.fundamentals import get_fundamentals, get_fundamentals_async
-from .tools.indices import (
+from .tools.economy import (  # noqa: E402
+    get_economy_dashboard,
+    get_economy_data,
+    get_economy_data_async,
+)
+from .tools.fundamentals import get_fundamentals, get_fundamentals_async  # noqa: E402
+from .tools.indices import (  # noqa: E402
     check_index_membership,
     get_index_constituents,
     get_index_with_prices,
     list_indices,
 )
-from .tools.market_data import (
+from .tools.market_data import (  # noqa: E402
     get_financial_ratios,
     get_financial_ratios_async,
     get_intraday_bars,
@@ -76,11 +80,15 @@ from .tools.market_data import (
     list_technical_indicators,
     screen_by_technical_indicators,
 )
-from .tools.movers import get_market_breadth, get_top_movers, get_volume_leaders
-from .tools.scanner import scan_ytd_performance
-from .tools.schema import describe_database, describe_table
-from .tools.screener import get_52week_extremes, get_daily_range_leaders, screen_stocks
-from .tools.sectors import get_sector_performance, list_sectors
+from .tools.movers import get_market_breadth, get_top_movers, get_volume_leaders  # noqa: E402
+from .tools.scanner import scan_ytd_performance  # noqa: E402
+from .tools.schema import describe_database, describe_table  # noqa: E402
+from .tools.screener import (  # noqa: E402
+    get_52week_extremes,
+    get_daily_range_leaders,
+    screen_stocks,
+)
+from .tools.sectors import get_sector_performance, list_sectors  # noqa: E402
 
 # Setup logging
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
@@ -1266,8 +1274,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             theme,
         )
 
-        chart = None
-        result = None
+        chart: str | None = None
+        result: Any = None
 
         # Check if we should use the service layer
         use_services = use_service_layer()

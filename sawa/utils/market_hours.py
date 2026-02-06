@@ -1,7 +1,8 @@
 """Market hours utilities for US stock market."""
 
-import pytz
 from datetime import datetime
+
+import pytz
 
 
 def is_market_open() -> bool:

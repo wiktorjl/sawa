@@ -295,7 +295,8 @@ def run_daily(
                                 WHERE table_name = 'technical_indicators'
                             )
                         """)
-                        table_exists = cur.fetchone()[0]
+                        row = cur.fetchone()
+                        table_exists = row[0] if row else False
 
                     if not table_exists:
                         logger.warning("  Table 'technical_indicators' does not exist")

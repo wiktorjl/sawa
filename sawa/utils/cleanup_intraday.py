@@ -5,7 +5,6 @@ Intended to be run as a cron job:
     0 0 * * * cd /path/to/sawa && /path/to/.venv/bin/python -m sawa.utils.cleanup_intraday
 """
 
-import logging
 import os
 import sys
 

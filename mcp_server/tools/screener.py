@@ -220,10 +220,18 @@ def screen_stocks(
         WITH date_refs AS (
             SELECT
                 MAX(date) as latest,
-                MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices_live)) as prev_day,
-                MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '7 days') as week_ago,
-                MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '30 days') as month_ago,
-                MIN(date) FILTER (WHERE date >= DATE_TRUNC('year', CURRENT_DATE)) as ytd_start
+                MAX(date) FILTER (
+                    WHERE date < (SELECT MAX(date) FROM stock_prices_live)
+                ) as prev_day,
+                MAX(date) FILTER (
+                    WHERE date <= CURRENT_DATE - INTERVAL '7 days'
+                ) as week_ago,
+                MAX(date) FILTER (
+                    WHERE date <= CURRENT_DATE - INTERVAL '30 days'
+                ) as month_ago,
+                MIN(date) FILTER (
+                    WHERE date >= DATE_TRUNC('year', CURRENT_DATE)
+                ) as ytd_start
                 FROM stock_prices_live
         ),
         base_data AS (

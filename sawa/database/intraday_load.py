@@ -27,10 +27,10 @@ def load_intraday_bars(
         return 0
 
     query = sql.SQL("""
-        INSERT INTO stock_prices_intraday 
+        INSERT INTO stock_prices_intraday
             (ticker, timestamp, open, high, low, close, volume, bar_size_minutes)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ticker, timestamp) 
+        ON CONFLICT (ticker, timestamp)
         DO UPDATE SET
             open = EXCLUDED.open,
             high = EXCLUDED.high,
@@ -79,7 +79,7 @@ def cleanup_old_intraday_data(
         Number of records deleted
     """
     query = sql.SQL("""
-        DELETE FROM stock_prices_intraday 
+        DELETE FROM stock_prices_intraday
         WHERE timestamp < CURRENT_TIMESTAMP - INTERVAL '%s days'
     """)
 
@@ -107,7 +107,7 @@ def cleanup_today_intraday_data(
         Number of records deleted
     """
     query = sql.SQL("""
-        DELETE FROM stock_prices_intraday 
+        DELETE FROM stock_prices_intraday
         WHERE timestamp::date = CURRENT_DATE
     """)
 

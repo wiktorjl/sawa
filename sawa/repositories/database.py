@@ -858,6 +858,7 @@ class DatabaseNewsRepository(NewsRepository):
         days_back: int,
     ) -> list[NewsArticle]:
         """Synchronous implementation of get_news."""
+        ticker = ticker.upper()
         query = """
             SELECT
                 na.id,
@@ -921,6 +922,7 @@ class DatabaseNewsRepository(NewsRepository):
         days: int,
     ) -> dict[str, int]:
         """Synchronous implementation of get_news_sentiment_summary."""
+        ticker = ticker.upper()
         query = """
             SELECT
                 ns.sentiment,

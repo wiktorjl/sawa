@@ -8,6 +8,7 @@ from typing import Any
 
 import psycopg
 import websockets
+from websockets.asyncio.client import ClientConnection
 
 from sawa.database.intraday_load import load_intraday_bars
 
@@ -58,7 +59,7 @@ class PolygonWebSocketClient:
         self.logger = logger or logging.getLogger(__name__)
 
         # State
-        self.websocket = None
+        self.websocket: ClientConnection | None = None
         self.running = False
         self.buffer: list[dict[str, Any]] = []
         self.last_flush = datetime.now()
@@ -106,6 +107,9 @@ class PolygonWebSocketClient:
 
     async def subscribe(self) -> None:
         """Subscribe to aggregate minute bars for all tickers."""
+        if self.websocket is None:
+            raise RuntimeError("WebSocket not connected")
+
         # Polygon allows subscribing to multiple tickers at once
         # Format: "AM.AAPL,AM.MSFT,AM.GOOGL,..."
         params = ",".join([f"AM.{ticker}" for ticker in self.tickers])
@@ -195,7 +199,8 @@ class PolygonWebSocketClient:
             timestamp_str = bar["timestamp"].strftime("%Y-%m-%d %H:%M")
             self.logger.info(
                 f"📊 {bar['ticker']:5s} | {timestamp_str} | "
-                f"O:{bar['open']:7.2f} H:{bar['high']:7.2f} L:{bar['low']:7.2f} C:{bar['close']:7.2f} | "
+                f"O:{bar['open']:7.2f} H:{bar['high']:7.2f} "
+                f"L:{bar['low']:7.2f} C:{bar['close']:7.2f} | "
                 f"Vol:{bar['volume']:,} | ({bar_count} 1-min bars)"
             )
 
@@ -274,10 +279,14 @@ class PolygonWebSocketClient:
     async def run(self) -> None:
         """Main event loop - run until interrupted."""
         self.running = True
+        flush_task: asyncio.Task[None] | None = None
 
         try:
             await self.connect()
             await self.subscribe()
+
+            if self.websocket is None:
+                raise RuntimeError("WebSocket not connected")
 
             # Start periodic flush task
             flush_task = asyncio.create_task(self._periodic_flush())
@@ -288,7 +297,8 @@ class PolygonWebSocketClient:
             async for message in self.websocket:
                 if not self.running:
                     break
-                await self._handle_message(message)
+                if isinstance(message, str):
+                    await self._handle_message(message)
 
         except websockets.exceptions.ConnectionClosed:
             self.logger.warning("Connection closed")
@@ -296,7 +306,8 @@ class PolygonWebSocketClient:
             self.logger.info("Interrupted by user")
         finally:
             self.running = False
-            flush_task.cancel()
+            if flush_task is not None:
+                flush_task.cancel()
             await self.shutdown()
 
     async def shutdown(self) -> None:

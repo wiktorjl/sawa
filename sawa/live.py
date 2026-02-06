@@ -127,7 +127,9 @@ async def get_live_prices_batch(
     Returns:
         Dict mapping ticker -> result dict (same format as get_live_price)
     """
-    api_key = api_key or get_env("POLYGON_API_KEY")
+    resolved_api_key = api_key or get_env("POLYGON_API_KEY")
+    if not resolved_api_key:
+        raise ValueError("POLYGON_API_KEY not set")
     logger = logger or logging.getLogger(__name__)
 
     # Calculate date range
@@ -135,7 +137,7 @@ async def get_live_prices_batch(
     start_date = end_date - timedelta(days=days * 2)
 
     # Fetch batch
-    client = AsyncPolygonClient(api_key, logger)
+    client = AsyncPolygonClient(resolved_api_key, logger)
     batch_results = await client.get_aggregates_batch(
         tickers=tickers,
         start_date=start_date,

@@ -60,7 +60,9 @@ async def scan_ytd_performance(
             - top_losers: list of dicts
             - errors: list of error messages
     """
-    api_key = api_key or get_env("POLYGON_API_KEY")
+    resolved_api_key = api_key or get_env("POLYGON_API_KEY")
+    if not resolved_api_key:
+        raise ValueError("POLYGON_API_KEY not set")
     logger = logger or logging.getLogger(__name__)
 
     # Default to Jan 1 of current year
@@ -82,7 +84,7 @@ async def scan_ytd_performance(
     logger.info(f"Fetching data for {len(symbols)} symbols...")
 
     # Fetch price data
-    client = AsyncPolygonClient(api_key, logger)
+    client = AsyncPolygonClient(resolved_api_key, logger)
     price_data = await client.get_aggregates_batch(
         tickers=symbols,
         start_date=start,
@@ -100,10 +102,10 @@ async def scan_ytd_performance(
 
     # Build ticker -> details map
     ticker_details: dict[str, dict[str, Any]] = {}
-    for ticker, result in zip(symbols, details_results):
-        if isinstance(result, Exception) or result is None:
+    for ticker, res in zip(symbols, details_results):
+        if isinstance(res, BaseException) or res is None:
             continue
-        ticker_details[ticker] = result
+        ticker_details[ticker] = res
 
     # Process results
     results: list[dict[str, Any]] = []

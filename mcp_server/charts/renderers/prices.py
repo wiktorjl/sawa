@@ -40,24 +40,24 @@ def render_price_chart(
     if theme is None:
         theme = get_theme()
 
-    # Extract data
+    # Extract data - filter out None values
     dates = [d.get("date") for d in data]
-    closes = [d.get("close") for d in data if d.get("close") is not None]
-    volumes = [d.get("volume") for d in data if d.get("volume") is not None]
-    highs = [d.get("high") for d in data if d.get("high") is not None]
-    lows = [d.get("low") for d in data if d.get("low") is not None]
+    closes: list[float] = [float(d["close"]) for d in data if d.get("close") is not None]
+    volumes: list[int] = [int(d["volume"]) for d in data if d.get("volume") is not None]
+    highs: list[float] = [float(d["high"]) for d in data if d.get("high") is not None]
+    lows: list[float] = [float(d["low"]) for d in data if d.get("low") is not None]
 
     if not closes:
         return f"No valid price data for {ticker}"
 
     # Calculate stats
-    first_close = closes[0]
-    last_close = closes[-1]
-    high_price = max(highs) if highs else max(closes)
-    low_price = min(lows) if lows else min(closes)
-    avg_volume = sum(volumes) / len(volumes) if volumes else 0
+    first_close: float = closes[0]
+    last_close: float = closes[-1]
+    high_price: float = max(highs) if highs else max(closes)
+    low_price: float = min(lows) if lows else min(closes)
+    avg_volume: float = sum(volumes) / len(volumes) if volumes else 0.0
 
-    change = last_close - first_close
+    change: float = last_close - first_close
     change_pct = (change / first_close * 100) if first_close else 0
 
     # Build chart based on detail level
