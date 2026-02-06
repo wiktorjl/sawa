@@ -119,30 +119,6 @@ def get_tickers_with_prices(conn) -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
-def get_tickers_needing_ta(conn) -> list[str]:
-    """Get tickers with prices but incomplete technical indicators.
-
-    Returns tickers where price data exists for dates not in technical_indicators.
-
-    Args:
-        conn: Database connection
-
-    Returns:
-        List of ticker symbols needing TA calculation
-    """
-    query = """
-        SELECT DISTINCT sp.ticker
-        FROM stock_prices sp
-        LEFT JOIN technical_indicators ti
-            ON sp.ticker = ti.ticker AND sp.date = ti.date
-        WHERE ti.ticker IS NULL
-        ORDER BY sp.ticker
-    """
-    with conn.cursor() as cur:
-        cur.execute(query)
-        return [row[0] for row in cur.fetchall()]
-
-
 def get_prices_for_ticker(
     conn,
     ticker: str,
@@ -214,21 +190,3 @@ def get_ta_count(conn, ticker: str | None = None) -> int:
         cur.execute(query, params)
         result = cur.fetchone()
         return result[0] if result else 0
-
-
-def delete_ta_for_ticker(conn, ticker: str) -> int:
-    """Delete all technical indicators for a ticker.
-
-    Args:
-        conn: Database connection
-        ticker: Stock symbol
-
-    Returns:
-        Number of rows deleted
-    """
-    query = "DELETE FROM technical_indicators WHERE ticker = %s"
-    with conn.cursor() as cur:
-        cur.execute(query, (ticker.upper(),))
-        deleted = cur.rowcount
-        conn.commit()
-    return deleted
