@@ -1443,6 +1443,48 @@ SIC_TO_GICS_FALLBACK: dict[str, GICSMapping] = {
 }
 
 
+# Ticker-specific GICS overrides for foreign ADRs and stocks without SIC codes
+# Used before SIC code lookup
+TICKER_GICS_OVERRIDES: dict[str, GICSMapping] = {
+    "ASML": {
+        "gics_sector": "Information Technology",
+        "gics_industry": "Semiconductor Equipment",
+        "confidence": "high",
+        "notes": "Dutch ADR - semiconductor equipment manufacturer",
+    },
+    "ARM": {
+        "gics_sector": "Information Technology",
+        "gics_industry": "Semiconductors",
+        "confidence": "high",
+        "notes": "UK ADR - semiconductor IP licensing",
+    },
+    "PDD": {
+        "gics_sector": "Consumer Discretionary",
+        "gics_industry": "Internet Retail",
+        "confidence": "high",
+        "notes": "Chinese ADR - e-commerce platform",
+    },
+    "TRI": {
+        "gics_sector": "Industrials",
+        "gics_industry": "Professional Services",
+        "confidence": "high",
+        "notes": "Canadian - financial data and legal information services",
+    },
+    "FER": {
+        "gics_sector": "Industrials",
+        "gics_industry": "Construction & Engineering",
+        "confidence": "high",
+        "notes": "Spanish - infrastructure and construction",
+    },
+    "CCEP": {
+        "gics_sector": "Consumer Staples",
+        "gics_industry": "Soft Drinks",
+        "confidence": "high",
+        "notes": "European Coca-Cola bottler",
+    },
+}
+
+
 # Text patterns for fallback matching when SIC code not in dictionary
 SIC_DESCRIPTION_PATTERNS: dict[str, str] = {
     # Information Technology
@@ -1536,16 +1578,25 @@ def _get_mapping(sic_code: str) -> GICSMapping | None:
     return SIC_TO_GICS_FALLBACK.get(sic_code)
 
 
-def map_sic_to_gics(sic_code: str | None, sic_description: str | None = None) -> str:
+def map_sic_to_gics(
+    sic_code: str | None,
+    sic_description: str | None = None,
+    ticker: str | None = None,
+) -> str:
     """Map SIC code to GICS sector.
 
     Args:
         sic_code: SIC code (e.g., "7372")
         sic_description: SIC description for fallback matching (optional)
+        ticker: Ticker symbol for override lookup (optional)
 
     Returns:
         GICS sector name, or "Other" if no mapping found
     """
+    # Try ticker-specific override first (for foreign ADRs, etc.)
+    if ticker and ticker.upper() in TICKER_GICS_OVERRIDES:
+        return TICKER_GICS_OVERRIDES[ticker.upper()]["gics_sector"]
+
     # Try exact SIC code match
     if sic_code:
         mapping = _get_mapping(sic_code)
@@ -1574,19 +1625,40 @@ def get_sic_mapping(sic_code: str) -> GICSMapping | None:
     return _get_mapping(sic_code)
 
 
-def get_sic_industry(sic_code: str | None, sic_description: str | None = None) -> str:
+def get_sic_industry(
+    sic_code: str | None,
+    sic_description: str | None = None,
+    ticker: str | None = None,
+) -> str:
     """Get GICS industry for an SIC code.
 
     Args:
         sic_code: SIC code (e.g., "7372")
         sic_description: SIC description for fallback (optional)
+        ticker: Ticker symbol for override lookup (optional)
 
     Returns:
         GICS industry name, or "Unclassified" if no mapping found
     """
+    # Try ticker-specific override first
+    if ticker and ticker.upper() in TICKER_GICS_OVERRIDES:
+        return TICKER_GICS_OVERRIDES[ticker.upper()]["gics_industry"]
+
     if sic_code:
         mapping = _get_mapping(sic_code)
         if mapping:
             return mapping["gics_industry"]
 
     return "Unclassified"
+
+
+def get_ticker_mapping(ticker: str) -> GICSMapping | None:
+    """Get GICS mapping for a specific ticker (override only).
+
+    Args:
+        ticker: Ticker symbol (e.g., "ASML")
+
+    Returns:
+        GICSMapping dict if ticker has override, None otherwise
+    """
+    return TICKER_GICS_OVERRIDES.get(ticker.upper())
