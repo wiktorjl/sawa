@@ -499,8 +499,50 @@ def run_coldstart(
         logger.info("=" * 60)
         logger.info("DROP ONLY MODE - Dropping tables")
         logger.info("=" * 60)
+
+        # Safety check: Confirm before dropping
+        import sys
+
         try:
             with psycopg.connect(database_url) as conn:
+                # Check if data exists
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_type = 'BASE TABLE'
+                    """)
+                    table_count = cur.fetchone()[0]
+
+                    if table_count > 0:
+                        # Check for data in stock_prices
+                        try:
+                            cur.execute("SELECT COUNT(*) FROM stock_prices")
+                            record_count = cur.fetchone()[0]
+                        except Exception:
+                            record_count = 0
+
+                        logger.warning(f"⚠️  WARNING: Found {table_count} tables in database")
+                        if record_count > 0:
+                            logger.warning(
+                                f"⚠️  WARNING: stock_prices table contains {record_count:,} records"
+                            )
+                        logger.warning("⚠️  ALL DATA WILL BE PERMANENTLY DELETED!")
+
+                        # Interactive confirmation
+                        if sys.stdin.isatty():
+                            response = input("\n❓ Type 'yes' to confirm deletion: ")
+                            if response.lower() != "yes":
+                                logger.info("❌ Aborted by user")
+                                stats["success"] = False
+                                stats["aborted"] = True
+                                return stats
+                        else:
+                            logger.error("❌ Non-interactive mode requires explicit confirmation")
+                            logger.error("   Use --confirm-drop flag or run interactively")
+                            stats["success"] = False
+                            return stats
+
                 logger.info("Dropping all tables...")
                 drop_all_tables(conn, dry_run=False, logger=logger)
 
@@ -558,6 +600,43 @@ def run_coldstart(
             if not load_only:
                 logger.info("\n[1/9] Setting up database...")
                 if drop_tables:
+                    # Safety check: Warn and confirm before dropping
+                    import sys
+
+                    with conn.cursor() as cur:
+                        # Check if data exists
+                        try:
+                            cur.execute("SELECT COUNT(*) FROM stock_prices")
+                            record_count = cur.fetchone()[0]
+
+                            if record_count > 0:
+                                logger.warning("")
+                                logger.warning("⚠️  " + "=" * 60)
+                                logger.warning(
+                                    f"⚠️  WARNING: stock_prices table contains {record_count:,} records"
+                                )
+                                logger.warning("⚠️  ALL EXISTING DATA WILL BE PERMANENTLY DELETED!")
+                                logger.warning("⚠️  " + "=" * 60)
+                                logger.warning("")
+
+                                # Interactive confirmation
+                                if sys.stdin.isatty():
+                                    response = input("❓ Type 'DELETE' to confirm: ")
+                                    if response != "DELETE":
+                                        logger.info("❌ Aborted by user - no data was deleted")
+                                        stats["success"] = False
+                                        stats["aborted"] = True
+                                        return stats
+                                else:
+                                    logger.error("❌ Non-interactive mode with existing data")
+                                    logger.error("   Run with --no-drop to preserve data")
+                                    logger.error("   Or run interactively to confirm deletion")
+                                    stats["success"] = False
+                                    return stats
+                        except Exception:
+                            # Table doesn't exist yet, safe to proceed
+                            pass
+
                     logger.info("  Dropping existing tables...")
                     drop_all_tables(conn, dry_run=False, logger=logger)
 
