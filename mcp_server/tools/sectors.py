@@ -49,7 +49,15 @@ def list_sectors(
     if taxonomy == "gics":
         sql = f"""
             SELECT
-                COALESCE(m.gics_sector, 'Unclassified') as sector,
+                CASE
+                    WHEN c.ticker = 'ASML' THEN 'Information Technology'
+                    WHEN c.ticker = 'ARM' THEN 'Information Technology'
+                    WHEN c.ticker = 'PDD' THEN 'Consumer Discretionary'
+                    WHEN c.ticker = 'TRI' THEN 'Industrials'
+                    WHEN c.ticker = 'FER' THEN 'Industrials'
+                    WHEN c.ticker = 'CCEP' THEN 'Consumer Staples'
+                    ELSE COALESCE(m.gics_sector, 'Unclassified')
+                END as sector,
                 COUNT(DISTINCT c.ticker) as stock_count,
                 STRING_AGG(DISTINCT c.ticker, ', ' ORDER BY c.ticker)
                     FILTER (WHERE c.ticker IS NOT NULL) as sample_tickers
@@ -57,7 +65,7 @@ def list_sectors(
             LEFT JOIN sic_gics_mapping m ON c.sic_code = m.sic_code
             WHERE c.active = true
             {index_filter}
-            GROUP BY COALESCE(m.gics_sector, 'Unclassified')
+            GROUP BY sector
             ORDER BY stock_count DESC
             LIMIT %(limit)s
         """
@@ -110,7 +118,18 @@ def get_sector_performance(
 
     # Build sector grouping based on taxonomy
     if taxonomy == "gics":
-        sector_expr = "COALESCE(m.gics_sector, 'Unclassified')"
+        # Include ticker-specific overrides for foreign ADRs without SIC codes
+        sector_expr = """
+            CASE
+                WHEN c.ticker = 'ASML' THEN 'Information Technology'
+                WHEN c.ticker = 'ARM' THEN 'Information Technology'
+                WHEN c.ticker = 'PDD' THEN 'Consumer Discretionary'
+                WHEN c.ticker = 'TRI' THEN 'Industrials'
+                WHEN c.ticker = 'FER' THEN 'Industrials'
+                WHEN c.ticker = 'CCEP' THEN 'Consumer Staples'
+                ELSE COALESCE(m.gics_sector, 'Unclassified')
+            END
+        """
         join_clause = "LEFT JOIN sic_gics_mapping m ON c.sic_code = m.sic_code"
     else:
         sector_expr = "c.sic_description"
@@ -131,11 +150,11 @@ def get_sector_performance(
         WITH date_refs AS (
             SELECT
                 MAX(date) as latest,
-                MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices)) as prev_day,
+                MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices_live)) as prev_day,
                 MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '7 days') as week_ago,
                 MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '30 days') as month_ago,
                 MIN(date) FILTER (WHERE date >= DATE_TRUNC('year', CURRENT_DATE)) as ytd_start
-            FROM stock_prices
+                FROM stock_prices_live
         ),
         stock_returns AS (
             SELECT
@@ -158,14 +177,14 @@ def get_sector_performance(
             FROM companies c
             {join_clause}
             CROSS JOIN date_refs dr
-            JOIN stock_prices p_now ON c.ticker = p_now.ticker AND p_now.date = dr.latest
-            LEFT JOIN stock_prices p_prev
+            JOIN stock_prices_live p_now ON c.ticker = p_now.ticker AND p_now.date = dr.latest
+            LEFT JOIN stock_prices_live p_prev
                 ON c.ticker = p_prev.ticker AND p_prev.date = dr.prev_day
-            LEFT JOIN stock_prices p_week
+            LEFT JOIN stock_prices_live p_week
                 ON c.ticker = p_week.ticker AND p_week.date = dr.week_ago
-            LEFT JOIN stock_prices p_month
+            LEFT JOIN stock_prices_live p_month
                 ON c.ticker = p_month.ticker AND p_month.date = dr.month_ago
-            LEFT JOIN stock_prices p_ytd
+            LEFT JOIN stock_prices_live p_ytd
                 ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
             WHERE c.active = true
               AND {sector_expr} IS NOT NULL
