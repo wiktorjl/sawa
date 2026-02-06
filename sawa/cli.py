@@ -49,6 +49,16 @@ def cmd_coldstart(args) -> int:
     load_only = args.load_only
     skip_downloads = args.skip_downloads
 
+    # Safety: --schema-only should default to --no-drop to prevent accidental data loss
+    # User can explicitly pass both --schema-only and not --no-drop if they really want to drop
+    if schema_only and not args.no_drop:
+        logger.warning("⚠️  --schema-only defaults to --no-drop to protect existing data")
+        logger.warning(
+            "⚠️  To drop tables with schema-only, explicitly use: --schema-only (without --no-drop)"
+        )
+        # Automatically enable no-drop for safety
+        args.no_drop = True
+
     # API credentials only required if downloading data (not for drop/schema/load-only modes)
     needs_api = not (drop_only or schema_only or load_only or skip_downloads)
     if needs_api:
@@ -117,13 +127,47 @@ def cmd_daily(args) -> int:
             database_url=db_url,
             force_from_date=args.from_date,
             skip_news=args.skip_news,
-            skip_ta=args.skip_ta,
+            skip_ta=args.skip_ta or args.news_only,
+            skip_prices=args.news_only,
             dry_run=args.dry_run,
             logger=logger,
         )
         return 0 if stats.get("success") else 1
     except Exception as e:
         logger.error(f"Daily update failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_intraday(args) -> int:
+    """Run intraday price streaming."""
+    from sawa.intraday import run_intraday
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="intraday")
+
+    # Get credentials
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        stats = run_intraday(
+            api_key=api_key,
+            database_url=db_url,
+            bar_size=args.bar_size,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Intraday streaming failed: {e}")
         if args.verbose:
             raise
         return 1
@@ -675,17 +719,25 @@ Environment Variables:
     cold_parser.add_argument(
         "--symbols-file", type=Path, help="File with symbols to use (one per line)"
     )
-    cold_parser.add_argument("--no-drop", action="store_true", help="Don't drop existing tables")
+    cold_parser.add_argument(
+        "--no-drop",
+        action="store_true",
+        help="Don't drop existing tables (RECOMMENDED for schema updates)",
+    )
     cold_parser.add_argument("--api-key", help="Polygon API key")
     cold_parser.add_argument("--s3-access-key", help="Polygon S3 access key")
     cold_parser.add_argument("--s3-secret-key", help="Polygon S3 secret key")
     cold_parser.add_argument("--database-url", help="PostgreSQL URL")
     # Mode options (mutually exclusive-ish)
     cold_parser.add_argument(
-        "--drop-only", action="store_true", help="Only drop tables and clean data, then exit"
+        "--drop-only",
+        action="store_true",
+        help="⚠️  Only drop tables and clean data, then exit (requires confirmation)",
     )
     cold_parser.add_argument(
-        "--schema-only", action="store_true", help="Only set up schema (no download/load)"
+        "--schema-only",
+        action="store_true",
+        help="Only set up schema (no download/load). Auto-enables --no-drop for safety.",
     )
     cold_parser.add_argument(
         "--load-only", action="store_true", help="Only load existing CSV data (no schema changes)"
@@ -728,10 +780,32 @@ Environment Variables:
     daily_parser.add_argument("--database-url", help="PostgreSQL URL")
     daily_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
     daily_parser.add_argument("--skip-ta", action="store_true", help="Skip technical indicators")
+    daily_parser.add_argument(
+        "--news-only", action="store_true", help="Only update news (skip prices and TA)"
+    )
     daily_parser.add_argument("--log-dir", help="Directory for log files")
     daily_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     daily_parser.add_argument("-v", "--verbose", action="store_true")
     daily_parser.set_defaults(func=cmd_daily)
+
+    # Intraday subcommand
+    intraday_parser = subparsers.add_parser(
+        "intraday",
+        help="Stream live intraday prices via WebSocket",
+        description="Stream real-time 5-minute bars (15-min delayed, manual start/stop).",
+    )
+    intraday_parser.add_argument(
+        "--bar-size",
+        type=int,
+        default=5,
+        choices=[1, 5, 15, 30, 60],
+        help="Bar size in minutes (default: 5)",
+    )
+    intraday_parser.add_argument("--api-key", help="Polygon API key")
+    intraday_parser.add_argument("--database-url", help="PostgreSQL URL")
+    intraday_parser.add_argument("--log-dir", help="Directory for log files")
+    intraday_parser.add_argument("-v", "--verbose", action="store_true")
+    intraday_parser.set_defaults(func=cmd_intraday)
 
     # Add symbol subcommand
     add_parser = subparsers.add_parser(
