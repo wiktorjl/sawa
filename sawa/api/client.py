@@ -16,6 +16,7 @@ from urllib.parse import urljoin
 
 import httpx
 
+from sawa.domain.exceptions import ProviderError
 from sawa.utils.constants import DEFAULT_HTTP_TIMEOUT
 from sawa.utils.symbols import validate_ticker
 
@@ -94,7 +95,7 @@ class PolygonClient:
         data = response.json()
         if data.get("status") not in ("OK", "DELAYED"):
             error = data.get("error", data.get("message", "Unknown error"))
-            raise ValueError(f"API error: {error}")
+            raise ProviderError(f"API error: {error}", provider="polygon")
 
         return data
 
@@ -137,7 +138,7 @@ class PolygonClient:
 
             if data.get("status") not in ("OK", "DELAYED"):
                 error = data.get("error", data.get("message", "Unknown"))
-                raise ValueError(f"API error: {error}")
+                raise ProviderError(f"API error: {error}", provider="polygon")
 
             all_results.extend(data.get("results", []))
             url = data.get("next_url")
