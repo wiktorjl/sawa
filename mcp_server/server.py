@@ -68,6 +68,7 @@ from .tools.market_data import (
     get_latest_price_async,
     get_latest_technical_indicators,
     get_live_price_async,
+    get_live_prices_batch_async,
     get_stock_prices,
     get_stock_prices_async,
     get_technical_indicators,
@@ -188,6 +189,28 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_live_prices_batch",
+            description="Get live stock prices for multiple tickers from Polygon API (real-time batch query)",  # noqa: E501
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of stock ticker symbols (e.g., ['AAPL', 'MSFT', 'GOOGL'])",  # noqa: E501
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days of history per ticker (default: 7)",
+                        "default": 7,
+                        "minimum": 1,
+                        "maximum": 30,
+                    },
+                },
+                "required": ["tickers"],
             },
         ),
         Tool(
@@ -1246,6 +1269,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             logger.info("  Executing: get_live_price")
             result = await get_live_price_async(
                 ticker=arguments["ticker"],
+                days=arguments.get("days", 7),
+            )
+        elif name == "get_live_prices_batch":
+            logger.info("  Executing: get_live_prices_batch")
+            result = await get_live_prices_batch_async(
+                tickers=arguments["tickers"],
                 days=arguments.get("days", 7),
             )
         elif name == "get_latest_price":
