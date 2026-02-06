@@ -47,7 +47,7 @@ def get_top_movers(
 
     # Build period comparison
     period_map = {
-        "1d": "MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices))",
+        "1d": "MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices_live))",
         "1w": "MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '7 days')",
         "1m": "MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '30 days')",
         "ytd": "MIN(date) FILTER (WHERE date >= DATE_TRUNC('year', CURRENT_DATE))",
@@ -64,7 +64,11 @@ def get_top_movers(
                      SELECT 1 FROM sic_gics_mapping m
                      WHERE m.sic_code = c.sic_code
                        AND m.gics_sector ILIKE %(sector)s
-                 ))
+                 )
+                 OR (c.ticker IN ('ASML', 'ARM') AND %(sector)s ILIKE '%technology%')
+                 OR (c.ticker = 'PDD' AND %(sector)s ILIKE '%discretionary%')
+                 OR (c.ticker IN ('TRI', 'FER') AND %(sector)s ILIKE '%industrial%')
+                 OR (c.ticker = 'CCEP' AND %(sector)s ILIKE '%staples%'))
         """
         params["sector"] = f"%{sector}%"
 
@@ -102,7 +106,7 @@ def get_top_movers(
                 SELECT
                     MAX(date) as latest,
                     {period_expr} as compare_date
-                FROM stock_prices
+                FROM stock_prices_live
             ),
             changes AS (
                 SELECT
@@ -123,9 +127,9 @@ def get_top_movers(
                     ) as indices
                 FROM companies c
                 CROSS JOIN date_refs dr
-                JOIN stock_prices p_now
+                JOIN stock_prices_live p_now
                     ON c.ticker = p_now.ticker AND p_now.date = dr.latest
-                LEFT JOIN stock_prices p_prev
+                LEFT JOIN stock_prices_live p_prev
                     ON c.ticker = p_prev.ticker AND p_prev.date = dr.compare_date
                 WHERE c.active = true
                 {sector_filter}
@@ -161,7 +165,7 @@ def get_top_movers(
                 SELECT
                     MAX(date) as latest,
                     {period_expr} as compare_date
-                FROM stock_prices
+                FROM stock_prices_live
             )
             SELECT
                 c.ticker,
@@ -241,7 +245,11 @@ def get_volume_leaders(
                      SELECT 1 FROM sic_gics_mapping m
                      WHERE m.sic_code = c.sic_code
                        AND m.gics_sector ILIKE %(sector)s
-                 ))
+                 )
+                 OR (c.ticker IN ('ASML', 'ARM') AND %(sector)s ILIKE '%technology%')
+                 OR (c.ticker = 'PDD' AND %(sector)s ILIKE '%discretionary%')
+                 OR (c.ticker IN ('TRI', 'FER') AND %(sector)s ILIKE '%industrial%')
+                 OR (c.ticker = 'CCEP' AND %(sector)s ILIKE '%staples%'))
         """
         params["sector"] = f"%{sector}%"
 
@@ -298,8 +306,8 @@ def get_volume_leaders(
         FROM companies c
         CROSS JOIN latest_date ld
         CROSS JOIN prev_date pd
-        JOIN stock_prices p ON c.ticker = p.ticker AND p.date = ld.dt
-        LEFT JOIN stock_prices p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
+        JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
+        LEFT JOIN stock_prices_live p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
         LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = ld.dt
         WHERE c.active = true
           AND p.volume > 0
@@ -362,7 +370,7 @@ def get_market_breadth(
         # Use latest two trading days
         date_cte = """
             WITH latest_dates AS (
-                SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT 2
+                SELECT DISTINCT date FROM stock_prices_live ORDER BY date DESC LIMIT 2
             ),
             date_refs AS (
                 SELECT MAX(date) as latest, MIN(date) as previous FROM latest_dates
