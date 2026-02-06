@@ -259,8 +259,10 @@ class PolygonPriceRepository(StockPriceRepository):
 
     def _convert_rest_result(self, result: dict[str, Any], ticker: str) -> StockPrice:
         """Convert Polygon REST result to domain model."""
+        from datetime import timezone
+
         timestamp_ms = result.get("t", 0)
-        price_date = datetime.fromtimestamp(timestamp_ms / 1000).date()
+        price_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).date()
 
         return StockPrice(
             ticker=ticker,

@@ -124,7 +124,9 @@ def _render_treasury_yields(
     ]
 
     # Build yield curve visualization
-    yields = [(name, latest.get(key)) for name, key in maturities if latest.get(key) is not None]
+    yields: list[tuple[str, float]] = [
+        (name, float(latest[key])) for name, key in maturities if latest.get(key) is not None
+    ]
 
     if yields:
         max_yield = max(y for _, y in yields)
@@ -318,7 +320,7 @@ def _render_labor_market(
     ]
 
     for label, key, suffix, decimals in metrics:
-        series = [d.get(key) for d in data if d.get(key) is not None]
+        series: list[float] = [float(d[key]) for d in data if d.get(key) is not None]
         if series:
             current = series[-1]
             sparkline_str = spark.render(series, layout.sparkline_width)

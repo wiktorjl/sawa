@@ -61,6 +61,16 @@ class PolygonClient:
             timeout=float(DEFAULT_HTTP_TIMEOUT),
         )
 
+    def close(self) -> None:
+        """Close the HTTP client and release resources."""
+        self.client.close()
+
+    def __enter__(self) -> "PolygonClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
     def get(
         self,
         endpoint: str,
@@ -157,6 +167,7 @@ class PolygonClient:
         self,
         endpoint: str,
         path_params: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
         timeout: int = DEFAULT_HTTP_TIMEOUT,
         max_retries: int = 3,
     ) -> dict[str, Any] | None:
@@ -166,6 +177,7 @@ class PolygonClient:
         Args:
             endpoint: Endpoint key or path
             path_params: URL path parameters
+            params: Query parameters
             timeout: Request timeout
             max_retries: Retry attempts for rate limits
 
@@ -178,11 +190,15 @@ class PolygonClient:
 
         url = urljoin(BASE_URL, path)
 
+        query_params: dict[str, Any] = {"apiKey": self.api_key}
+        if params:
+            query_params.update(params)
+
         for attempt in range(max_retries):
             try:
                 response = self.client.get(
                     url,
-                    params={"apiKey": self.api_key},
+                    params=query_params,
                     timeout=timeout,
                 )
 
@@ -396,4 +412,4 @@ class PolygonClient:
         if event_types:
             params["types"] = ",".join(event_types)
 
-        return self.get_single("ticker-events", path_params={"ticker": ticker})
+        return self.get_single("ticker-events", path_params={"ticker": ticker}, params=params)

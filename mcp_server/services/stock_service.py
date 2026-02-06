@@ -5,7 +5,7 @@ via the repository layer and converts domain models to MCP-compatible dicts.
 """
 
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from sawa.repositories import get_factory
 
@@ -138,7 +138,7 @@ class StockService:
     async def get_fundamentals(
         self,
         ticker: str,
-        timeframe: str = "quarterly",
+        timeframe: Literal["quarterly", "annual"] = "quarterly",
         limit: int = 4,
     ) -> dict[str, Any]:
         """Get fundamentals (income, balance, cash flow).
@@ -227,6 +227,6 @@ class StockService:
         target = date.fromisoformat(target_date) if target_date else None
 
         repo = self._factory.get_technical_indicators_repository()
-        indicators = await repo.screen_by_indicators(filters, target, limit)
+        indicators = await repo.screen_by_indicators(filters, target, None, limit)
 
         return [technical_indicators_to_dict(ind) for ind in indicators]

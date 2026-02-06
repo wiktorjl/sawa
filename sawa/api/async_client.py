@@ -80,7 +80,7 @@ class AsyncPolygonClient:
             f"{self.base_url}/v2/aggs/ticker/{ticker.upper()}"
             f"/range/1/{timespan}/{start_date}/{end_date}"
         )
-        params = {
+        params: dict[str, str | int | bool] = {
             "adjusted": str(adjusted).lower(),
             "sort": sort,
             "limit": limit,
@@ -94,8 +94,9 @@ class AsyncPolygonClient:
             try:
                 response = await client.get(url, params=params)
                 response.raise_for_status()
-                data = response.json()
-                return data.get("results", [])
+                data: dict[str, Any] = response.json()
+                results: list[dict[str, Any]] = data.get("results", [])
+                return results
             except httpx.HTTPStatusError as e:
                 self.logger.error(f"HTTP error for {ticker}: {e}")
                 raise ProviderError(
@@ -130,8 +131,9 @@ class AsyncPolygonClient:
             try:
                 response = await client.get(url, params=params)
                 response.raise_for_status()
-                data = response.json()
-                return data.get("results")
+                data: dict[str, Any] = response.json()
+                result: dict[str, Any] | None = data.get("results")
+                return result
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     self.logger.warning(f"Ticker not found: {ticker}")
@@ -179,15 +181,16 @@ class AsyncPolygonClient:
                 return ticker, results
 
         tasks = [fetch_one(ticker) for ticker in tickers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Filter out exceptions and return successful results
         output: dict[str, list[dict[str, Any]]] = {}
-        for result in results:
-            if isinstance(result, Exception):
-                self.logger.error(f"Batch fetch error: {result}")
+        for item in gathered:
+            if isinstance(item, BaseException):
+                self.logger.error(f"Batch fetch error: {item}")
                 continue
-            ticker, data = result
+            # item is tuple[str, list[dict[str, Any]]]
+            ticker, data = item[0], item[1]
             output[ticker] = data
 
         return output

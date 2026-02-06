@@ -9,7 +9,7 @@ Supports parallel processing with multiprocessing.Pool.
 import logging
 import time
 from multiprocessing import Pool
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 
@@ -220,6 +220,8 @@ def run_ta_backfill(
         log.info(f"\nProcessing {len(all_tickers)} tickers with {workers} workers...")
         start_time = time.time()
 
+        results: list[dict[str, Any]] = []
+
         if workers > 1:
             # Parallel processing
             with Pool(
@@ -227,18 +229,16 @@ def run_ta_backfill(
                 initializer=_init_worker,
                 initargs=(database_url,),
             ) as pool:
-                results = []
-                for i, result in enumerate(pool.imap_unordered(_process_ticker, all_tickers)):
-                    results.append(result)
+                for i, res in enumerate(pool.imap_unordered(_process_ticker, all_tickers)):
+                    results.append(cast(dict[str, Any], res))
                     if (i + 1) % 50 == 0:
                         log.info(f"  Progress: {i + 1}/{len(all_tickers)}")
         else:
             # Sequential processing
             _init_worker(database_url)
-            results = []
             for i, ticker in enumerate(all_tickers):
-                result = _process_ticker(ticker)
-                results.append(result)
+                res = _process_ticker(ticker)
+                results.append(res)
                 if (i + 1) % 50 == 0:
                     log.info(f"  Progress: {i + 1}/{len(all_tickers)}")
 

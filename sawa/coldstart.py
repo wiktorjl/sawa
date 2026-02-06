@@ -508,17 +508,19 @@ def run_coldstart(
                 # Check if data exists
                 with conn.cursor() as cur:
                     cur.execute("""
-                        SELECT COUNT(*) FROM information_schema.tables 
-                        WHERE table_schema = 'public' 
+                        SELECT COUNT(*) FROM information_schema.tables
+                        WHERE table_schema = 'public'
                         AND table_type = 'BASE TABLE'
                     """)
-                    table_count = cur.fetchone()[0]
+                    row = cur.fetchone()
+                    table_count = row[0] if row else 0
 
                     if table_count > 0:
                         # Check for data in stock_prices
                         try:
                             cur.execute("SELECT COUNT(*) FROM stock_prices")
-                            record_count = cur.fetchone()[0]
+                            row = cur.fetchone()
+                            record_count = row[0] if row else 0
                         except Exception:
                             record_count = 0
 
@@ -607,15 +609,16 @@ def run_coldstart(
                         # Check if data exists
                         try:
                             cur.execute("SELECT COUNT(*) FROM stock_prices")
-                            record_count = cur.fetchone()[0]
+                            row = cur.fetchone()
+                            record_count = row[0] if row else 0
 
                             if record_count > 0:
                                 logger.warning("")
                                 logger.warning("⚠️  " + "=" * 60)
                                 logger.warning(
-                                    f"⚠️  WARNING: stock_prices table contains {record_count:,} records"
+                                    f"⚠️  WARNING: stock_prices has {record_count:,} records"
                                 )
-                                logger.warning("⚠️  ALL EXISTING DATA WILL BE PERMANENTLY DELETED!")
+                                logger.warning("⚠️  ALL DATA WILL BE PERMANENTLY DELETED!")
                                 logger.warning("⚠️  " + "=" * 60)
                                 logger.warning("")
 

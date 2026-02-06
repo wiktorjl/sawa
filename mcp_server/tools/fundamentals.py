@@ -1,11 +1,13 @@
 """Fundamentals MCP tools (balance sheets, cash flows, income statements)."""
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
+
+Timeframe = Literal["quarterly", "annual"]
 
 
 # --- Async service-based implementations ---
@@ -22,8 +24,11 @@ async def get_fundamentals_async(
     if timeframe not in ("quarterly", "annual"):
         raise ValueError("timeframe must be 'quarterly' or 'annual'")
 
+    # Type narrow the timeframe to the Literal type
+    validated_timeframe: Timeframe = "quarterly" if timeframe == "quarterly" else "annual"
+
     service = get_stock_service()
-    return await service.get_fundamentals(ticker, timeframe, min(limit, 20))
+    return await service.get_fundamentals(ticker, validated_timeframe, min(limit, 20))
 
 
 # --- Sync SQL-based implementations (original) ---

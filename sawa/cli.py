@@ -436,7 +436,7 @@ def cmd_index_list(args) -> int:
 
     try:
         repo = DatabaseIndexRepository(db_url)
-        indices = asyncio.get_event_loop().run_until_complete(repo.list_indices())
+        indices = asyncio.run(repo.list_indices())
 
         if not indices:
             print("No indices found in database.")
@@ -473,12 +473,12 @@ def cmd_index_show(args) -> int:
         repo = DatabaseIndexRepository(db_url)
         code = args.code.lower()
 
-        index = asyncio.get_event_loop().run_until_complete(repo.get_index(code))
+        index = asyncio.run(repo.get_index(code))
         if not index:
             logger.error(f"Index not found: {code}")
             return 1
 
-        constituents = asyncio.get_event_loop().run_until_complete(repo.get_constituents(code))
+        constituents = asyncio.run(repo.get_constituents(code))
 
         print(f"\nIndex: {index.name} ({index.code})")
         print(f"Description: {index.description or 'N/A'}")
@@ -551,7 +551,7 @@ def cmd_index_check(args) -> int:
         repo = DatabaseIndexRepository(db_url)
         ticker = args.ticker.upper()
 
-        indices = asyncio.get_event_loop().run_until_complete(repo.get_ticker_indices(ticker))
+        indices = asyncio.run(repo.get_ticker_indices(ticker))
 
         if indices:
             print(f"{ticker} is a member of: {', '.join(indices)}")

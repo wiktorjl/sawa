@@ -120,11 +120,15 @@ def _render_normal(
     if income_statements:
         lines.append(theme.muted_text("INCOME STATEMENT"))
 
-        revenues = [
-            d.get("total_revenue") for d in reversed(income_statements) if d.get("total_revenue")
+        revenues: list[float] = [
+            float(d["total_revenue"])
+            for d in reversed(income_statements)
+            if d.get("total_revenue") is not None
         ]
-        net_incomes = [
-            d.get("net_income") for d in reversed(income_statements) if d.get("net_income")
+        net_incomes: list[float] = [
+            float(d["net_income"])
+            for d in reversed(income_statements)
+            if d.get("net_income") is not None
         ]
 
         latest = income_statements[0]
