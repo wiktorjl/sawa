@@ -10,30 +10,6 @@ logger = logging.getLogger(__name__)
 Timeframe = Literal["quarterly", "annual"]
 
 
-# --- Async service-based implementations ---
-
-
-async def get_fundamentals_async(
-    ticker: str,
-    timeframe: str = "quarterly",
-    limit: int = 4,
-) -> dict[str, Any]:
-    """Get fundamentals via service layer (async)."""
-    from ..services import get_stock_service
-
-    if timeframe not in ("quarterly", "annual"):
-        raise ValueError("timeframe must be 'quarterly' or 'annual'")
-
-    # Type narrow the timeframe to the Literal type
-    validated_timeframe: Timeframe = "quarterly" if timeframe == "quarterly" else "annual"
-
-    service = get_stock_service()
-    return await service.get_fundamentals(ticker, validated_timeframe, min(limit, 20))
-
-
-# --- Sync SQL-based implementations (original) ---
-
-
 def get_fundamentals(
     ticker: str,
     timeframe: str = "quarterly",

@@ -4,49 +4,11 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
+from psycopg import sql
+
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
-
-
-# --- Async service-based implementations ---
-
-
-async def get_stock_prices_async(
-    ticker: str,
-    start_date: str,
-    end_date: str | None = None,
-    limit: int = 252,
-) -> list[dict[str, Any]]:
-    """Get stock prices via service layer (async)."""
-    from ..services import get_stock_service
-
-    service = get_stock_service()
-    return await service.get_prices(ticker, start_date, end_date, limit)
-
-
-async def get_financial_ratios_async(
-    ticker: str,
-    start_date: str,
-    end_date: str | None = None,
-    limit: int = 100,
-) -> list[dict[str, Any]]:
-    """Get financial ratios via service layer (async)."""
-    from ..services import get_stock_service
-
-    service = get_stock_service()
-    return await service.get_financial_ratios(ticker, start_date, end_date, limit)
-
-
-async def get_latest_price_async(ticker: str) -> dict[str, Any] | None:
-    """Get latest price via service layer (async)."""
-    from ..services import get_stock_service
-
-    service = get_stock_service()
-    return await service.get_latest_price(ticker)
-
-
-# --- Sync SQL-based implementations (original) ---
 
 
 def get_stock_prices(
@@ -77,7 +39,7 @@ def get_stock_prices(
 
     table_name = "stock_prices_live" if use_live else "stock_prices"
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             date,
             open,
@@ -85,13 +47,13 @@ def get_stock_prices(
             low,
             close,
             volume
-        FROM {table_name}
+        FROM {table}
         WHERE ticker = %(ticker)s
             AND date >= %(start_date)s
             AND date <= %(end_date)s
         ORDER BY date ASC
         LIMIT %(limit)s
-    """
+    """).format(table=sql.Identifier(table_name))
 
     params = {
         "ticker": ticker.upper(),
@@ -100,7 +62,7 @@ def get_stock_prices(
         "limit": limit,
     }
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_financial_ratios(
@@ -178,7 +140,7 @@ def get_latest_price(ticker: str, use_live: bool = True) -> dict[str, Any] | Non
     """
     table_name = "stock_prices_live" if use_live else "stock_prices"
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             date,
             open,
@@ -186,13 +148,13 @@ def get_latest_price(ticker: str, use_live: bool = True) -> dict[str, Any] | Non
             low,
             close,
             volume
-        FROM {table_name}
+        FROM {table}
         WHERE ticker = %(ticker)s
         ORDER BY date DESC
         LIMIT 1
-    """
+    """).format(table=sql.Identifier(table_name))
 
-    results = execute_query(sql, {"ticker": ticker.upper()})
+    results = execute_query(query, {"ticker": ticker.upper()})
     return results[0] if results else None
 
 
@@ -473,25 +435,41 @@ def screen_by_technical_indicators(
         )""")
         params["index"] = index.lower()
 
-    # Add filter conditions
+    # Add filter conditions using safe sql composition for column names
+    composable_conditions: list[sql.Composable] = [sql.SQL(c) for c in conditions]
     for i, (indicator, (min_val, max_val)) in enumerate(filters.items()):
         if indicator not in valid_indicators:
             continue
 
+        col_ref = sql.SQL("{}.{}").format(sql.Identifier("ti"), sql.Identifier(indicator))
         if min_val is not None and max_val is not None:
-            conditions.append(f"ti.{indicator} BETWEEN %(min_{i})s AND %(max_{i})s")
+            composable_conditions.append(
+                sql.SQL("{} BETWEEN {} AND {}").format(
+                    col_ref,
+                    sql.Placeholder(f"min_{i}"),
+                    sql.Placeholder(f"max_{i}"),
+                )
+            )
             params[f"min_{i}"] = min_val
             params[f"max_{i}"] = max_val
         elif min_val is not None:
-            conditions.append(f"ti.{indicator} >= %(min_{i})s")
+            composable_conditions.append(
+                sql.SQL("{} >= {}").format(col_ref, sql.Placeholder(f"min_{i}"))
+            )
             params[f"min_{i}"] = min_val
         elif max_val is not None:
-            conditions.append(f"ti.{indicator} <= %(max_{i})s")
+            composable_conditions.append(
+                sql.SQL("{} <= {}").format(col_ref, sql.Placeholder(f"max_{i}"))
+            )
             params[f"max_{i}"] = max_val
 
-    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    where_clause = (
+        sql.SQL(" AND ").join(composable_conditions)
+        if composable_conditions
+        else sql.SQL("1=1")
+    )
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             ti.ticker,
             ti.date,
@@ -511,9 +489,9 @@ def screen_by_technical_indicators(
         WHERE {where_clause}
         ORDER BY ti.ticker
         LIMIT %(limit)s
-    """
+    """).format(where_clause=where_clause)
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def list_technical_indicators(

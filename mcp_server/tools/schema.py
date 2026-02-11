@@ -7,6 +7,8 @@ sample values, foreign keys, and indexes.
 import logging
 from typing import Any
 
+from psycopg import sql
+
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
@@ -73,57 +75,53 @@ def describe_table(table_name: str) -> dict[str, Any]:
     if not result or result[0]["cnt"] == 0:
         raise ValueError(f"Table '{table_name}' not found in public schema")
 
+    # Build safe table reference for regclass casts
+    table_ref = sql.SQL("{}.{}").format(
+        sql.Identifier("public"), sql.Identifier(table_name)
+    )
+
     # Get table description and row count
-    meta_sql = """
+    meta_query = sql.SQL("""
         SELECT
-            obj_description(%(table_ref)s::regclass, 'pg_class') as description,
+            obj_description({table_ref}::regclass, 'pg_class') as description,
             COALESCE(n_live_tup, 0) as row_count
         FROM pg_stat_user_tables
         WHERE relname = %(table_name)s AND schemaname = 'public'
-    """
-    meta = execute_query(
-        meta_sql,
-        {
-            "table_ref": f"public.{table_name}",
-            "table_name": table_name,
-        },
-    )
+    """).format(table_ref=table_ref)
+    meta = execute_query(meta_query, {"table_name": table_name})
     table_desc = meta[0]["description"] if meta else None
     row_count = meta[0]["row_count"] if meta else 0
 
     # Get columns
-    columns_sql = """
+    columns_query = sql.SQL("""
         SELECT
             c.column_name as name,
             c.data_type as type,
             c.is_nullable = 'YES' as nullable,
             c.column_default as default_value,
-            col_description((%(table_ref)s)::regclass, c.ordinal_position) as description
+            col_description({table_ref}::regclass, c.ordinal_position) as description
         FROM information_schema.columns c
         WHERE c.table_schema = 'public' AND c.table_name = %(table_name)s
         ORDER BY c.ordinal_position
-    """
-    columns = execute_query(
-        columns_sql,
-        {
-            "table_ref": f"public.{table_name}",
-            "table_name": table_name,
-        },
-    )
+    """).format(table_ref=table_ref)
+    columns = execute_query(columns_query, {"table_name": table_name})
 
     # Get sample values (first 3 distinct non-null values per column)
     sample_values = {}
     for col in columns[:20]:  # Limit to first 20 columns to avoid huge queries
         col_name = col["name"]
         try:
-            # Use identifier quoting for safety
-            sample_sql = f"""
-                SELECT DISTINCT "{col_name}"::text as val
-                FROM "{table_name}"
-                WHERE "{col_name}" IS NOT NULL
+            # Use sql.Identifier for safe column/table name quoting
+            sample_query = sql.SQL("""
+                SELECT DISTINCT {col}::text as val
+                FROM {table}
+                WHERE {col} IS NOT NULL
                 LIMIT 3
-            """
-            samples = execute_query(sample_sql)
+            """).format(
+                col=sql.Identifier(col_name),
+                table=sql.Identifier(table_name),
+            )
+            samples = execute_query(sample_query)
             sample_values[col_name] = [s["val"] for s in samples]
         except Exception:
             sample_values[col_name] = []

@@ -7,6 +7,8 @@ Supports both SIC (SEC) and GICS (S&P) taxonomies.
 import logging
 from typing import Any, Literal
 
+from psycopg import sql
+
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
@@ -37,40 +39,31 @@ def list_sectors(
 
     # Build index filter
     params: dict[str, Any] = {"limit": limit}
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index:
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = %(index)s
-        )"""
+        )""")
         params["index"] = index.lower()
 
     if taxonomy == "gics":
-        sql = f"""
+        query = sql.SQL("""
             SELECT
-                CASE
-                    WHEN c.ticker = 'ASML' THEN 'Information Technology'
-                    WHEN c.ticker = 'ARM' THEN 'Information Technology'
-                    WHEN c.ticker = 'PDD' THEN 'Consumer Discretionary'
-                    WHEN c.ticker = 'TRI' THEN 'Industrials'
-                    WHEN c.ticker = 'FER' THEN 'Industrials'
-                    WHEN c.ticker = 'CCEP' THEN 'Consumer Staples'
-                    ELSE COALESCE(m.gics_sector, 'Unclassified')
-                END as sector,
+                get_gics_sector(c.ticker, c.sic_code) as sector,
                 COUNT(DISTINCT c.ticker) as stock_count,
                 STRING_AGG(DISTINCT c.ticker, ', ' ORDER BY c.ticker)
                     FILTER (WHERE c.ticker IS NOT NULL) as sample_tickers
             FROM companies c
-            LEFT JOIN sic_gics_mapping m ON c.sic_code = m.sic_code
             WHERE c.active = true
             {index_filter}
             GROUP BY sector
             ORDER BY stock_count DESC
             LIMIT %(limit)s
-        """
+        """).format(index_filter=index_filter)
     else:  # SIC
-        sql = f"""
+        query = sql.SQL("""
             SELECT
                 c.sic_code,
                 c.sic_description as sector,
@@ -83,9 +76,9 @@ def list_sectors(
             GROUP BY c.sic_code, c.sic_description
             ORDER BY stock_count DESC, c.sic_description
             LIMIT %(limit)s
-        """
+        """).format(index_filter=index_filter)
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_sector_performance(
@@ -116,37 +109,26 @@ def get_sector_performance(
     """
     limit = min(limit, 100)
 
-    # Build sector grouping based on taxonomy
+    # Build sector grouping based on taxonomy (controlled SQL expressions)
     if taxonomy == "gics":
-        # Include ticker-specific overrides for foreign ADRs without SIC codes
-        sector_expr = """
-            CASE
-                WHEN c.ticker = 'ASML' THEN 'Information Technology'
-                WHEN c.ticker = 'ARM' THEN 'Information Technology'
-                WHEN c.ticker = 'PDD' THEN 'Consumer Discretionary'
-                WHEN c.ticker = 'TRI' THEN 'Industrials'
-                WHEN c.ticker = 'FER' THEN 'Industrials'
-                WHEN c.ticker = 'CCEP' THEN 'Consumer Staples'
-                ELSE COALESCE(m.gics_sector, 'Unclassified')
-            END
-        """
-        join_clause = "LEFT JOIN sic_gics_mapping m ON c.sic_code = m.sic_code"
+        sector_expr = sql.SQL("get_gics_sector(c.ticker, c.sic_code)")
+        join_clause = sql.SQL("")
     else:
-        sector_expr = "c.sic_description"
-        join_clause = ""
+        sector_expr = sql.SQL("c.sic_description")
+        join_clause = sql.SQL("")
 
     # Build index filter
     params: dict[str, Any] = {"limit": limit}
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index:
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = %(index)s
-        )"""
+        )""")
         params["index"] = index.lower()
 
-    sql = f"""
+    query = sql.SQL("""
         WITH date_refs AS (
             SELECT
                 MAX(date) as latest,
@@ -195,7 +177,7 @@ def get_sector_performance(
             LEFT JOIN stock_prices_live p_ytd
                 ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
             WHERE c.active = true
-              AND {sector_expr} IS NOT NULL
+              AND {sector_expr_null} IS NOT NULL
             {index_filter}
         ),
         sector_stats AS (
@@ -238,6 +220,11 @@ def get_sector_performance(
         LEFT JOIN worst_performers w ON s.sector = w.sector
         ORDER BY s.return_1d DESC NULLS LAST
         LIMIT %(limit)s
-    """
+    """).format(
+        sector_expr=sector_expr,
+        sector_expr_null=sector_expr,
+        join_clause=join_clause,
+        index_filter=index_filter,
+    )
 
-    return execute_query(sql, params)
+    return execute_query(query, params)

@@ -7,6 +7,8 @@ fundamental, and technical indicator filters.
 import logging
 from typing import Any, Literal
 
+from psycopg import sql
+
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
@@ -113,28 +115,17 @@ def screen_stocks(
     # Build the base query with CTEs
     params: dict[str, Any] = {"limit": limit}
 
-    # Sector expression based on taxonomy
+    # Sector expression based on taxonomy (controlled SQL expressions)
     if taxonomy == "gics":
-        sector_expr = """
-            CASE
-                WHEN c.ticker = 'ASML' THEN 'Information Technology'
-                WHEN c.ticker = 'ARM' THEN 'Information Technology'
-                WHEN c.ticker = 'PDD' THEN 'Consumer Discretionary'
-                WHEN c.ticker = 'TRI' THEN 'Industrials'
-                WHEN c.ticker = 'FER' THEN 'Industrials'
-                WHEN c.ticker = 'CCEP' THEN 'Consumer Staples'
-                ELSE COALESCE(m.gics_sector, c.sic_description)
-            END
-        """
-        sector_join = "LEFT JOIN sic_gics_mapping m ON c.sic_code = m.sic_code"
+        sector_expr = "get_gics_sector(c.ticker, c.sic_code, c.sic_description)"
     else:
         sector_expr = "c.sic_description"
-        sector_join = ""
+    sector_join = ""
 
     # Sector filter
     sector_filter = ""
     if sector:
-        sector_filter = f"AND {sector_expr} ILIKE %(sector)s"
+        sector_filter = "AND " + sector_expr + " ILIKE %(sector)s"
         params["sector"] = f"%{sector}%"
 
     # Index filter
@@ -147,10 +138,8 @@ def screen_stocks(
         )"""
         params["index"] = index.lower()
 
-    # Build filter conditions
-    where_conditions = []
-
-    # Track which computed columns we need
+    # Build filter conditions as Composable objects
+    where_conditions: list[sql.Composable] = []
 
     filter_idx = 0
     for filter_name, bounds in filters.items():
@@ -166,35 +155,40 @@ def screen_stocks(
 
         # Determine the column/expression for this filter
         col_expr = _get_filter_expression(filter_name)
+        col_ident = sql.Identifier(col_expr)
 
-        # Track dependencies
-        if filter_name.startswith("price_change"):
-            pass
-        if filter_name.startswith(
-            ("sma_", "ema_", "rsi_", "macd_", "bb_", "atr_", "obv", "volume_ratio", "volume_sma")
-        ):
-            pass
-        if "_distance_pct" in filter_name:
-            pass
-
-        # Build condition
+        # Build condition using safe sql composition
         if min_val is not None and max_val is not None:
             where_conditions.append(
-                f"{col_expr} BETWEEN %(f{filter_idx}_min)s AND %(f{filter_idx}_max)s"
+                sql.SQL("{} BETWEEN {} AND {}").format(
+                    col_ident,
+                    sql.Placeholder(f"f{filter_idx}_min"),
+                    sql.Placeholder(f"f{filter_idx}_max"),
+                )
             )
             params[f"f{filter_idx}_min"] = min_val
             params[f"f{filter_idx}_max"] = max_val
         elif min_val is not None:
-            where_conditions.append(f"{col_expr} >= %(f{filter_idx}_min)s")
+            where_conditions.append(
+                sql.SQL("{} >= {}").format(
+                    col_ident, sql.Placeholder(f"f{filter_idx}_min")
+                )
+            )
             params[f"f{filter_idx}_min"] = min_val
         elif max_val is not None:
-            where_conditions.append(f"{col_expr} <= %(f{filter_idx}_max)s")
+            where_conditions.append(
+                sql.SQL("{} <= {}").format(
+                    col_ident, sql.Placeholder(f"f{filter_idx}_max")
+                )
+            )
             params[f"f{filter_idx}_max"] = max_val
 
         filter_idx += 1
 
     # Build the complete query
-    where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+    where_clause = (
+        sql.SQL(" AND ").join(where_conditions) if where_conditions else sql.SQL("1=1")
+    )
 
     # Validate sort_by
     valid_sort_columns = {
@@ -214,9 +208,9 @@ def screen_stocks(
     if sort_by not in valid_sort_columns:
         sort_by = "market_cap"
 
-    sort_dir = "DESC" if sort_order == "desc" else "ASC"
+    sort_dir = sql.SQL("DESC") if sort_order == "desc" else sql.SQL("ASC")
 
-    sql = f"""
+    query = sql.SQL("""
         WITH date_refs AS (
             SELECT
                 MAX(date) as latest,
@@ -335,9 +329,17 @@ def screen_stocks(
         WHERE {where_clause}
         ORDER BY {sort_by} {sort_dir} NULLS LAST
         LIMIT %(limit)s
-    """
+    """).format(
+        sector_expr=sql.SQL(sector_expr),
+        sector_join=sql.SQL(sector_join),
+        sector_filter=sql.SQL(sector_filter),
+        index_filter=sql.SQL(index_filter),
+        where_clause=where_clause,
+        sort_by=sql.Identifier(sort_by),
+        sort_dir=sort_dir,
+    )
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def _get_filter_expression(filter_name: str) -> str:
@@ -406,55 +408,44 @@ def get_52week_extremes(
     limit = min(limit, 200)
 
     # Index filter (uses index_constituents junction table)
-    index_filter = ""
+    index_filter = sql.SQL("")
+    params: dict[str, Any] = {}
     if index == "sp500":
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
-        )"""
+        )""")
     elif index == "nasdaq100":
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'nasdaq100'
-        )"""
+        )""")
 
-    # Volume filter
-    volume_filter = ""
+    # Volume filter (parameterized)
+    volume_filter = sql.SQL("")
     if min_volume:
-        volume_filter = f"AND p.volume >= {int(min_volume)}"
+        volume_filter = sql.SQL("AND p.volume >= %(min_volume)s")
+        params["min_volume"] = int(min_volume)
 
     # Build extreme filter
     if extreme == "highs":
-        extreme_filter = "AND high_52w_pct >= %(neg_threshold)s"
+        extreme_filter = sql.SQL("AND high_52w_pct >= %(neg_threshold)s")
     elif extreme == "lows":
-        extreme_filter = "AND low_52w_pct <= %(threshold)s"
+        extreme_filter = sql.SQL("AND low_52w_pct <= %(threshold)s")
     else:  # both
-        extreme_filter = """
+        extreme_filter = sql.SQL("""
             AND (high_52w_pct >= %(neg_threshold)s OR low_52w_pct <= %(threshold)s)
-        """
+        """)
 
-    sql = f"""
+    query = sql.SQL("""
         WITH latest_date AS (
             SELECT MAX(date) as dt FROM stock_prices
         ),
         prev_date AS (
             SELECT MAX(date) as dt FROM stock_prices
             WHERE date < (SELECT dt FROM latest_date)
-        ),
-        year_ago AS (
-            SELECT MIN(date) as dt FROM stock_prices
-            WHERE date >= (SELECT dt FROM latest_date) - INTERVAL '252 trading days'
-        ),
-        extremes_52w AS (
-            SELECT
-                ticker,
-                MAX(high) as high_52w,
-                MIN(low) as low_52w
-                FROM stock_prices_live
-            WHERE date >= CURRENT_DATE - INTERVAL '1 year'
-            GROUP BY ticker
         ),
         stock_data AS (
             SELECT
@@ -483,7 +474,7 @@ def get_52week_extremes(
             CROSS JOIN prev_date pd
         JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
         LEFT JOIN stock_prices_live p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
-            JOIN extremes_52w e ON c.ticker = e.ticker
+            JOIN mv_52week_extremes e ON c.ticker = e.ticker AND e.date = ld.dt
             WHERE c.active = true
             {index_filter}
             {volume_filter}
@@ -519,15 +510,17 @@ def get_52week_extremes(
                 ELSE NULL
             END ASC NULLS LAST
         LIMIT %(limit)s
-    """
+    """).format(
+        index_filter=index_filter,
+        volume_filter=volume_filter,
+        extreme_filter=extreme_filter,
+    )
 
-    params = {
-        "threshold": threshold_pct,
-        "neg_threshold": -threshold_pct,
-        "limit": limit,
-    }
+    params["threshold"] = threshold_pct
+    params["neg_threshold"] = -threshold_pct
+    params["limit"] = limit
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_daily_range_leaders(
@@ -580,19 +573,21 @@ def get_daily_range_leaders(
         filters.append("volume >= %(min_volume)s")
         params["min_volume"] = min_volume
 
-    where_clause = " AND ".join(filters) if filters else "1=1"
+    where_clause = sql.SQL(" AND ").join(
+        sql.SQL(f) for f in filters
+    ) if filters else sql.SQL("1=1")
 
     # Index filter (applied in the CTE)
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index:
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = %(index)s
-        )"""
+        )""")
         params["index"] = index.lower()
 
-    sql = f"""
+    query = sql.SQL("""
         WITH latest_date AS (
             SELECT MAX(date) as dt FROM stock_prices
         ),
@@ -638,6 +633,9 @@ def get_daily_range_leaders(
           AND {where_clause}
         ORDER BY daily_range_pct DESC
         LIMIT %(limit)s
-    """
+    """).format(
+        index_filter=index_filter,
+        where_clause=where_clause,
+    )
 
-    return execute_query(sql, params)
+    return execute_query(query, params)

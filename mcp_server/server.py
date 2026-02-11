@@ -36,13 +36,11 @@ from .charts.renderers import (  # noqa: E402
 )
 from .charts.themes import get_theme  # noqa: E402
 from .database import execute_query  # noqa: E402
-from .services import use_service_layer  # noqa: E402
+from .validation import validate_tool_arguments  # noqa: E402
 from .tools.companies import (  # noqa: E402
     get_company_details,
-    get_company_details_async,
     list_companies,
     search_companies,
-    search_companies_async,
 )
 from .tools.corporate_actions import (  # noqa: E402
     get_dividend_yield_leaders,
@@ -56,9 +54,8 @@ from .tools.corporate_actions import (  # noqa: E402
 from .tools.economy import (  # noqa: E402
     get_economy_dashboard,
     get_economy_data,
-    get_economy_data_async,
 )
-from .tools.fundamentals import get_fundamentals, get_fundamentals_async  # noqa: E402
+from .tools.fundamentals import get_fundamentals  # noqa: E402
 from .tools.indices import (  # noqa: E402
     check_index_membership,
     get_index_constituents,
@@ -67,15 +64,12 @@ from .tools.indices import (  # noqa: E402
 )
 from .tools.market_data import (  # noqa: E402
     get_financial_ratios,
-    get_financial_ratios_async,
     get_intraday_bars,
     get_latest_price,
-    get_latest_price_async,
     get_latest_technical_indicators,
     get_live_price_async,
     get_live_prices_batch_async,
     get_stock_prices,
-    get_stock_prices_async,
     get_technical_indicators,
     list_technical_indicators,
     screen_by_technical_indicators,
@@ -553,7 +547,53 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="execute_query",
-            description="Execute a custom read-only SQL query (SELECT only)",
+            description=(
+                "Execute a custom read-only SQL query (SELECT only). "
+                "Use describe_database and describe_table tools first to discover schema.\n\n"
+                "TABLES:\n"
+                "  companies(ticker PK, name, sic_code, sic_description, market_cap, active, ...)\n"
+                "  stock_prices(ticker, date PK, open, high, low, close, volume)\n"
+                "  stock_prices_intraday(ticker, timestamp PK, open, high, low, close, volume)\n"
+                "  financial_ratios(ticker, date PK, price_to_earnings, debt_to_equity, "
+                "return_on_equity, dividend_yield, ...)\n"
+                "  balance_sheets(ticker, period_end, timeframe PK, total_assets, "
+                "total_liabilities, total_equity, ...)\n"
+                "  cash_flows(ticker, period_end, timeframe PK, net_cash_from_operating_activities, ...)\n"
+                "  income_statements(ticker, period_end, timeframe PK, revenue, operating_income, "
+                "diluted_earnings_per_share, ...)\n"
+                "  technical_indicators(ticker, date PK, sma_50, sma_150, sma_200, rsi_14, "
+                "macd_line, macd_histogram, bb_upper, bb_lower, atr_14, volume_ratio, ...)\n"
+                "  indices(id PK, code, name) - codes: 'sp500', 'nasdaq100'\n"
+                "  index_constituents(index_id, ticker PK) - JOIN with indices on id\n"
+                "  sic_gics_mapping(sic_code PK, gics_sector, gics_industry) - "
+                "JOIN with companies on sic_code\n"
+                "  treasury_yields(date PK, yield_1_month, yield_2_year, yield_10_year, yield_30_year, ...)\n"
+                "  inflation(date PK, cpi, cpi_year_over_year, pce, ...)\n"
+                "  inflation_expectations(date PK, market_5_year, market_10_year, ...)\n"
+                "  labor_market(date PK, unemployment_rate, job_openings, ...)\n"
+                "  stock_splits(ticker, execution_date, split_from, split_to)\n"
+                "  dividends(ticker, ex_dividend_date, cash_amount, frequency, ...)\n"
+                "  earnings(ticker, report_date, eps_estimate, eps_actual, revenue_actual, "
+                "surprise_pct, timing)\n"
+                "  news_articles(id PK, title, published_utc, ...)\n"
+                "  news_article_tickers(article_id, ticker)\n"
+                "  news_sentiment(article_id, ticker, sentiment)\n\n"
+                "VIEWS:\n"
+                "  stock_prices_live - union of historical EOD + today's intraday data\n"
+                "  v_company_summary - companies with latest price and ratios\n"
+                "  v_company_with_indices - companies with index membership (in_sp500, in_nasdaq100)\n"
+                "  v_latest_fundamentals - latest quarterly fundamentals per company\n"
+                "  v_economy_dashboard - combined economy indicators\n"
+                "  v_sector_summary - sector aggregates by SIC code\n\n"
+                "COMMON MISTAKES (these DO NOT exist):\n"
+                "  daily_prices -> use stock_prices\n"
+                "  price_metrics -> no such table, compute from stock_prices\n"
+                "  intraday_bars -> use stock_prices_intraday\n"
+                "  index_members -> use index_constituents JOIN indices\n"
+                "  market_indexes -> use indices\n"
+                "  companies.sp500 -> use index_constituents JOIN indices WHERE code='sp500'\n"
+                "  companies.gics_sector -> use sic_gics_mapping JOIN on sic_code"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1254,6 +1294,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         logger.info(f"  Arguments: {arguments}")
 
     try:
+        # Validate common arguments (tickers, dates, limits, etc.)
+        arguments = validate_tool_arguments(name, arguments)
+
         # Get chart configuration
         config = get_chart_config()
 
@@ -1277,9 +1320,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         chart: str | None = None
         result: Any = None
 
-        # Check if we should use the service layer
-        use_services = use_service_layer()
-
         if name == "list_companies":
             logger.info("  Executing: list_companies")
             result = list_companies(
@@ -1290,25 +1330,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_company_details":
             logger.info("  Executing: get_company_details")
-            if use_services:
-                result = await get_company_details_async(arguments["ticker"])
-            else:
-                result = get_company_details(arguments["ticker"])
+            result = get_company_details(arguments["ticker"])
             if result is None:
                 return [TextContent(type="text", text=f"Company {arguments['ticker']} not found")]
         elif name == "search_companies":
             logger.info("  Executing: search_companies")
-            if use_services:
-                result = await search_companies_async(
-                    query=arguments["query"],
-                    limit=arguments.get("limit", 20),
-                )
-            else:
-                result = search_companies(
-                    query=arguments["query"],
-                    limit=arguments.get("limit", 20),
-                    index=arguments.get("index"),
-                )
+            result = search_companies(
+                query=arguments["query"],
+                limit=arguments.get("limit", 20),
+                index=arguments.get("index"),
+            )
         elif name == "get_live_price":
             logger.info("  Executing: get_live_price")
             result = await get_live_price_async(
@@ -1323,65 +1354,39 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_latest_price":
             logger.info("  Executing: get_latest_price")
-            if use_services:
-                result = await get_latest_price_async(ticker=arguments["ticker"])
-            else:
-                result = get_latest_price(
-                    ticker=arguments["ticker"], use_live=arguments.get("use_live", True)
-                )
+            result = get_latest_price(
+                ticker=arguments["ticker"], use_live=arguments.get("use_live", True)
+            )
             if result is None:
                 return [
                     TextContent(type="text", text=f"No price data found for {arguments['ticker']}")
                 ]
         elif name == "get_stock_prices":
             logger.info("  Executing: get_stock_prices")
-            if use_services:
-                result = await get_stock_prices_async(
-                    ticker=arguments["ticker"],
-                    start_date=arguments["start_date"],
-                    end_date=arguments.get("end_date"),
-                    limit=arguments.get("limit", 252),
-                )
-            else:
-                result = get_stock_prices(
-                    ticker=arguments["ticker"],
-                    start_date=arguments["start_date"],
-                    end_date=arguments.get("end_date"),
-                    limit=arguments.get("limit", 252),
-                    use_live=arguments.get("use_live", True),
-                )
+            result = get_stock_prices(
+                ticker=arguments["ticker"],
+                start_date=arguments["start_date"],
+                end_date=arguments.get("end_date"),
+                limit=arguments.get("limit", 252),
+                use_live=arguments.get("use_live", True),
+            )
             chart = render_price_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_financial_ratios":
             logger.info("  Executing: get_financial_ratios")
-            if use_services:
-                result = await get_financial_ratios_async(
-                    ticker=arguments["ticker"],
-                    start_date=arguments["start_date"],
-                    end_date=arguments.get("end_date"),
-                    limit=arguments.get("limit", 100),
-                )
-            else:
-                result = get_financial_ratios(
-                    ticker=arguments["ticker"],
-                    start_date=arguments["start_date"],
-                    end_date=arguments.get("end_date"),
-                    limit=arguments.get("limit", 100),
-                )
+            result = get_financial_ratios(
+                ticker=arguments["ticker"],
+                start_date=arguments["start_date"],
+                end_date=arguments.get("end_date"),
+                limit=arguments.get("limit", 100),
+            )
             chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_fundamentals":
             logger.info("  Executing: get_fundamentals")
-            if use_services:
-                result = await get_fundamentals_async(
-                    ticker=arguments["ticker"],
-                    timeframe=arguments.get("timeframe", "quarterly"),
-                    limit=arguments.get("limit", 4),
-                )
-            else:
-                result = get_fundamentals(
-                    ticker=arguments["ticker"],
-                    timeframe=arguments.get("timeframe", "quarterly"),
-                    limit=arguments.get("limit", 4),
-                )
+            result = get_fundamentals(
+                ticker=arguments["ticker"],
+                timeframe=arguments.get("timeframe", "quarterly"),
+                limit=arguments.get("limit", 4),
+            )
             chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_technical_indicators":
             logger.info("  Executing: get_technical_indicators")
@@ -1439,20 +1444,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_economy_data":
             logger.info("  Executing: get_economy_data")
-            if use_services:
-                result = await get_economy_data_async(
-                    indicator_type=arguments["indicator_type"],
-                    start_date=arguments["start_date"],
-                    end_date=arguments.get("end_date"),
-                    limit=arguments.get("limit", 100),
-                )
-            else:
-                result = get_economy_data(
-                    indicator_type=arguments["indicator_type"],
-                    start_date=arguments["start_date"],
-                    end_date=arguments.get("end_date"),
-                    limit=arguments.get("limit", 100),
-                )
+            result = get_economy_data(
+                indicator_type=arguments["indicator_type"],
+                start_date=arguments["start_date"],
+                end_date=arguments.get("end_date"),
+                limit=arguments.get("limit", 100),
+            )
             chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
         elif name == "get_economy_dashboard":
             logger.info("  Executing: get_economy_dashboard")
