@@ -8,13 +8,7 @@ Usage:
 
     stock_service = get_stock_service()
     prices = stock_service.get_prices("AAPL", "2024-01-01", "2024-01-31")
-
-Environment Variables:
-    MCP_USE_SERVICE_LAYER: Set to "true" to use repository-based services
-                          instead of direct SQL queries (default: false)
 """
-
-import os
 
 from mcp_server.services.economy_service import EconomyService
 from mcp_server.services.stock_service import StockService
@@ -22,11 +16,6 @@ from mcp_server.services.stock_service import StockService
 # Singleton instances
 _stock_service: StockService | None = None
 _economy_service: EconomyService | None = None
-
-
-def use_service_layer() -> bool:
-    """Check if service layer should be used instead of direct SQL."""
-    return os.environ.get("MCP_USE_SERVICE_LAYER", "").lower() in ("1", "true", "yes")
 
 
 def get_stock_service() -> StockService:
@@ -50,5 +39,4 @@ __all__ = [
     "EconomyService",
     "get_stock_service",
     "get_economy_service",
-    "use_service_layer",
 ]

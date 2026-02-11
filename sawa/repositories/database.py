@@ -296,7 +296,7 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             ticker=row["ticker"],
             period_end=row["period_end"],
             timeframe=row.get("timeframe", "quarterly"),
-            fiscal_year=row.get("fiscal_year") or 2024,
+            fiscal_year=row.get("fiscal_year") or row["period_end"].year,
             fiscal_quarter=row.get("fiscal_quarter"),
             revenue=_to_decimal(row.get("revenue")),
             cost_of_revenue=_to_decimal(row.get("cost_of_revenue")),

@@ -3,6 +3,8 @@
 import logging
 from typing import Any, Literal
 
+from psycopg import sql
+
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
@@ -41,9 +43,11 @@ def get_stock_splits(
         filters.append("s.execution_date <= %(end_date)s")
         params["end_date"] = end_date
 
-    where_clause = " AND ".join(filters) if filters else "1=1"
+    where_sql = sql.SQL(" AND ").join(
+        sql.SQL(f) for f in filters
+    ) if filters else sql.SQL("1=1")
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             s.ticker,
             c.name,
@@ -56,9 +60,9 @@ def get_stock_splits(
         WHERE {where_clause}
         ORDER BY s.execution_date DESC
         LIMIT %(limit)s
-    """
+    """).format(where_clause=where_sql)
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_dividends(
@@ -103,9 +107,11 @@ def get_dividends(
         filters.append("d.dividend_type = %(dividend_type)s")
         params["dividend_type"] = dividend_type
 
-    where_clause = " AND ".join(filters) if filters else "1=1"
+    where_sql = sql.SQL(" AND ").join(
+        sql.SQL(f) for f in filters
+    ) if filters else sql.SQL("1=1")
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             d.ticker,
             c.name,
@@ -128,9 +134,9 @@ def get_dividends(
         WHERE {where_clause}
         ORDER BY d.ex_dividend_date DESC
         LIMIT %(limit)s
-    """
+    """).format(where_clause=where_sql)
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_ex_dividend_calendar(
@@ -154,21 +160,21 @@ def get_ex_dividend_calendar(
     limit = min(limit, 500)
 
     # Index filter
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index == "sp500":
-        index_filter = """AND d.ticker IN (
+        index_filter = sql.SQL("""AND d.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
-        )"""
+        )""")
     elif index == "nasdaq100":
-        index_filter = """AND d.ticker IN (
+        index_filter = sql.SQL("""AND d.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'nasdaq100'
-        )"""
+        )""")
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             d.ex_dividend_date,
             d.ticker,
@@ -183,9 +189,9 @@ def get_ex_dividend_calendar(
           {index_filter}
         ORDER BY d.ex_dividend_date, d.ticker
         LIMIT %(limit)s
-    """
+    """).format(index_filter=index_filter)
 
-    return execute_query(sql, {"start_date": start_date, "end_date": end_date, "limit": limit})
+    return execute_query(query, {"start_date": start_date, "end_date": end_date, "limit": limit})
 
 
 def get_recent_splits(
@@ -203,21 +209,21 @@ def get_recent_splits(
         List of recent splits with company info
     """
     # Index filter
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index == "sp500":
-        index_filter = """AND s.ticker IN (
+        index_filter = sql.SQL("""AND s.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
-        )"""
+        )""")
     elif index == "nasdaq100":
-        index_filter = """AND s.ticker IN (
+        index_filter = sql.SQL("""AND s.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'nasdaq100'
-        )"""
+        )""")
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             s.ticker,
             c.name,
@@ -230,9 +236,9 @@ def get_recent_splits(
         WHERE s.execution_date >= CURRENT_DATE - %(days)s
           {index_filter}
         ORDER BY s.execution_date DESC
-    """
+    """).format(index_filter=index_filter)
 
-    return execute_query(sql, {"days": days})
+    return execute_query(query, {"days": days})
 
 
 def get_dividend_yield_leaders(
@@ -254,21 +260,21 @@ def get_dividend_yield_leaders(
     limit = min(limit, 200)
 
     # Index filter
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index == "sp500":
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
-        )"""
+        )""")
     elif index == "nasdaq100":
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'nasdaq100'
-        )"""
+        )""")
 
-    sql = f"""
+    query = sql.SQL("""
         WITH latest_prices AS (
             SELECT DISTINCT ON (ticker)
                 ticker,
@@ -304,9 +310,9 @@ def get_dividend_yield_leaders(
           {index_filter}
         ORDER BY fr.dividend_yield DESC NULLS LAST
         LIMIT %(limit)s
-    """
+    """).format(index_filter=index_filter)
 
-    return execute_query(sql, {"min_yield": min_yield, "limit": limit})
+    return execute_query(query, {"min_yield": min_yield, "limit": limit})
 
 
 def get_earnings_calendar(
@@ -347,23 +353,23 @@ def get_earnings_calendar(
         filters.append("e.eps_actual IS NULL")
 
     # Index filter
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index == "sp500":
-        index_filter = """AND e.ticker IN (
+        index_filter = sql.SQL("""AND e.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
-        )"""
+        )""")
     elif index == "nasdaq100":
-        index_filter = """AND e.ticker IN (
+        index_filter = sql.SQL("""AND e.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'nasdaq100'
-        )"""
+        )""")
 
-    where_clause = " AND ".join(filters)
+    where_sql = sql.SQL(" AND ").join(sql.SQL(f) for f in filters)
 
-    sql = f"""
+    query = sql.SQL("""
         SELECT
             e.report_date,
             e.ticker,
@@ -381,9 +387,9 @@ def get_earnings_calendar(
           {index_filter}
         ORDER BY e.report_date, e.timing, e.ticker
         LIMIT %(limit)s
-    """
+    """).format(where_clause=where_sql, index_filter=index_filter)
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_earnings_history(

@@ -1,5 +1,6 @@
 """Database connection and query execution for the MCP server."""
 
+import atexit
 import logging
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from sawa.utils.config import require_database_url as get_database_url  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,51 @@ logger = logging.getLogger(__name__)
 # Configuration
 MAX_ROWS = int(os.environ.get("MCP_MAX_ROWS", "1000"))
 QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "30"))
+
+# Pool configuration
+POOL_MIN_SIZE = int(os.environ.get("MCP_POOL_MIN_SIZE", "2"))
+POOL_MAX_SIZE = int(os.environ.get("MCP_POOL_MAX_SIZE", "10"))
+
+# Module-level pool singleton
+_pool: ConnectionPool | None = None
+
+
+def _configure_connection(conn: psycopg.Connection) -> None:
+    """Configure a connection after it is created by the pool."""
+    conn.row_factory = dict_row  # type: ignore[assignment]
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SET default_transaction_read_only = on"))
+    conn.commit()
+
+
+def _get_pool() -> ConnectionPool:
+    """Get or create the module-level connection pool (lazy init)."""
+    global _pool
+    if _pool is None:
+        _pool = ConnectionPool(
+            conninfo=get_database_url(),  # type: ignore[arg-type]
+            min_size=POOL_MIN_SIZE,
+            max_size=POOL_MAX_SIZE,
+            configure=_configure_connection,
+            open=True,
+        )
+        atexit.register(close_pool)
+        logger.info(
+            "Connection pool created (min_size=%d, max_size=%d)",
+            POOL_MIN_SIZE,
+            POOL_MAX_SIZE,
+        )
+    return _pool
+
+
+def close_pool() -> None:
+    """Close the connection pool. Safe to call multiple times."""
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
+        logger.info("Connection pool closed")
+
 
 # Query audit log
 QUERY_LOG_DIR = Path(os.environ.get("MCP_QUERY_LOG_DIR", "logs"))
@@ -56,20 +103,14 @@ def log_execute_query(query: str, params: dict[str, Any] | None = None) -> None:
 @contextmanager
 def get_connection():
     """
-    Get a database connection as a context manager.
+    Get a database connection from the pool as a context manager.
 
-    Security: Sets read-only mode to prevent accidental modifications.
+    Security: Read-only mode is enforced via the pool's configure callback.
+    The connection is automatically returned to the pool on exit.
     """
-    conn = None
-    try:
-        conn = psycopg.connect(get_database_url(), row_factory=dict_row)  # type: ignore[arg-type]
-        # Set read-only mode for security
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("SET default_transaction_read_only = on"))
+    pool = _get_pool()
+    with pool.connection() as conn:
         yield conn
-    finally:
-        if conn:
-            conn.close()
 
 
 def validate_select_query(query: str) -> bool:
@@ -120,7 +161,7 @@ def validate_select_query(query: str) -> bool:
 
 
 def execute_query(
-    query: str,
+    query: str | sql.Composable,
     params: dict[str, Any] | None = None,
     validate: bool = True,
 ) -> list[dict[str, Any]]:
@@ -128,7 +169,7 @@ def execute_query(
     Execute a SQL query and return results.
 
     Args:
-        query: SQL query string
+        query: SQL query string or psycopg sql.Composable object
         params: Optional query parameters for safe interpolation
         validate: Whether to validate query is SELECT-only
 
@@ -139,13 +180,19 @@ def execute_query(
         ValueError: If query validation fails
         psycopg.Error: If database error occurs
     """
-    if validate:
-        validate_select_query(query)
+    if isinstance(query, str):
+        if validate:
+            validate_select_query(query)
 
-    # Add LIMIT if not present and query is a SELECT
-    query_upper = query.strip().upper()
-    if query_upper.startswith("SELECT") and "LIMIT" not in query_upper:
-        query = f"{query.rstrip(';')} LIMIT {MAX_ROWS}"
+        # Add LIMIT if not present and query is a SELECT
+        query_upper = query.strip().upper()
+        if query_upper.startswith("SELECT") and "LIMIT" not in query_upper:
+            query = f"{query.rstrip(';')} LIMIT {MAX_ROWS}"
+
+        query_sql: sql.Composable = sql.SQL(query)
+    else:
+        # Composable queries are built safely via psycopg sql module
+        query_sql = query
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -155,18 +202,15 @@ def execute_query(
             )
             cur.execute(timeout_sql)
 
-            logger.debug(f"Executing query: {query[:100]}...")
+            logger.debug("Executing query...")
 
-            # Execute with parameters if provided
-            # Use sql.SQL for the query to satisfy type checker
-            query_sql = sql.SQL(query)  # type: ignore[arg-type]
             if params:
                 cur.execute(query_sql, params)
             else:
                 cur.execute(query_sql)
 
             results = cur.fetchall()
-            logger.debug(f"Query returned {len(results)} rows")
+            logger.debug("Query returned %d rows", len(results))
 
             # Convert to list of dicts explicitly
             return [dict(row) for row in results]

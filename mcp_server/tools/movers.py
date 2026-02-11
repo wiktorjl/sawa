@@ -6,6 +6,8 @@ Provides tools for finding top gainers, losers, and volume leaders.
 import logging
 from typing import Any, Literal
 
+from psycopg import sql
+
 from ..database import execute_query
 
 logger = logging.getLogger(__name__)
@@ -45,63 +47,54 @@ def get_top_movers(
     """
     limit = min(limit, 100)
 
-    # Build period comparison
+    # Build period comparison (controlled SQL expressions)
     period_map = {
-        "1d": "MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices_live))",
-        "1w": "MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '7 days')",
-        "1m": "MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '30 days')",
-        "ytd": "MIN(date) FILTER (WHERE date >= DATE_TRUNC('year', CURRENT_DATE))",
+        "1d": sql.SQL("MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices_live))"),
+        "1w": sql.SQL("MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '7 days')"),
+        "1m": sql.SQL("MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '30 days')"),
+        "ytd": sql.SQL("MIN(date) FILTER (WHERE date >= DATE_TRUNC('year', CURRENT_DATE))"),
     }
     period_expr = period_map.get(period, period_map["1d"])
 
     # Build sector filter
-    sector_filter = ""
+    sector_filter = sql.SQL("")
     params: dict[str, Any] = {"limit": limit}
     if sector:
-        sector_filter = """
-            AND (c.sic_description ILIKE %(sector)s
-                 OR EXISTS (
-                     SELECT 1 FROM sic_gics_mapping m
-                     WHERE m.sic_code = c.sic_code
-                       AND m.gics_sector ILIKE %(sector)s
-                 )
-                 OR (c.ticker IN ('ASML', 'ARM') AND %(sector)s ILIKE '%technology%')
-                 OR (c.ticker = 'PDD' AND %(sector)s ILIKE '%discretionary%')
-                 OR (c.ticker IN ('TRI', 'FER') AND %(sector)s ILIKE '%industrial%')
-                 OR (c.ticker = 'CCEP' AND %(sector)s ILIKE '%staples%'))
-        """
+        sector_filter = sql.SQL("""
+            AND get_gics_sector(c.ticker, c.sic_code, c.sic_description) ILIKE %(sector)s
+        """)
         params["sector"] = f"%{sector}%"
 
     # Build index filter
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index:
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = %(index)s
-        )"""
+        )""")
         params["index"] = index.lower()
 
     # Build price/volume filters
-    price_filter = ""
+    price_parts: list[sql.Composable] = []
     if min_price is not None:
-        price_filter += " AND p_now.close >= %(min_price)s"
+        price_parts.append(sql.SQL(" AND p_now.close >= %(min_price)s"))
         params["min_price"] = min_price
     if min_volume is not None:
-        price_filter += " AND p_now.volume >= %(min_volume)s"
+        price_parts.append(sql.SQL(" AND p_now.volume >= %(min_volume)s"))
         params["min_volume"] = min_volume
+    price_filter = sql.SQL("").join(price_parts)
 
-    # Determine sort order
+    # Determine sort order (controlled SQL literals)
     if direction == "gainers":
-        order_clause = "change_pct DESC NULLS LAST"
+        order_clause = sql.SQL("change_pct DESC NULLS LAST")
     elif direction == "losers":
-        order_clause = "change_pct ASC NULLS LAST"
+        order_clause = sql.SQL("change_pct ASC NULLS LAST")
     else:
-        # For "both", we'll use a UNION approach
-        pass
+        order_clause = sql.SQL("")
 
     if direction == "both":
-        sql = f"""
+        query = sql.SQL("""
             WITH date_refs AS (
                 SELECT
                     MAX(date) as latest,
@@ -158,9 +151,14 @@ def get_top_movers(
             SELECT * FROM combined
             ORDER BY direction,
                      CASE WHEN direction = 'gainer' THEN -change_pct ELSE change_pct END
-        """
+        """).format(
+            period_expr=period_expr,
+            sector_filter=sector_filter,
+            index_filter=index_filter,
+            price_filter=price_filter,
+        )
     else:
-        sql = f"""
+        query = sql.SQL("""
             WITH date_refs AS (
                 SELECT
                     MAX(date) as latest,
@@ -196,9 +194,15 @@ def get_top_movers(
             {price_filter}
             ORDER BY {order_clause}
             LIMIT %(limit)s
-        """
+        """).format(
+            period_expr=period_expr,
+            sector_filter=sector_filter,
+            index_filter=index_filter,
+            price_filter=price_filter,
+            order_clause=order_clause,
+        )
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_volume_leaders(
@@ -236,47 +240,38 @@ def get_volume_leaders(
     limit = min(limit, 100)
 
     # Build sector filter
-    sector_filter = ""
+    sector_filter = sql.SQL("")
     params: dict[str, Any] = {"limit": limit}
     if sector:
-        sector_filter = """
-            AND (c.sic_description ILIKE %(sector)s
-                 OR EXISTS (
-                     SELECT 1 FROM sic_gics_mapping m
-                     WHERE m.sic_code = c.sic_code
-                       AND m.gics_sector ILIKE %(sector)s
-                 )
-                 OR (c.ticker IN ('ASML', 'ARM') AND %(sector)s ILIKE '%technology%')
-                 OR (c.ticker = 'PDD' AND %(sector)s ILIKE '%discretionary%')
-                 OR (c.ticker IN ('TRI', 'FER') AND %(sector)s ILIKE '%industrial%')
-                 OR (c.ticker = 'CCEP' AND %(sector)s ILIKE '%staples%'))
-        """
+        sector_filter = sql.SQL("""
+            AND get_gics_sector(c.ticker, c.sic_code, c.sic_description) ILIKE %(sector)s
+        """)
         params["sector"] = f"%{sector}%"
 
     # Build index filter
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index:
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = %(index)s
-        )"""
+        )""")
         params["index"] = index.lower()
 
-    price_filter = ""
+    price_filter = sql.SQL("")
     if min_price is not None:
-        price_filter = " AND p.close >= %(min_price)s"
+        price_filter = sql.SQL(" AND p.close >= %(min_price)s")
         params["min_price"] = min_price
 
-    # Determine sort column
+    # Determine sort column (controlled SQL expressions)
     sort_map = {
-        "volume": "p.volume",
-        "dollar_volume": "p.volume * p.close",
-        "volume_ratio": "COALESCE(ti.volume_ratio, 0)",
+        "volume": sql.SQL("p.volume"),
+        "dollar_volume": sql.SQL("p.volume * p.close"),
+        "volume_ratio": sql.SQL("COALESCE(ti.volume_ratio, 0)"),
     }
     sort_expr = sort_map.get(metric, sort_map["dollar_volume"])
 
-    sql = f"""
+    query = sql.SQL("""
         WITH latest_date AS (
             SELECT MAX(date) as dt FROM stock_prices
         ),
@@ -316,9 +311,14 @@ def get_volume_leaders(
         {price_filter}
         ORDER BY {sort_expr} DESC NULLS LAST
         LIMIT %(limit)s
-    """
+    """).format(
+        sector_filter=sector_filter,
+        index_filter=index_filter,
+        price_filter=price_filter,
+        sort_expr=sort_expr,
+    )
 
-    return execute_query(sql, params)
+    return execute_query(query, params)
 
 
 def get_market_breadth(
@@ -340,43 +340,41 @@ def get_market_breadth(
         - pct_above_50dma, pct_above_200dma (percentage)
     """
     # Build index filter (uses index_constituents junction table)
-    index_filter = ""
+    index_filter = sql.SQL("")
     if index == "sp500":
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
-        )"""
+        )""")
     elif index == "nasdaq100":
-        index_filter = """AND c.ticker IN (
+        index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'nasdaq100'
-        )"""
+        )""")
 
     params: dict[str, Any] = {}
 
     if date:
-        # Use specific date
-        date_cte = """
+        date_cte = sql.SQL("""
             WITH date_refs AS (
                 SELECT
                     %(target_date)s::date as latest,
                     (SELECT MAX(date) FROM stock_prices
                      WHERE date < %(target_date)s::date) as previous
-            )"""
+            )""")
         params["target_date"] = date
     else:
-        # Use latest two trading days
-        date_cte = """
+        date_cte = sql.SQL("""
             WITH latest_dates AS (
                 SELECT DISTINCT date FROM stock_prices_live ORDER BY date DESC LIMIT 2
             ),
             date_refs AS (
                 SELECT MAX(date) as latest, MIN(date) as previous FROM latest_dates
-            )"""
+            )""")
 
-    sql = f"""
+    query = sql.SQL("""
         {date_cte},
         stock_data AS (
             SELECT
@@ -423,9 +421,12 @@ def get_market_breadth(
             ROUND((SUM(above_200)::numeric / NULLIF(COUNT(*), 0) * 100)::numeric, 1)
                 as pct_above_200dma
         FROM stock_data
-    """
+    """).format(
+        date_cte=date_cte,
+        index_filter=index_filter,
+    )
 
-    results = execute_query(sql, params)
+    results = execute_query(query, params)
     if results:
         return results[0]
     return {
