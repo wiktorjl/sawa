@@ -114,18 +114,8 @@ Key patterns:
 
 ### Package: sawa-tui
 
-Terminal UI built with Rich + blessed:
-
-- **app.py** - Main application loop and key handling
-- **state.py** - AppState class managing all UI state
-- **views/** - View rendering functions (economy, stocks, fundamentals, settings)
-- **components.py** - Reusable UI components
-- **services/** - Business logic layer (economy_service, stock queries)
-- **models/** - Watchlists, glossary, settings persistence
-- **database.py** - Local SQLite for TUI-specific data (watchlists, glossary, user settings)
-- **ai/** - Integration with ZAI API for AI-powered analysis
-
-The TUI uses a custom input handler (input.py) that normalizes keypresses across terminals.
+**NOTE: The TUI package has been removed from the codebase.** It was deleted in commit 6e56114.
+TUI-specific database tables (watchlists, glossary, users) were cleaned up via migration script 16_cleanup.sql.
 
 ### Package: stock-data-mcp-server
 
@@ -144,21 +134,38 @@ The MCP server provides read-only access to data with visualization support.
 
 ## Database Schema
 
-PostgreSQL schema in `sqlschema/` (applied in order):
+PostgreSQL schema in `sqlschema/` (applied in numeric order):
 
-- **00_setup.sql** - Extensions and utility functions
+**Core Schema:**
+- **00_setup.sql** - Documentation (expected tables list)
 - **01_companies.sql** - Company metadata (primary reference table)
-- **02_market_data.sql** - Daily OHLCV stock prices
-- **03_fundamentals.sql** - Balance sheet, income statement, cash flow
-- **04_economy.sql** - Treasury yields, inflation, labor market
-- **05_indexes.sql** - Performance indexes
-- **06_views.sql** - Materialized views for common queries
-- **07_procedures.sql** - Stored procedures for data operations
-- **08_watchlists.sql** - User watchlist management (TUI)
-- **09_glossary.sql** - Financial term glossary (TUI)
-- **10_news.sql** - News articles and sentiment
-- **11_users.sql** - User accounts and settings (TUI)
-- **12_fix_watchlist_constraint.sql** - Schema migration
+- **02_market_data.sql** - Daily OHLCV stock prices and financial ratios
+- **03_fundamentals.sql** - Balance sheets, income statements, cash flows
+- **04_economy.sql** - Treasury yields, inflation, labor market indicators
+- **05_indexes.sql** - Performance indexes on all tables
+- **06_views.sql** - Common views (company summary, economy dashboard, fundamentals, sectors)
+- **07_procedures.sql** - CSV loading stored procedures
+
+**Extended Schema:**
+- **08_sic_gics_mapping.sql** - SIC to GICS sector classification table
+- **09_sic_gics_data.sql** - Seed data for SIC/GICS mappings (~180 rows)
+- **10_news.sql** - News articles, article-ticker associations, sentiment analysis
+- **11_technical_indicators.sql** - Technical analysis indicators and metadata
+- **12_indices.sql** - Market indices (S&P 500, NASDAQ 100) and constituents
+- **13_gics_sector_function.sql** - get_gics_sector() lookup function
+- **14_52week_extremes.sql** - Materialized view for 52-week highs/lows
+
+**Migrations:**
+- **16_cleanup.sql** - Drops old TUI tables (watchlists, users, glossary, company_overviews)
+- **17_extended_sma.sql** - Adds sma_100/150/200, ema_100/200 to technical_indicators
+- **18_corporate_actions.sql** - Stock splits, dividends, earnings tables
+- **19_earnings_yfinance.sql** - Adds surprise_pct to earnings, changes constraints
+- **20_drop_revenue_estimate.sql** - Drops revenue_estimate column from earnings
+- **21_intraday_prices.sql** - Intraday price data (5-minute bars)
+- **22_views_advanced.sql** - Advanced views (v_company_with_indices, stock_prices_live)
+
+**Note:** Files are applied in numeric order. Migration files (16+) contain ALTER statements
+and assume base schema (01-15) exists. File 15 does not exist (gap in numbering).
 
 Data directory structure:
 - `data/prices/` - OHLCV CSV files by ticker
