@@ -2,9 +2,9 @@
   "mcpServers": {
     "stock-data": {
       "type": "stdio",
-      "command": "/home/user/code/sawa/.venv/bin/python",
+      "command": "/home/seed/code/sawa/.venv/bin/python",
       "args": ["-m", "mcp_server.server"],
-      "cwd": "/home/user/code/sawa"
+      "cwd": "/home/seed/code/sawa"
     }
   }
 }
