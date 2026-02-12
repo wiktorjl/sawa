@@ -34,12 +34,20 @@ def update_prices(
 
     trading_set = set(trading_days)
     total_records = 0
+    processed_dates = 0
+    total_trading_days = len([d for d in trading_days if start_date <= date.fromisoformat(d) <= end_date])
 
     current = start_date
     while current <= end_date:
         date_str = current.strftime(DATE_FORMAT)
         if date_str in trading_set:
-            logger.info(f"  {date_str}...")
+            processed_dates += 1
+            logger.debug(f"  {date_str}...")
+
+            # Progress indicator every 10 dates for updates (smaller batches)
+            if processed_dates % 10 == 0 or processed_dates == total_trading_days:
+                logger.info(f"  Progress: {processed_dates}/{total_trading_days} dates, {total_records:,} records")
+
             records = s3_client.download_and_parse(current, symbols)
             if records:
                 for record in records:
@@ -57,7 +65,7 @@ def update_prices(
                 total_records += len(records)
         current += timedelta(days=1)
 
-    logger.info(f"Downloaded {total_records} new price records")
+    logger.info(f"Complete: {processed_dates} dates, {total_records:,} records")
     return total_records
 
 
