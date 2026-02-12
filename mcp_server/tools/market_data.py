@@ -11,6 +11,39 @@ from ..database import execute_query
 logger = logging.getLogger(__name__)
 
 
+def get_data_status() -> dict[str, Any]:
+    """Check latest stock price data across daily, intraday, and live tables."""
+    query = """
+        SELECT
+            (SELECT MAX(date) FROM stock_prices) AS prices_latest_date,
+            (SELECT COUNT(DISTINCT ticker) FROM stock_prices) AS prices_ticker_count,
+            (SELECT COUNT(*) FROM stock_prices) AS prices_row_count,
+            (SELECT MAX(timestamp) FROM stock_prices_intraday) AS intraday_latest_timestamp,
+            (SELECT COUNT(DISTINCT ticker) FROM stock_prices_intraday) AS intraday_ticker_count,
+            (SELECT COUNT(*) FROM stock_prices_intraday) AS intraday_row_count,
+            (SELECT MAX(date) FROM stock_prices_live) AS live_latest_date,
+            (SELECT COUNT(DISTINCT ticker) FROM stock_prices_live) AS live_ticker_count
+    """
+    rows = execute_query(query, validate=False)
+    row = rows[0] if rows else {}
+    return {
+        "stock_prices": {
+            "latest_date": row.get("prices_latest_date"),
+            "ticker_count": row.get("prices_ticker_count", 0),
+            "row_count": row.get("prices_row_count", 0),
+        },
+        "stock_prices_intraday": {
+            "latest_timestamp": row.get("intraday_latest_timestamp"),
+            "ticker_count": row.get("intraday_ticker_count", 0),
+            "row_count": row.get("intraday_row_count", 0),
+        },
+        "stock_prices_live": {
+            "latest_date": row.get("live_latest_date"),
+            "ticker_count": row.get("live_ticker_count", 0),
+        },
+    }
+
+
 def get_stock_prices(
     ticker: str,
     start_date: str,

@@ -63,6 +63,7 @@ from .tools.indices import (  # noqa: E402
     list_indices,
 )
 from .tools.market_data import (  # noqa: E402
+    get_data_status,
     get_financial_ratios,
     get_intraday_bars,
     get_latest_price,
@@ -1283,6 +1284,16 @@ async def list_tools() -> list[Tool]:
                 "required": ["ticker"],
             },
         ),
+        # Data status tool
+        Tool(
+            name="get_data_status",
+            description="Check latest stock price data in the database"
+            " (daily, intraday, and live tables)",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -1634,6 +1645,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 ticker=arguments["ticker"],
                 limit=arguments.get("limit", 12),
             )
+        elif name == "get_data_status":
+            logger.info("  Executing: get_data_status")
+            result = get_data_status()
         else:
             raise ValueError(f"Unknown tool: {name}")
 

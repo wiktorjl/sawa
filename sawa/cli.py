@@ -614,6 +614,75 @@ def cmd_corporate_actions(args) -> int:
         return 1
 
 
+def cmd_data_status(args) -> int:
+    """Show latest stock price data in the database."""
+    import psycopg
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="data_status")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    query = """
+        SELECT
+            (SELECT MAX(date) FROM stock_prices) AS prices_latest_date,
+            (SELECT COUNT(DISTINCT ticker) FROM stock_prices) AS prices_ticker_count,
+            (SELECT COUNT(*) FROM stock_prices) AS prices_row_count,
+            (SELECT MAX(timestamp) FROM stock_prices_intraday) AS intraday_latest_timestamp,
+            (SELECT COUNT(DISTINCT ticker) FROM stock_prices_intraday) AS intraday_ticker_count,
+            (SELECT COUNT(*) FROM stock_prices_intraday) AS intraday_row_count,
+            (SELECT MAX(date) FROM stock_prices_live) AS live_latest_date,
+            (SELECT COUNT(DISTINCT ticker) FROM stock_prices_live) AS live_ticker_count
+    """
+
+    try:
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                row = cur.fetchone()
+
+        if not row:
+            print("No data found.")
+            return 0
+
+        (
+            prices_date, prices_tickers, prices_rows,
+            intraday_ts, intraday_tickers, intraday_rows,
+            live_date, live_tickers,
+        ) = row
+
+        print("\nStock Price Data Status\n")
+        print(f"{'Table':<26}{'Latest Data':<22}{'Tickers':>8}{'Rows':>12}")
+        print("-" * 68)
+        print(
+            f"{'stock_prices':<26}"
+            f"{str(prices_date or 'N/A'):<22}"
+            f"{prices_tickers or 0:>8}"
+            f"{prices_rows or 0:>12,}"
+        )
+        print(
+            f"{'stock_prices_intraday':<26}"
+            f"{str(intraday_ts or 'N/A'):<22}"
+            f"{intraday_tickers or 0:>8}"
+            f"{intraday_rows or 0:>12,}"
+        )
+        print(
+            f"{'stock_prices_live':<26}"
+            f"{str(live_date or 'N/A'):<22}"
+            f"{live_tickers or 0:>8}"
+            f"{'':>12}"
+        )
+
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to get data status: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_update(args) -> int:
     """Run incremental update (legacy: daily + weekly)."""
     from sawa.update import run_update
@@ -675,6 +744,7 @@ Commands:
   index-update        Update index constituents from Wikipedia
   index-check         Check which indices a ticker belongs to
   corporate-actions   Download stock splits and dividends
+  data-status         Show latest stock price data in the database
 
 Examples:
   sawa coldstart --years 5
@@ -1065,6 +1135,17 @@ Environment Variables:
     corp_parser.add_argument("--log-dir", help="Directory for log files")
     corp_parser.add_argument("-v", "--verbose", action="store_true")
     corp_parser.set_defaults(func=cmd_corporate_actions)
+
+    # Data status subcommand
+    status_parser = subparsers.add_parser(
+        "data-status",
+        help="Show latest stock price data in the database",
+        description="Check data freshness across stock price tables.",
+    )
+    status_parser.add_argument("--database-url", help="PostgreSQL URL")
+    status_parser.add_argument("--log-dir", help="Directory for log files")
+    status_parser.add_argument("-v", "--verbose", action="store_true")
+    status_parser.set_defaults(func=cmd_data_status)
 
     args = parser.parse_args()
 
