@@ -89,6 +89,8 @@ def download_prices(
     trading_set = set(trading_days)
     total_records = 0
     skipped_dates = 0
+    processed_dates = 0
+    total_trading_days = len([d for d in trading_days if start_date <= date.fromisoformat(d) <= end_date])
 
     current = start_date
     while current <= end_date:
@@ -101,7 +103,13 @@ def download_prices(
                 current += timedelta(days=1)
                 continue
 
-            logger.info(f"  {date_str}...")
+            processed_dates += 1
+            logger.debug(f"  {date_str}...")
+
+            # Progress indicator every 50 dates or at milestones
+            if processed_dates % 50 == 0 or processed_dates == total_trading_days:
+                logger.info(f"  Progress: {processed_dates}/{total_trading_days} dates, {total_records:,} records")
+
             records = s3_client.download_and_parse(current, symbols)
             if records:
                 # Append to per-symbol files
@@ -120,9 +128,8 @@ def download_prices(
                 total_records += len(records)
         current += timedelta(days=1)
 
-    if skipped_dates > 0:
-        logger.info(f"Skipped {skipped_dates} already-downloaded dates")
-    logger.info(f"Downloaded {total_records} price records")
+    logger.info(f"Complete: {processed_dates} dates, {total_records:,} records" +
+                (f" ({skipped_dates} skipped)" if skipped_dates > 0 else ""))
     return total_records
 
 
@@ -568,13 +575,13 @@ def run_coldstart(
 
     logger.info("=" * 60)
     if schema_only:
-        logger.info("SCHEMA ONLY MODE - Setting up database")
+        logger.info("MODE: Schema Only (drop & recreate tables)")
     elif load_only:
-        logger.info("LOAD ONLY MODE - Loading existing data")
+        logger.info("MODE: Load Only (existing CSV data)")
     elif skip_all_downloads:
-        logger.info("COLD START - Loading existing data")
+        logger.info("MODE: Load (skip downloads)")
     else:
-        logger.info("COLD START - Full Database Setup")
+        logger.info("MODE: Full Cold Start (download + load all data)")
     logger.info("=" * 60)
 
     # Calculate date range
@@ -600,7 +607,7 @@ def run_coldstart(
         with psycopg.connect(database_url) as conn:
             # Schema setup (skip for load_only mode)
             if not load_only:
-                logger.info("\n[1/9] Setting up database...")
+                logger.info("\n[1/9] Database schema setup")
                 if drop_tables:
                     # Safety check: Warn and confirm before dropping
                     import sys
@@ -665,12 +672,12 @@ def run_coldstart(
 
             # If load_only or skip_all_downloads, just load existing CSV data
             if load_only or skip_all_downloads:
-                logger.info("\n[2/9] Skipping downloads, loading existing data...")
+                logger.info("\n[2/9] Loading existing data (skipping downloads)")
                 stats["symbols"] = 0
                 stats["trading_days"] = 0
 
                 # Load existing companies
-                logger.info("\n[3/9] Loading existing companies...")
+                logger.info("\n[3/9] Loading companies from CSV")
                 overviews_csv = output_dir / "overviews" / "overviews.csv"
                 if overviews_csv.exists():
                     load_companies(conn, overviews_csv, logger)
@@ -680,7 +687,7 @@ def run_coldstart(
                     stats["overviews"] = 0
 
                 # Check for missing companies before loading fundamentals/ratios
-                logger.info("\n[4/9] Checking for missing company records...")
+                logger.info("\n[4/9] Validating company records")
                 tickers_in_data = get_tickers_from_csv_files(output_dir, logger)
                 tickers_in_db = get_existing_tickers_from_db(conn)
                 missing_tickers = tickers_in_data - tickers_in_db
@@ -707,7 +714,7 @@ def run_coldstart(
                     logger.warning("  Run with --api-key to fetch missing company info")
 
                 # Load existing prices
-                logger.info("\n[5/9] Loading existing prices...")
+                logger.info("\n[5/9] Loading prices from CSV")
                 prices_dir = output_dir / "prices"
                 if prices_dir.exists():
                     load_prices(conn, prices_dir, logger)
@@ -721,7 +728,7 @@ def run_coldstart(
                 logger.info(f"  {len(valid_tickers)} companies in database")
 
                 # Load existing fundamentals
-                logger.info("\n[6/9] Loading existing fundamentals...")
+                logger.info("\n[6/9] Loading fundamentals from CSV")
                 fundamentals_dir = output_dir / "fundamentals"
                 if fundamentals_dir.exists():
                     load_fundamentals(conn, fundamentals_dir, logger, valid_tickers)
@@ -731,7 +738,7 @@ def run_coldstart(
                     stats["fundamentals"] = {}
 
                 # Load existing ratios
-                logger.info("\n[7/9] Loading existing ratios...")
+                logger.info("\n[7/9] Loading ratios from CSV")
                 ratios_csv = output_dir / "ratios" / "ratios.csv"
                 if ratios_csv.exists():
                     load_ratios(conn, ratios_csv, logger, valid_tickers)
@@ -741,7 +748,7 @@ def run_coldstart(
                     stats["ratios"] = 0
 
                 # Load existing economy data
-                logger.info("\n[8/9] Loading existing economy data...")
+                logger.info("\n[8/9] Loading economy data from CSV")
                 economy_dir = output_dir / "economy"
                 if economy_dir.exists():
                     load_economy(conn, economy_dir, logger)
@@ -757,7 +764,7 @@ def run_coldstart(
 
                 # Step 2: Fetch or load symbols
                 if symbols_file and symbols_file.exists():
-                    logger.info(f"\n[2/9] Loading symbols from {symbols_file}...")
+                    logger.info(f"\n[2/9] Loading symbols from {symbols_file}")
                     symbols = []
                     with open(symbols_file) as f:
                         for line in f:
@@ -766,7 +773,7 @@ def run_coldstart(
                                 symbols.append(sym)
                     logger.info(f"  Loaded {len(symbols)} symbols from file")
                 else:
-                    logger.info("\n[2/9] Fetching symbols from Wikipedia...")
+                    logger.info("\n[2/9] Fetching symbols from Wikipedia")
                     logger.info("  - Fetching S&P 500...")
                     sp500_symbols = fetch_sp500_symbols(logger)
                     logger.info("  - Fetching NASDAQ-100...")
@@ -791,7 +798,7 @@ def run_coldstart(
                 stats["symbols"] = len(symbols)
 
                 # Step 3: Get trading days
-                logger.info("\n[3/9] Getting trading days...")
+                logger.info("\n[3/9] Fetching trading days calendar")
                 trading_days = client.get_trading_days(start_str, end_str)
                 logger.info(f"  Found {len(trading_days)} trading days")
                 stats["trading_days"] = len(trading_days)
@@ -801,7 +808,7 @@ def run_coldstart(
                     logger.info("\n[4/9] Skipping overviews (--skip-overviews)")
                     stats["overviews"] = 0
                 else:
-                    logger.info("\n[4/9] Downloading company overviews...")
+                    logger.info("\n[4/9] Downloading company data")
                     overview_count = download_overviews(
                         client, symbols, output_dir / "overviews", logger, rate_limiter
                     )
@@ -815,7 +822,7 @@ def run_coldstart(
                     logger.info("\n[5/9] Skipping prices (--skip-prices)")
                     stats["prices"] = 0
                 else:
-                    logger.info("\n[5/9] Downloading historical prices...")
+                    logger.info("\n[5/9] Downloading historical prices")
                     prices_dir = output_dir / "prices"
                     price_count = download_prices(
                         s3_client,
@@ -836,7 +843,7 @@ def run_coldstart(
                     logger.info("\n[6/9] Skipping fundamentals (--skip-fundamentals)")
                     stats["fundamentals"] = {}
                 else:
-                    logger.info("\n[6/9] Downloading fundamentals...")
+                    logger.info("\n[6/9] Downloading fundamentals")
                     fund_stats = download_fundamentals(
                         client,
                         symbols,
@@ -853,7 +860,7 @@ def run_coldstart(
                     logger.info("\n[7/9] Skipping ratios (--skip-ratios)")
                     stats["ratios"] = 0
                 else:
-                    logger.info("\n[7/9] Downloading financial ratios...")
+                    logger.info("\n[7/9] Downloading financial ratios")
                     ratio_count = download_ratios(
                         client, symbols, output_dir / "ratios", logger, rate_limiter
                     )
@@ -898,7 +905,7 @@ def run_coldstart(
                     logger.info("\n[8/9] Skipping economy data (--skip-economy)")
                     stats["economy"] = {}
                 else:
-                    logger.info("\n[8/9] Downloading economy data...")
+                    logger.info("\n[8/9] Downloading economy data")
                     econ_stats = download_economy(
                         client, start_str, end_str, output_dir / "economy", logger
                     )
@@ -912,7 +919,7 @@ def run_coldstart(
                     logger.info("\n[9/9] Skipping news (--skip-news)")
                     stats["news"] = 0
                 else:
-                    logger.info("\n[9/9] Downloading news articles...")
+                    logger.info("\n[9/9] Downloading news articles")
                     news_count = load_news(conn, client, symbols, days=DEFAULT_NEWS_DAYS)
                     stats["news"] = news_count
 
