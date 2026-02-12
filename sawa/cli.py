@@ -49,15 +49,13 @@ def cmd_coldstart(args) -> int:
     load_only = args.load_only
     skip_downloads = args.skip_downloads
 
-    # Safety: --schema-only should default to --no-drop to prevent accidental data loss
-    # User can explicitly pass both --schema-only and not --no-drop if they really want to drop
-    if schema_only and not args.no_drop:
-        logger.warning("⚠️  --schema-only defaults to --no-drop to protect existing data")
-        logger.warning(
-            "⚠️  To drop tables with schema-only, explicitly use: --schema-only (without --no-drop)"
-        )
-        # Automatically enable no-drop for safety
-        args.no_drop = True
+    # Schema-only mode rebuilds the schema, so it needs to drop existing tables
+    # If user wants to preserve data, they should not use --schema-only at all
+    if schema_only and args.no_drop:
+        logger.error("❌ ERROR: --schema-only and --no-drop are incompatible")
+        logger.error("   --schema-only rebuilds the schema by dropping and recreating tables")
+        logger.error("   To preserve data, don't use --schema-only")
+        return 1
 
     # API credentials only required if downloading data (not for drop/schema/load-only modes)
     needs_api = not (drop_only or schema_only or load_only or skip_downloads)
@@ -737,7 +735,7 @@ Environment Variables:
     cold_parser.add_argument(
         "--schema-only",
         action="store_true",
-        help="Only set up schema (no download/load). Auto-enables --no-drop for safety.",
+        help="Only set up schema (no download/load). Drops and recreates all tables.",
     )
     cold_parser.add_argument(
         "--load-only", action="store_true", help="Only load existing CSV data (no schema changes)"
