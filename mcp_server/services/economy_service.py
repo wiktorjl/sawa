@@ -1,7 +1,10 @@
 """Economy service for MCP server using repository layer.
 
-This service provides async methods for accessing economic data
-via the repository layer and converts domain models to MCP-compatible dicts.
+DEPRECATED: This service is not used by the MCP server and relies on
+repository methods that are not compatible with the current database schema.
+
+The MCP server uses direct SQL queries in mcp_server/tools/economy.py instead.
+This module is kept for backwards compatibility but should not be used.
 """
 
 from collections import defaultdict
@@ -20,12 +23,18 @@ from mcp_server.services.converters import (
 class EconomyService:
     """Async service for economic data access via repository layer.
 
-    This service wraps the repository layer and provides async methods
-    that return MCP-compatible dictionaries.
+    DEPRECATED: This service relies on repository methods (get_inflation,
+    get_labor_market) that are not compatible with the current database schema.
+    These methods expect a narrow schema with an 'indicator' column, but the
+    actual schema uses a wide format with separate columns per indicator.
+
+    The MCP server uses direct SQL queries in mcp_server/tools/economy.py instead.
+    Do not use this service - it will raise NotImplementedError at runtime.
 
     Example:
         service = EconomyService()
-        yields = await service.get_treasury_yields("2024-01-01", "2024-01-31")
+        yields = await service.get_treasury_yields("2024-01-01", "2024-01-31")  # Works
+        inflation = await service.get_inflation("2024-01-01", "2024-01-31")  # Raises NotImplementedError
     """
 
     def __init__(self) -> None:

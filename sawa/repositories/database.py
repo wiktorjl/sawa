@@ -698,59 +698,23 @@ class DatabaseEconomyRepository(EconomyRepository):
     ) -> list[InflationData]:
         """Get inflation data.
 
-        Args:
-            start_date: Start date (inclusive)
-            end_date: End date (inclusive)
-            indicator: Optional filter for specific indicator
+        DEPRECATED: This method is not implemented. The inflation table uses
+        a wide schema (separate columns per indicator) but this method expects
+        a narrow schema (indicator column). Use direct SQL queries instead:
 
-        Returns:
-            List of InflationData objects, sorted by date ascending
+            SELECT date, cpi, cpi_core, cpi_year_over_year, pce, pce_core
+            FROM inflation WHERE date BETWEEN %s AND %s
+
+        See mcp_server/tools/economy.py for working examples.
+
+        Raises:
+            NotImplementedError: Always raised - method not compatible with schema
         """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._get_inflation_sync, start_date, end_date, indicator
-        )
-
-    def _get_inflation_sync(
-        self,
-        start_date: date,
-        end_date: date,
-        indicator: str | None,
-    ) -> list[InflationData]:
-        """Synchronous implementation of get_inflation."""
-        with _get_connection(self.database_url) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                if indicator:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM inflation
-                        WHERE date BETWEEN %s AND %s AND indicator = %s
-                        ORDER BY date
-                        """,
-                        (start_date, end_date, indicator),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM inflation
-                        WHERE date BETWEEN %s AND %s
-                        ORDER BY date, indicator
-                        """,
-                        (start_date, end_date),
-                    )
-                rows = cur.fetchall()
-
-        return [self._row_to_inflation(row) for row in rows]
-
-    def _row_to_inflation(self, row: dict[str, Any]) -> InflationData:
-        """Convert database row to InflationData domain model."""
-        return InflationData(
-            date=row["date"],
-            indicator=row["indicator"],
-            value=Decimal(str(row["value"])),
-            change_yoy=_to_decimal(row.get("change_yoy")),
+        raise NotImplementedError(
+            "get_inflation() is not implemented. The inflation table uses a wide "
+            "schema with separate columns (cpi, pce, etc.) not a narrow schema "
+            "with an 'indicator' column. Use direct SQL queries instead. "
+            "See mcp_server/tools/economy.py for examples."
         )
 
     async def get_labor_market(
@@ -761,58 +725,24 @@ class DatabaseEconomyRepository(EconomyRepository):
     ) -> list[LaborMarketData]:
         """Get labor market data.
 
-        Args:
-            start_date: Start date (inclusive)
-            end_date: End date (inclusive)
-            indicator: Optional filter for specific indicator
+        DEPRECATED: This method is not implemented. The labor_market table uses
+        a wide schema (separate columns per indicator) but this method expects
+        a narrow schema (indicator column). Use direct SQL queries instead:
 
-        Returns:
-            List of LaborMarketData objects, sorted by date ascending
+            SELECT date, unemployment_rate, labor_force_participation_rate,
+                   avg_hourly_earnings, job_openings
+            FROM labor_market WHERE date BETWEEN %s AND %s
+
+        See mcp_server/tools/economy.py for working examples.
+
+        Raises:
+            NotImplementedError: Always raised - method not compatible with schema
         """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._get_labor_sync, start_date, end_date, indicator
-        )
-
-    def _get_labor_sync(
-        self,
-        start_date: date,
-        end_date: date,
-        indicator: str | None,
-    ) -> list[LaborMarketData]:
-        """Synchronous implementation of get_labor_market."""
-        with _get_connection(self.database_url) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                if indicator:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM labor_market
-                        WHERE date BETWEEN %s AND %s AND indicator = %s
-                        ORDER BY date
-                        """,
-                        (start_date, end_date, indicator),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM labor_market
-                        WHERE date BETWEEN %s AND %s
-                        ORDER BY date, indicator
-                        """,
-                        (start_date, end_date),
-                    )
-                rows = cur.fetchall()
-
-        return [self._row_to_labor(row) for row in rows]
-
-    def _row_to_labor(self, row: dict[str, Any]) -> LaborMarketData:
-        """Convert database row to LaborMarketData domain model."""
-        return LaborMarketData(
-            date=row["date"],
-            indicator=row["indicator"],
-            value=Decimal(str(row["value"])),
+        raise NotImplementedError(
+            "get_labor_market() is not implemented. The labor_market table uses a wide "
+            "schema with separate columns (unemployment_rate, job_openings, etc.) not a "
+            "narrow schema with an 'indicator' column. Use direct SQL queries instead. "
+            "See mcp_server/tools/economy.py for examples."
         )
 
 

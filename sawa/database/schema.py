@@ -30,17 +30,38 @@ EXPECTED_TABLES = {
     "inflation",
     "inflation_expectations",
     "labor_market",
+    "sic_gics_mapping",
+    "news_articles",
+    "news_article_tickers",
+    "news_sentiment",
+    "technical_indicators",
+    "technical_indicator_metadata",
+    "indices",
+    "index_constituents",
+    "stock_splits",
+    "dividends",
+    "earnings",
+    "stock_prices_intraday",
 }
 
 
 def get_sql_files(schema_dir: Path) -> list[Path]:
-    """Get SQL files in execution order (01-07)."""
-    sql_files = []
-    for num in range(1, 8):
-        pattern = f"{num:02d}_*.sql"
-        matches = list(schema_dir.glob(pattern))
-        if matches:
-            sql_files.append(matches[0])
+    """Get SQL files in execution order (all numbered files).
+
+    Loads all files matching pattern: NN_*.sql where NN is 01-99.
+    Files are executed in numeric order.
+
+    Note: Migration files (16+) contain ALTER statements and should only
+    be run on existing databases. For fresh installations, run all files
+    in order.
+    """
+    # Get all files matching NN_*.sql pattern
+    import re
+    pattern = re.compile(r'^\d{2}_.*\.sql$')
+    sql_files = [
+        f for f in schema_dir.glob("*.sql")
+        if pattern.match(f.name)
+    ]
     return sorted(sql_files)
 
 
