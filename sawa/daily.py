@@ -252,8 +252,15 @@ def run_daily(
 
                         cleanup_today_intraday_data(conn, logger)
                     except ImportError:
-                        # Intraday module not yet created, skip cleanup
                         pass
+
+                # Cleanup old intraday data (>7 days)
+                try:
+                    from sawa.database.intraday_load import cleanup_old_intraday_data
+
+                    cleanup_old_intraday_data(conn, 7, logger)
+                except ImportError:
+                    pass
 
             logger.info(f"  Inserted {inserted} records")
             stats["prices_inserted"] = inserted

@@ -622,6 +622,8 @@ def get_intraday_bars(
         FROM stock_prices_intraday
         WHERE ticker = %(ticker)s
           AND timestamp::date = %(date)s
+          AND timestamp::time >= '14:30:00'
+          AND timestamp::time < '21:00:00'
         ORDER BY timestamp ASC
         LIMIT %(limit)s
     """
