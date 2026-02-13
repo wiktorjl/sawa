@@ -60,6 +60,7 @@ CREATE OR REPLACE VIEW stock_prices_live AS
   UNION ALL
 
   -- Today's intraday aggregated (only when EOD not available)
+  -- Filter to regular market hours: 14:30-21:00 UTC (9:30 AM - 4:00 PM ET)
   SELECT DISTINCT ON (ticker)
     ticker,
     timestamp::date as date,
@@ -71,6 +72,8 @@ CREATE OR REPLACE VIEW stock_prices_live AS
     'intraday'::text as data_source
   FROM stock_prices_intraday
   WHERE timestamp::date = CURRENT_DATE
+    AND timestamp::time >= '14:30:00'
+    AND timestamp::time < '21:00:00'
     AND NOT EXISTS (
       SELECT 1 FROM stock_prices sp
       WHERE sp.ticker = stock_prices_intraday.ticker
