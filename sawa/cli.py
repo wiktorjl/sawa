@@ -5,7 +5,6 @@ Usage:
     sawa coldstart              # Full database setup
     sawa daily                  # Daily price update
     sawa weekly                 # Weekly fundamentals/economy update
-    sawa update                 # Legacy: runs both daily + weekly
 """
 
 import argparse
@@ -683,46 +682,6 @@ def cmd_data_status(args) -> int:
         return 1
 
 
-def cmd_update(args) -> int:
-    """Run incremental update (legacy: daily + weekly)."""
-    from sawa.update import run_update
-
-    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="update")
-
-    # Get credentials
-    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
-    s3_access = args.s3_access_key or os.environ.get("POLYGON_S3_ACCESS_KEY")
-    s3_secret = args.s3_secret_key or os.environ.get("POLYGON_S3_SECRET_KEY")
-    db_url = args.database_url or os.environ.get("DATABASE_URL")
-
-    if not api_key:
-        logger.error("POLYGON_API_KEY required (env var or --api-key)")
-        return 1
-    if not s3_access or not s3_secret:
-        logger.error("POLYGON_S3_ACCESS_KEY and POLYGON_S3_SECRET_KEY required")
-        return 1
-    if not db_url:
-        logger.error("DATABASE_URL required (env var or --database-url)")
-        return 1
-
-    try:
-        stats = run_update(
-            api_key=api_key,
-            s3_access_key=s3_access,
-            s3_secret_key=s3_secret,
-            database_url=db_url,
-            output_dir=Path(args.output_dir),
-            force_from_date=args.from_date,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Update failed: {e}")
-        if args.verbose:
-            raise
-        return 1
-
-
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -734,7 +693,6 @@ Commands:
   coldstart           Full database setup from scratch
   daily               Daily stock price update
   weekly              Weekly fundamentals/economy update
-  update              Legacy: combined daily + weekly update
   add-symbol          Add new symbols to database
   ta-backfill         Calculate technical indicators for all history
   ta-show             Show technical indicators for a ticker
@@ -1046,27 +1004,6 @@ Environment Variables:
     ta_screen_parser.add_argument("--log-dir", help="Directory for log files")
     ta_screen_parser.add_argument("-v", "--verbose", action="store_true")
     ta_screen_parser.set_defaults(func=cmd_ta_screen)
-
-    # Legacy update subcommand
-    update_parser = subparsers.add_parser(
-        "update",
-        help="Legacy: combined daily + weekly update",
-        description="Check last date in database and pull new data (prices + fundamentals).",
-    )
-    update_parser.add_argument(
-        "--from-date",
-        type=parse_date,
-        metavar="YYYY-MM-DD",
-        help="Force update from specific date",
-    )
-    update_parser.add_argument("--output-dir", default="data", help="Output data directory")
-    update_parser.add_argument("--api-key", help="Polygon API key")
-    update_parser.add_argument("--s3-access-key", help="Polygon S3 access key")
-    update_parser.add_argument("--s3-secret-key", help="Polygon S3 secret key")
-    update_parser.add_argument("--database-url", help="PostgreSQL URL")
-    update_parser.add_argument("--log-dir", help="Directory for log files")
-    update_parser.add_argument("-v", "--verbose", action="store_true")
-    update_parser.set_defaults(func=cmd_update)
 
     # Index management subcommands
     index_list_parser = subparsers.add_parser(

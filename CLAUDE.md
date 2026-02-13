@@ -60,9 +60,11 @@ sawa coldstart --skip-downloads        # Load existing CSV files
 sawa coldstart --load-only             # Load data without schema changes
 sawa coldstart --drop-only             # Clean database and exit
 
-# Incremental update (pulls new data since last update)
-sawa update
-sawa update --from-date 2024-01-01
+# Incremental updates
+sawa daily                             # Daily prices, news, technical indicators
+sawa daily --from-date 2024-01-01      # Force update from specific date
+sawa weekly                            # Economy, overviews, news, corporate actions
+sawa quarterly                         # Fundamentals (balance sheets, income, cash flow)
 
 # Common options
 sawa coldstart --verbose              # Debug logging
