@@ -33,11 +33,25 @@ from .market_data import (
     list_technical_indicators,
     screen_by_technical_indicators,
 )
+from .momentum import get_momentum_indicators, get_squeeze_indicators
+from .multi_timeframe import (
+    calculate_relative_strength,
+    get_multi_timeframe_alignment,
+    get_weekly_monthly_candles,
+)
 from .movers import get_market_breadth, get_top_movers, get_volume_leaders
+from .news import get_recent_news_sentiment
+from .patterns import detect_candlestick_patterns, detect_chart_patterns
 from .scanner import scan_ytd_performance
 from .schema import describe_database, describe_table
 from .screener import get_52week_extremes, get_daily_range_leaders, screen_stocks
 from .sectors import get_sector_performance, list_sectors
+from .support_resistance import calculate_support_resistance_levels
+from .volume_analysis import (
+    detect_volume_anomalies,
+    get_advanced_volume_indicators,
+    get_volume_profile,
+)
 
 __all__ = [
     # Companies
@@ -89,4 +103,22 @@ __all__ = [
     "get_dividend_yield_leaders",
     "get_earnings_calendar",
     "get_earnings_history",
+    # News sentiment
+    "get_recent_news_sentiment",
+    # Patterns
+    "detect_candlestick_patterns",
+    "detect_chart_patterns",
+    # Momentum / Squeeze
+    "get_squeeze_indicators",
+    "get_momentum_indicators",
+    # Support & Resistance
+    "calculate_support_resistance_levels",
+    # Volume analysis
+    "get_volume_profile",
+    "detect_volume_anomalies",
+    "get_advanced_volume_indicators",
+    # Multi-timeframe analysis
+    "get_weekly_monthly_candles",
+    "get_multi_timeframe_alignment",
+    "calculate_relative_strength",
 ]

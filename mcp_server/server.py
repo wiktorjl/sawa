@@ -36,7 +36,6 @@ from .charts.renderers import (  # noqa: E402
 )
 from .charts.themes import get_theme  # noqa: E402
 from .database import execute_query  # noqa: E402
-from .validation import validate_tool_arguments  # noqa: E402
 from .tools.companies import (  # noqa: E402
     get_company_details,
     list_companies,
@@ -75,7 +74,15 @@ from .tools.market_data import (  # noqa: E402
     list_technical_indicators,
     screen_by_technical_indicators,
 )
+from .tools.momentum import get_momentum_indicators, get_squeeze_indicators  # noqa: E402
 from .tools.movers import get_market_breadth, get_top_movers, get_volume_leaders  # noqa: E402
+from .tools.multi_timeframe import (  # noqa: E402
+    calculate_relative_strength,
+    get_multi_timeframe_alignment,
+    get_weekly_monthly_candles,
+)
+from .tools.news import get_recent_news_sentiment  # noqa: E402
+from .tools.patterns import detect_candlestick_patterns, detect_chart_patterns  # noqa: E402
 from .tools.scanner import scan_ytd_performance  # noqa: E402
 from .tools.schema import describe_database, describe_table  # noqa: E402
 from .tools.screener import (  # noqa: E402
@@ -84,6 +91,13 @@ from .tools.screener import (  # noqa: E402
     screen_stocks,
 )
 from .tools.sectors import get_sector_performance, list_sectors  # noqa: E402
+from .tools.support_resistance import calculate_support_resistance_levels  # noqa: E402
+from .tools.volume_analysis import (  # noqa: E402
+    detect_volume_anomalies,
+    get_advanced_volume_indicators,
+    get_volume_profile,
+)
+from .validation import validate_tool_arguments  # noqa: E402
 
 # Setup logging
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
@@ -1294,6 +1308,320 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # News sentiment tools
+        Tool(
+            name="get_recent_news_sentiment",
+            description="Get recent news articles with sentiment analysis for a ticker",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "days_back": {
+                        "type": "integer",
+                        "description": "Number of days to look back (default: 14, max: 90)",
+                        "default": 14,
+                        "minimum": 1,
+                        "maximum": 90,
+                    },
+                    "max_articles": {
+                        "type": "integer",
+                        "description": "Maximum articles to return (default: 10, max: 50)",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 50,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        # Support & Resistance tools
+        Tool(
+            name="calculate_support_resistance_levels",
+            description="Calculate support and resistance levels using pivot points, price clustering, or volume analysis",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 90, min: 5, max: 500)",
+                        "default": 90,
+                        "minimum": 5,
+                        "maximum": 500,
+                    },
+                    "max_levels": {
+                        "type": "integer",
+                        "description": "Maximum number of levels to return (default: 5, max: 20)",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 20,
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "Detection method: pivot (pivot points), cluster (price clustering), volume (volume profile)",
+                        "enum": ["pivot", "cluster", "volume"],
+                        "default": "cluster",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        # Pattern detection tools
+        Tool(
+            name="detect_candlestick_patterns",
+            description="Detect candlestick patterns (hammer, engulfing, doji, stars, soldiers, etc.)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 30, max: 252)",
+                        "default": 30,
+                        "minimum": 1,
+                        "maximum": 252,
+                    },
+                    "patterns_to_detect": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of specific patterns to detect (default: all patterns)",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="detect_chart_patterns",
+            description="Detect chart patterns (cup & handle, head & shoulders, triangles, channels, etc.)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 60, max: 252)",
+                        "default": 60,
+                        "minimum": 20,
+                        "maximum": 252,
+                    },
+                    "min_pattern_days": {
+                        "type": "integer",
+                        "description": "Minimum days for pattern formation (default: 10)",
+                        "default": 10,
+                        "minimum": 5,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        # Momentum & Squeeze tools
+        Tool(
+            name="get_squeeze_indicators",
+            description="Get TTM Squeeze indicators (Bollinger Bands, Keltner Channels, momentum histogram, squeeze status)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 60, max: 252)",
+                        "default": 60,
+                        "minimum": 1,
+                        "maximum": 252,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_momentum_indicators",
+            description="Get advanced momentum indicators (ADX, DMI, Stochastic, Williams %R, ROC)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 60, max: 252)",
+                        "default": 60,
+                        "minimum": 1,
+                        "maximum": 252,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        # Volume analysis tools
+        Tool(
+            name="get_volume_profile",
+            description="Get volume distribution by price level (POC, value area, volume by price bins)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 30, max: 252)",
+                        "default": 30,
+                        "minimum": 1,
+                        "maximum": 252,
+                    },
+                    "price_bins": {
+                        "type": "integer",
+                        "description": "Number of price bins (default: 20, max: 100)",
+                        "default": 20,
+                        "minimum": 5,
+                        "maximum": 100,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="detect_volume_anomalies",
+            description="Detect unusual volume patterns (spikes, drops, price-volume divergences)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 90, max: 252)",
+                        "default": 90,
+                        "minimum": 1,
+                        "maximum": 252,
+                    },
+                    "threshold_multiplier": {
+                        "type": "number",
+                        "description": "Volume spike threshold multiplier (default: 2.0)",
+                        "default": 2.0,
+                        "minimum": 1.0,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_advanced_volume_indicators",
+            description="Get advanced volume indicators (OBV, A/D line, CMF, VWAP)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 60, max: 252)",
+                        "default": 60,
+                        "minimum": 1,
+                        "maximum": 252,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        # Multi-timeframe analysis tools
+        Tool(
+            name="get_weekly_monthly_candles",
+            description="Get weekly or monthly aggregated OHLCV candles from daily data",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "timeframe": {
+                        "type": "string",
+                        "description": "Timeframe: weekly or monthly",
+                        "enum": ["weekly", "monthly"],
+                    },
+                    "periods": {
+                        "type": "integer",
+                        "description": "Number of periods (default: 52 for weekly, 12 for monthly)",
+                        "minimum": 1,
+                        "maximum": 260,
+                    },
+                },
+                "required": ["ticker", "timeframe"],
+            },
+        ),
+        Tool(
+            name="get_multi_timeframe_alignment",
+            description="Check indicator alignment across multiple timeframes (daily, weekly, monthly)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "indicators": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Indicators to check (sma, rsi, macd)",
+                    },
+                    "timeframes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Timeframes to analyze (daily, weekly, monthly)",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="calculate_relative_strength",
+            description="Calculate relative strength vs benchmark (RS line, trend, beta, outperformance)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL)",
+                    },
+                    "benchmark": {
+                        "type": "string",
+                        "description": "Benchmark ticker (default: SPY)",
+                        "default": "SPY",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of days to analyze (default: 90, max: 500)",
+                        "default": 90,
+                        "minimum": 20,
+                        "maximum": 500,
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
     ]
 
 
@@ -1648,6 +1976,88 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "get_data_status":
             logger.info("  Executing: get_data_status")
             result = get_data_status()
+        elif name == "get_recent_news_sentiment":
+            logger.info("  Executing: get_recent_news_sentiment")
+            result = get_recent_news_sentiment(
+                ticker=arguments["ticker"],
+                days_back=arguments.get("days_back", 14),
+                max_articles=arguments.get("max_articles", 10),
+            )
+        elif name == "calculate_support_resistance_levels":
+            logger.info("  Executing: calculate_support_resistance_levels")
+            result = calculate_support_resistance_levels(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 90),
+                max_levels=arguments.get("max_levels", 5),
+                method=arguments.get("method", "cluster"),
+            )
+        elif name == "detect_candlestick_patterns":
+            logger.info("  Executing: detect_candlestick_patterns")
+            result = detect_candlestick_patterns(
+                ticker=arguments["ticker"],
+                days=arguments.get("days", 30),
+                patterns_to_detect=arguments.get("patterns_to_detect"),
+            )
+        elif name == "detect_chart_patterns":
+            logger.info("  Executing: detect_chart_patterns")
+            result = detect_chart_patterns(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 60),
+                min_pattern_days=arguments.get("min_pattern_days", 10),
+            )
+        elif name == "get_squeeze_indicators":
+            logger.info("  Executing: get_squeeze_indicators")
+            result = get_squeeze_indicators(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 60),
+            )
+        elif name == "get_momentum_indicators":
+            logger.info("  Executing: get_momentum_indicators")
+            result = get_momentum_indicators(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 60),
+            )
+        elif name == "get_volume_profile":
+            logger.info("  Executing: get_volume_profile")
+            result = get_volume_profile(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 30),
+                price_bins=arguments.get("price_bins", 20),
+            )
+        elif name == "detect_volume_anomalies":
+            logger.info("  Executing: detect_volume_anomalies")
+            result = detect_volume_anomalies(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 90),
+                threshold_multiplier=arguments.get("threshold_multiplier", 2.0),
+            )
+        elif name == "get_advanced_volume_indicators":
+            logger.info("  Executing: get_advanced_volume_indicators")
+            result = get_advanced_volume_indicators(
+                ticker=arguments["ticker"],
+                lookback_days=arguments.get("lookback_days", 60),
+            )
+        elif name == "get_weekly_monthly_candles":
+            logger.info("  Executing: get_weekly_monthly_candles")
+            result = get_weekly_monthly_candles(
+                ticker=arguments["ticker"],
+                timeframe=arguments["timeframe"],
+                periods=arguments.get("periods"),
+            )
+        elif name == "get_multi_timeframe_alignment":
+            logger.info("  Executing: get_multi_timeframe_alignment")
+            result = get_multi_timeframe_alignment(
+                ticker=arguments["ticker"],
+                indicators=arguments.get("indicators"),
+                timeframes=arguments.get("timeframes"),
+            )
+        elif name == "calculate_relative_strength":
+            logger.info("  Executing: calculate_relative_strength")
+            result = calculate_relative_strength(
+                ticker=arguments["ticker"],
+                benchmark=arguments.get("benchmark", "SPY"),
+                lookback_days=arguments.get("lookback_days", 90),
+            )
         else:
             raise ValueError(f"Unknown tool: {name}")
 
