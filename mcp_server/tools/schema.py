@@ -75,10 +75,8 @@ def describe_table(table_name: str) -> dict[str, Any]:
     if not result or result[0]["cnt"] == 0:
         raise ValueError(f"Table '{table_name}' not found in public schema")
 
-    # Build safe table reference for regclass casts
-    table_ref = sql.SQL("{}.{}").format(
-        sql.Identifier("public"), sql.Identifier(table_name)
-    )
+    # Build safe table reference for regclass casts (needs string literal, not identifier)
+    table_ref = sql.Literal(f"public.{table_name}")
 
     # Get table description and row count
     meta_query = sql.SQL("""
