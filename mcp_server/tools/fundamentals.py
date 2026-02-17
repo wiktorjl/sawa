@@ -81,18 +81,18 @@ def get_fundamentals(
             filing_date,
             fiscal_year,
             fiscal_quarter,
-            total_revenue,
+            revenue AS total_revenue,
             cost_of_revenue,
             gross_profit,
-            operating_expenses,
+            total_operating_expenses AS operating_expenses,
             operating_income,
-            net_income,
-            basic_eps,
-            diluted_eps,
+            consolidated_net_income_loss AS net_income,
+            basic_earnings_per_share AS basic_eps,
+            diluted_earnings_per_share AS diluted_eps,
             ebitda,
-            gross_margin,
-            operating_margin,
-            profit_margin
+            CASE WHEN revenue > 0 THEN ROUND(gross_profit / revenue * 100, 2) END AS gross_margin,
+            CASE WHEN revenue > 0 THEN ROUND(operating_income / revenue * 100, 2) END AS operating_margin,
+            CASE WHEN revenue > 0 THEN ROUND(consolidated_net_income_loss / revenue * 100, 2) END AS profit_margin
         FROM income_statements
         WHERE ticker = %(ticker)s
             AND timeframe = %(timeframe)s
