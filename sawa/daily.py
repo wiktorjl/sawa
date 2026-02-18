@@ -21,7 +21,7 @@ from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
-from sawa.utils.market_hours import is_after_market_close
+from sawa.utils.market_hours import get_market_date, is_after_market_close
 
 
 def fetch_prices_via_api(
@@ -179,7 +179,7 @@ def run_daily(
                 logger.error("No existing price data found. Run coldstart first.")
                 return stats
 
-            end_date = date.today()
+            end_date = get_market_date()
 
             # Skip today if market hasn't closed yet (before 5 PM ET)
             # This prevents incomplete data from overriding intraday stream
@@ -246,7 +246,7 @@ def run_daily(
                 inserted = insert_prices(conn, prices, logger)
 
                 # If we just inserted today's EOD, cleanup intraday data for today
-                if end_date == date.today():
+                if end_date == get_market_date():
                     try:
                         from sawa.database.intraday_load import cleanup_today_intraday_data
 

@@ -1,8 +1,20 @@
 """Market hours utilities for US stock market."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytz
+
+ET = pytz.timezone("America/New_York")
+
+
+def get_market_date() -> date:
+    """
+    Get today's date in US Eastern Time.
+
+    Use this instead of date.today() for market-related logic
+    to avoid timezone mismatches on UTC servers.
+    """
+    return datetime.now(ET).date()
 
 
 def is_market_open() -> bool:
