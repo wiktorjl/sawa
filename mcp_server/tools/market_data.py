@@ -411,7 +411,7 @@ def screen_by_technical_indicators(
                  Use None for unbounded side.
                  Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
         target_date: Date to screen (defaults to most recent)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         limit: Maximum results (default: 100, max: 500)
 
     Returns:
@@ -589,49 +589,86 @@ def list_technical_indicators(
 
 
 def get_intraday_bars(
-    ticker: str,
+    ticker: str | None = None,
+    tickers: list[str] | None = None,
     date: str | None = None,
     limit: int = 100,
+    aggregate: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    Get intraday 5-minute bars for a ticker.
+    Get intraday 5-minute bars for one or more tickers.
 
     Args:
-        ticker: Stock ticker symbol (e.g., AAPL)
+        ticker: Single stock ticker symbol (e.g., AAPL)
+        tickers: List of stock ticker symbols for multi-ticker query
         date: Date in YYYY-MM-DD format (defaults to today)
-        limit: Maximum bars to return (default: 100, max: 500)
+        limit: Maximum bars per ticker to return (default: 100, max: 500)
+        aggregate: If True, return daily OHLCV summary instead of individual bars
 
     Returns:
-        List of intraday bars with timestamp, OHLCV
+        If aggregate=False: List of intraday bars with timestamp, OHLCV
+        If aggregate=True: List of daily OHLCV summaries per ticker
     """
-    from datetime import datetime
+    from datetime import datetime as dt_module
 
     if date is None:
-        date = datetime.now().date().isoformat()
+        date = dt_module.now().date().isoformat()
 
     limit = min(limit, 500)
 
-    sql = """
-        SELECT
-            timestamp,
-            open,
-            high,
-            low,
-            close,
-            volume
-        FROM stock_prices_intraday
-        WHERE ticker = %(ticker)s
-          AND timestamp::date = %(date)s
-          AND timestamp::time >= '14:30:00'
-          AND timestamp::time < '21:00:00'
-        ORDER BY timestamp ASC
-        LIMIT %(limit)s
-    """
+    # Build ticker list
+    ticker_list: list[str] = []
+    if tickers:
+        ticker_list = [t.upper() for t in tickers[:20]]  # Cap at 20
+    elif ticker:
+        ticker_list = [ticker.upper()]
+    else:
+        return []
 
-    params = {
-        "ticker": ticker.upper(),
+    params: dict[str, Any] = {
+        "tickers": ticker_list,
         "date": date,
         "limit": limit,
     }
 
-    return execute_query(sql, params)
+    if aggregate:
+        # Return daily OHLCV summary aggregated from intraday bars
+        query = """
+            SELECT
+                ticker,
+                %(date)s::date as date,
+                (ARRAY_AGG(open ORDER BY timestamp ASC))[1] as open,
+                MAX(high) as high,
+                MIN(low) as low,
+                (ARRAY_AGG(close ORDER BY timestamp DESC))[1] as close,
+                SUM(volume) as volume,
+                COUNT(*) as bar_count
+            FROM stock_prices_intraday
+            WHERE ticker = ANY(%(tickers)s)
+              AND timestamp::date = %(date)s
+              AND timestamp::time >= '14:30:00'
+              AND timestamp::time < '21:00:00'
+            GROUP BY ticker
+            ORDER BY ticker
+        """
+        return execute_query(query, params)
+    else:
+        # Return individual bars
+        query = """
+            SELECT
+                ticker,
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume
+            FROM stock_prices_intraday
+            WHERE ticker = ANY(%(tickers)s)
+              AND timestamp::date = %(date)s
+              AND timestamp::time >= '14:30:00'
+              AND timestamp::time < '21:00:00'
+            ORDER BY ticker, timestamp ASC
+            LIMIT %(limit)s
+        """
+        return execute_query(query, params)

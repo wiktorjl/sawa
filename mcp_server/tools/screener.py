@@ -66,12 +66,18 @@ VALID_FILTERS = {
     # 52-week position
     "high_52w_pct",  # % from 52-week high (0 = at high, -10 = 10% below)
     "low_52w_pct",  # % from 52-week low (0 = at low, +10 = 10% above)
+    # Fundamental filters
+    "pe_ratio",
+    "dividend_yield",
+    "roe",
+    "debt_to_equity",
 }
 
 
 def screen_stocks(
     filters: dict[str, list[float | None]],
     sector: str | None = None,
+    sector_exclude: str | None = None,
     index: str | None = None,
     taxonomy: Literal["sic", "gics"] = "gics",
     sort_by: str = "market_cap",
@@ -89,7 +95,7 @@ def screen_stocks(
                  Available filters:
                  - Price: price, price_change_1d/1w/1m/ytd
                  - Volume: volume, dollar_volume, volume_ratio
-                 - Fundamental: market_cap
+                 - Fundamental: market_cap, pe_ratio, dividend_yield, roe, debt_to_equity
                  - SMA values: sma_5/10/20/50/100/150/200
                  - SMA distance %: sma_20/50/100/150/200_distance_pct
                  - EMA values: ema_12/26/50/100/200
@@ -97,7 +103,8 @@ def screen_stocks(
                  - Volatility: bb_upper/middle/lower, atr_14
 
         sector: Optional sector filter (partial match on SIC or GICS)
-        index: Filter by index membership (sp500, nasdaq100)
+        sector_exclude: Optional sector to exclude (partial match)
+        index: Filter by index membership (sp500, nasdaq5000)
         taxonomy: Sector taxonomy - "sic" or "gics" (default: gics)
         sort_by: Column to sort by (default: market_cap)
         sort_order: Sort direction - "asc" or "desc" (default: desc)
@@ -127,6 +134,12 @@ def screen_stocks(
     if sector:
         sector_filter = "AND " + sector_expr + " ILIKE %(sector)s"
         params["sector"] = f"%{sector}%"
+
+    # Sector exclude filter
+    sector_exclude_filter = ""
+    if sector_exclude:
+        sector_exclude_filter = "AND " + sector_expr + " NOT ILIKE %(sector_exclude)s"
+        params["sector_exclude"] = f"%{sector_exclude}%"
 
     # Index filter
     index_filter = ""
@@ -202,6 +215,10 @@ def screen_stocks(
         "change_1m",
         "change_ytd",
         "rsi_14",
+        "pe_ratio",
+        "dividend_yield",
+        "roe",
+        "debt_to_equity",
         "ticker",
         "name",
     }
@@ -267,6 +284,11 @@ def screen_stocks(
                 ti.bb_lower,
                 ti.atr_14,
                 ti.volume_ratio,
+                -- Fundamental ratios
+                fr.price_to_earnings as pe_ratio,
+                fr.dividend_yield,
+                fr.return_on_equity as roe,
+                fr.debt_to_equity,
                 -- SMA distance percentages
                 CASE WHEN ti.sma_20 > 0
                      THEN ROUND(((p.close - ti.sma_20) / ti.sma_20 * 100)::numeric, 2)
@@ -303,8 +325,10 @@ def screen_stocks(
             LEFT JOIN stock_prices_live p_ytd
                 ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
             LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = dr.latest
+            LEFT JOIN financial_ratios fr ON c.ticker = fr.ticker AND fr.date = dr.latest
             WHERE c.active = true
             {sector_filter}
+            {sector_exclude_filter}
             {index_filter}
         )
         SELECT
@@ -324,7 +348,11 @@ def screen_stocks(
             volume_ratio,
             sma_50_distance_pct,
             sma_150_distance_pct,
-            sma_200_distance_pct
+            sma_200_distance_pct,
+            pe_ratio,
+            dividend_yield,
+            roe,
+            debt_to_equity
         FROM base_data
         WHERE {where_clause}
         ORDER BY {sort_by} {sort_dir} NULLS LAST
@@ -333,6 +361,7 @@ def screen_stocks(
         sector_expr=sql.SQL(sector_expr),
         sector_join=sql.SQL(sector_join),
         sector_filter=sql.SQL(sector_filter),
+        sector_exclude_filter=sql.SQL(sector_exclude_filter),
         index_filter=sql.SQL(index_filter),
         where_clause=where_clause,
         sort_by=sql.Identifier(sort_by),
@@ -377,16 +406,209 @@ def _get_filter_expression(filter_name: str) -> str:
         "sma_100_distance_pct": "sma_100_distance_pct",
         "sma_150_distance_pct": "sma_150_distance_pct",
         "sma_200_distance_pct": "sma_200_distance_pct",
+        # Fundamental ratios
+        "pe_ratio": "pe_ratio",
+        "dividend_yield": "dividend_yield",
+        "roe": "roe",
+        "debt_to_equity": "debt_to_equity",
     }
 
     return direct_mappings.get(filter_name, filter_name)
 
 
+def get_ytd_returns(
+    tickers: list[str],
+    start_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Get YTD percentage returns for an arbitrary list of tickers.
+
+    Args:
+        tickers: List of stock ticker symbols (e.g., ["AAPL", "MSFT", "GOOGL"])
+        start_date: Start date YYYY-MM-DD (defaults to Jan 1 of current year)
+
+    Returns:
+        List of dicts with ticker, name, sector, start_price, current_price, ytd_pct, market_cap
+    """
+    if not tickers:
+        return []
+
+    # Normalize tickers
+    tickers = [t.upper() for t in tickers[:100]]  # Cap at 100
+
+    query = """
+        WITH ytd_start AS (
+            SELECT MIN(date) as dt
+            FROM stock_prices_live
+            WHERE date >= COALESCE(%(start_date)s::date, DATE_TRUNC('year', CURRENT_DATE))
+        ),
+        latest AS (
+            SELECT MAX(date) as dt FROM stock_prices_live
+        )
+        SELECT
+            c.ticker,
+            c.name,
+            get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
+            c.market_cap,
+            p_start.close as start_price,
+            p_now.close as current_price,
+            CASE WHEN p_start.close > 0
+                 THEN ROUND(((p_now.close - p_start.close) / p_start.close * 100)::numeric, 2)
+                 ELSE NULL END as ytd_pct
+        FROM companies c
+        CROSS JOIN ytd_start ys
+        CROSS JOIN latest lt
+        JOIN stock_prices_live p_start ON c.ticker = p_start.ticker AND p_start.date = ys.dt
+        JOIN stock_prices_live p_now ON c.ticker = p_now.ticker AND p_now.date = lt.dt
+        WHERE c.ticker = ANY(%(tickers)s)
+        ORDER BY ytd_pct DESC NULLS LAST
+    """
+
+    return execute_query(query, {"tickers": tickers, "start_date": start_date})
+
+
+def detect_crossovers(
+    sma_period: int = 150,
+    direction: Literal["above", "below"] = "above",
+    lookback_days: int = 5,
+    min_volume_ratio: float | None = None,
+    index: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """
+    Detect stocks that recently crossed above or below a moving average.
+
+    Args:
+        sma_period: SMA period to check crossover against (50, 150, or 200)
+        direction: "above" (bullish) or "below" (bearish) crossover
+        lookback_days: How many recent days to check for crossover (default: 5)
+        min_volume_ratio: Minimum volume ratio on crossover day for confirmation
+        index: Filter by index membership (sp500, nasdaq5000)
+        limit: Maximum results (default: 50, max: 200)
+
+    Returns:
+        List of stocks with crossover details:
+        - ticker, name, sector, price, sma_value, crossover_date
+        - volume_ratio, change_since_crossover
+    """
+    limit = min(limit, 200)
+
+    # Validate sma_period
+    valid_periods = {50, 100, 150, 200}
+    if sma_period not in valid_periods:
+        sma_period = 150
+
+    sma_col = f"sma_{sma_period}"
+
+    # Build index filter
+    index_filter = sql.SQL("")
+    params: dict[str, Any] = {"lookback_days": lookback_days, "limit": limit}
+
+    if index:
+        index_filter = sql.SQL("""AND c.ticker IN (
+            SELECT ic.ticker FROM index_constituents ic
+            JOIN indices i ON ic.index_id = i.id
+            WHERE i.code = %(index)s
+        )""")
+        params["index"] = index.lower()
+
+    # Volume filter
+    volume_filter = sql.SQL("")
+    if min_volume_ratio is not None:
+        volume_filter = sql.SQL("AND cross.volume_ratio >= %(min_volume_ratio)s")
+        params["min_volume_ratio"] = min_volume_ratio
+
+    # Direction condition
+    if direction == "above":
+        cross_condition = sql.SQL(
+            "prev_close < prev_sma AND sp.close >= ti.{sma_col}"
+        ).format(sma_col=sql.Identifier(sma_col))
+    else:
+        cross_condition = sql.SQL(
+            "prev_close >= prev_sma AND sp.close < ti.{sma_col}"
+        ).format(sma_col=sql.Identifier(sma_col))
+
+    query = sql.SQL("""
+        WITH recent_dates AS (
+            SELECT DISTINCT date
+            FROM stock_prices_live
+            ORDER BY date DESC
+            LIMIT %(lookback_days)s + 1
+        ),
+        latest AS (
+            SELECT MAX(date) as dt FROM recent_dates
+        ),
+        crossover_data AS (
+            SELECT
+                sp.ticker,
+                sp.date,
+                sp.close,
+                ti.{sma_col} as sma_value,
+                LAG(sp.close) OVER (PARTITION BY sp.ticker ORDER BY sp.date) as prev_close,
+                LAG(ti.{sma_col}) OVER (PARTITION BY sp.ticker ORDER BY sp.date) as prev_sma,
+                ti.volume_ratio
+            FROM stock_prices_live sp
+            JOIN technical_indicators ti ON sp.ticker = ti.ticker AND sp.date = ti.date
+            WHERE sp.date IN (SELECT date FROM recent_dates)
+              AND ti.{sma_col} IS NOT NULL
+              AND ti.{sma_col} > 0
+        ),
+        crossovers AS (
+            SELECT
+                ticker,
+                date as crossover_date,
+                close as crossover_price,
+                sma_value,
+                volume_ratio,
+                prev_close,
+                prev_sma,
+                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
+            FROM crossover_data
+            WHERE prev_close IS NOT NULL
+              AND prev_sma IS NOT NULL
+              AND {cross_condition}
+        )
+        SELECT
+            cross.ticker,
+            c.name,
+            get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
+            c.market_cap,
+            p_now.close as price,
+            cross.sma_value,
+            cross.crossover_date,
+            cross.crossover_price,
+            cross.volume_ratio,
+            CASE WHEN cross.crossover_price > 0
+                 THEN ROUND(((p_now.close - cross.crossover_price)
+                       / cross.crossover_price * 100)::numeric, 2)
+                 ELSE NULL END as change_since_crossover
+        FROM crossovers cross
+        JOIN companies c ON cross.ticker = c.ticker
+        CROSS JOIN latest lt
+        JOIN stock_prices_live p_now ON cross.ticker = p_now.ticker AND p_now.date = lt.dt
+        WHERE cross.rn = 1
+          AND c.active = true
+          {index_filter}
+          {volume_filter}
+        ORDER BY cross.crossover_date DESC, c.market_cap DESC
+        LIMIT %(limit)s
+    """).format(
+        sma_col=sql.Identifier(sma_col),
+        cross_condition=cross_condition,
+        index_filter=index_filter,
+        volume_filter=volume_filter,
+    )
+
+    return execute_query(query, params)
+
+
 def get_52week_extremes(
     extreme: Literal["highs", "lows", "both"] = "both",
     threshold_pct: float = 2.0,
-    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    index: Literal["sp500", "nasdaq5000", "all"] = "all",
     min_volume: int | None = None,
+    since_date: str | None = None,
+    include_fundamentals: bool = False,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """
@@ -395,8 +617,10 @@ def get_52week_extremes(
     Args:
         extreme: Which extreme to find - "highs", "lows", or "both"
         threshold_pct: How close to extreme (default 2% = within 2% of high/low)
-        index: Filter by index membership (requires sp500/nasdaq100 columns)
+        index: Filter by index membership (requires sp500/nasdaq5000 columns)
         min_volume: Minimum volume filter
+        since_date: Only return stocks that hit new 52w extreme on or after this date
+        include_fundamentals: Include PE, dividend yield, ROE, and net margin
         limit: Maximum results (default: 50, max: 200)
 
     Returns:
@@ -404,6 +628,7 @@ def get_52week_extremes(
         - ticker, name, sector, price, volume
         - high_52w, low_52w, high_52w_pct, low_52w_pct
         - change_1d, extreme_type ("high" or "low")
+        - pe_ratio, dividend_yield, roe, net_margin (if include_fundamentals)
     """
     limit = min(limit, 200)
 
@@ -416,11 +641,11 @@ def get_52week_extremes(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq100":
+    elif index == "nasdaq5000":
         index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq100'
+            WHERE i.code = 'nasdaq5000'
         )""")
 
     # Volume filter (parameterized)
@@ -428,6 +653,17 @@ def get_52week_extremes(
     if min_volume:
         volume_filter = sql.SQL("AND p.volume >= %(min_volume)s")
         params["min_volume"] = int(min_volume)
+
+    # Since date filter: only stocks that hit new extremes in the window
+    since_date_filter = sql.SQL("")
+    if since_date:
+        since_date_filter = sql.SQL("""AND c.ticker IN (
+            SELECT sp2.ticker FROM stock_prices sp2
+            JOIN mv_52week_extremes e2 ON sp2.ticker = e2.ticker AND sp2.date = e2.date
+            WHERE sp2.date >= %(since_date)s
+              AND (sp2.high >= e2.high_52w OR sp2.low <= e2.low_52w)
+        )""")
+        params["since_date"] = since_date
 
     # Build extreme filter
     if extreme == "highs":
@@ -438,6 +674,26 @@ def get_52week_extremes(
         extreme_filter = sql.SQL("""
             AND (high_52w_pct >= %(neg_threshold)s OR low_52w_pct <= %(threshold)s)
         """)
+
+    # Fundamentals JOIN and columns
+    if include_fundamentals:
+        fundamentals_join = sql.SQL(
+            "LEFT JOIN financial_ratios fr ON c.ticker = fr.ticker AND fr.date = ld.dt"
+        )
+        fundamentals_cols = sql.SQL(""",
+                fr.price_to_earnings as pe_ratio,
+                fr.dividend_yield,
+                fr.return_on_equity as roe,
+                fr.debt_to_equity""")
+        fundamentals_select = sql.SQL(""",
+            pe_ratio,
+            dividend_yield,
+            roe,
+            debt_to_equity""")
+    else:
+        fundamentals_join = sql.SQL("")
+        fundamentals_cols = sql.SQL("")
+        fundamentals_select = sql.SQL("")
 
     query = sql.SQL("""
         WITH latest_date AS (
@@ -451,7 +707,7 @@ def get_52week_extremes(
             SELECT
                 c.ticker,
                 c.name,
-                c.sic_description as sector,
+                get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
                 c.market_cap,
                 p.close as price,
                 p.high,
@@ -469,15 +725,19 @@ def get_52week_extremes(
                 CASE WHEN p_prev.close > 0
                      THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
                      ELSE NULL END as change_1d
+                {fundamentals_cols}
             FROM companies c
             CROSS JOIN latest_date ld
             CROSS JOIN prev_date pd
-        JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
-        LEFT JOIN stock_prices_live p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
+            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
+            LEFT JOIN stock_prices_live p_prev
+                ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
             JOIN mv_52week_extremes e ON c.ticker = e.ticker AND e.date = ld.dt
+            {fundamentals_join}
             WHERE c.active = true
             {index_filter}
             {volume_filter}
+            {since_date_filter}
         )
         SELECT
             ticker,
@@ -497,6 +757,7 @@ def get_52week_extremes(
                 WHEN low_52w_pct <= %(threshold)s THEN 'low'
                 ELSE NULL
             END as extreme_type
+            {fundamentals_select}
         FROM stock_data
         WHERE 1=1
         {extreme_filter}
@@ -511,8 +772,12 @@ def get_52week_extremes(
             END ASC NULLS LAST
         LIMIT %(limit)s
     """).format(
+        fundamentals_cols=fundamentals_cols,
+        fundamentals_join=fundamentals_join,
+        fundamentals_select=fundamentals_select,
         index_filter=index_filter,
         volume_filter=volume_filter,
+        since_date_filter=since_date_filter,
         extreme_filter=extreme_filter,
     )
 
@@ -541,7 +806,7 @@ def get_daily_range_leaders(
         min_range_pct: Minimum daily range % (default: 3%)
         max_range_pct: Maximum daily range % (optional)
         sector: Optional sector filter
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         min_price: Minimum stock price filter
         min_volume: Minimum volume filter
         limit: Maximum results (default: 50, max: 200)

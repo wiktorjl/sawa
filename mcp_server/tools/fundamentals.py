@@ -74,29 +74,52 @@ def get_fundamentals(
         LIMIT %(limit)s
     """
 
-    # Get income statements
+    # Get income statements with YoY growth metrics
     income_statements_sql = """
+        WITH ordered AS (
+            SELECT
+                period_end,
+                filing_date,
+                fiscal_year,
+                fiscal_quarter,
+                revenue AS total_revenue,
+                cost_of_revenue,
+                gross_profit,
+                total_operating_expenses AS operating_expenses,
+                operating_income,
+                consolidated_net_income_loss AS net_income,
+                basic_earnings_per_share AS basic_eps,
+                diluted_earnings_per_share AS diluted_eps,
+                ebitda,
+                CASE WHEN revenue > 0
+                     THEN ROUND(gross_profit / revenue * 100, 2)
+                     END AS gross_margin,
+                CASE WHEN revenue > 0
+                     THEN ROUND(operating_income / revenue * 100, 2)
+                     END AS operating_margin,
+                CASE WHEN revenue > 0
+                     THEN ROUND(consolidated_net_income_loss
+                          / revenue * 100, 2)
+                     END AS profit_margin,
+                LAG(diluted_earnings_per_share, 4) OVER (ORDER BY period_end) AS eps_yoy_ago,
+                LAG(revenue, 4) OVER (ORDER BY period_end) AS revenue_yoy_ago
+            FROM income_statements
+            WHERE ticker = %(ticker)s
+                AND timeframe = %(timeframe)s
+            ORDER BY period_end DESC
+        )
         SELECT
-            period_end,
-            filing_date,
-            fiscal_year,
-            fiscal_quarter,
-            revenue AS total_revenue,
-            cost_of_revenue,
-            gross_profit,
-            total_operating_expenses AS operating_expenses,
-            operating_income,
-            consolidated_net_income_loss AS net_income,
-            basic_earnings_per_share AS basic_eps,
-            diluted_earnings_per_share AS diluted_eps,
-            ebitda,
-            CASE WHEN revenue > 0 THEN ROUND(gross_profit / revenue * 100, 2) END AS gross_margin,
-            CASE WHEN revenue > 0 THEN ROUND(operating_income / revenue * 100, 2) END AS operating_margin,
-            CASE WHEN revenue > 0 THEN ROUND(consolidated_net_income_loss / revenue * 100, 2) END AS profit_margin
-        FROM income_statements
-        WHERE ticker = %(ticker)s
-            AND timeframe = %(timeframe)s
-        ORDER BY period_end DESC
+            period_end, filing_date, fiscal_year, fiscal_quarter,
+            total_revenue, cost_of_revenue, gross_profit, operating_expenses,
+            operating_income, net_income, basic_eps, diluted_eps, ebitda,
+            gross_margin, operating_margin, profit_margin,
+            CASE WHEN eps_yoy_ago IS NOT NULL AND eps_yoy_ago != 0
+                 THEN ROUND(((diluted_eps - eps_yoy_ago) / ABS(eps_yoy_ago) * 100)::numeric, 2)
+                 END AS eps_growth_yoy,
+            CASE WHEN revenue_yoy_ago IS NOT NULL AND revenue_yoy_ago > 0
+                 THEN ROUND(((total_revenue - revenue_yoy_ago) / revenue_yoy_ago * 100)::numeric, 2)
+                 END AS revenue_growth_yoy
+        FROM ordered
         LIMIT %(limit)s
     """
 
