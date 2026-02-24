@@ -22,7 +22,7 @@ async def scan_ytd_performance_async(
         large_cap_threshold: Market cap threshold in billions
         top_n: Number of top gainers
         bottom_n: Number of bottom losers
-        index: Index to scan ("sp500", "nasdaq100", or "both")
+        index: Index to scan ("sp500", "nasdaq5000", or "both")
 
     Returns:
         Formatted results with sector grouping

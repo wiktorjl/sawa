@@ -453,7 +453,7 @@ class TechnicalIndicatorsRepository(Repository):
                      Use None for unbounded side.
                      Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
             target_date: Date to screen (defaults to most recent)
-            index: Filter by index membership (sp500, nasdaq100)
+            index: Filter by index membership (sp500, nasdaq5000)
             limit: Maximum number of results
 
         Returns:
@@ -483,7 +483,7 @@ class IndexRepository(Repository):
         """Get a specific index by code.
 
         Args:
-            code: Index code (e.g., 'sp500', 'nasdaq100')
+            code: Index code (e.g., 'sp500', 'nasdaq5000')
 
         Returns:
             MarketIndex object, or None if not found
@@ -495,7 +495,7 @@ class IndexRepository(Repository):
         """Get all tickers in an index.
 
         Args:
-            code: Index code (e.g., 'sp500', 'nasdaq100')
+            code: Index code (e.g., 'sp500', 'nasdaq5000')
 
         Returns:
             List of ticker symbols in the index

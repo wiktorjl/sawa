@@ -77,7 +77,7 @@ def screen_indicators(
     Args:
         filters: Dict mapping indicator name to (min, max) tuple.
         target_date: Date to screen (defaults to most recent)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         limit: Maximum results
 
     Returns:

@@ -30,7 +30,7 @@ def get_top_movers(
         period: Time period - "1d", "1w", "1m", or "ytd"
         limit: Number of results per direction (default: 20, max: 100)
         sector: Optional sector filter (partial match on SIC description or GICS sector)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         min_price: Minimum stock price filter
         min_volume: Minimum volume filter
 
@@ -222,7 +222,7 @@ def get_volume_leaders(
             - "volume_ratio": Today's volume vs 20-day average
         limit: Number of results (default: 20, max: 100)
         sector: Optional sector filter (partial match)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         min_price: Minimum stock price filter
 
     Returns:
@@ -323,7 +323,7 @@ def get_volume_leaders(
 
 def get_market_breadth(
     date: str | None = None,
-    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    index: Literal["sp500", "nasdaq5000", "all"] = "all",
 ) -> dict[str, Any]:
     """
     Get market breadth statistics (advancers vs decliners, MA breadth).
@@ -347,11 +347,11 @@ def get_market_breadth(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq100":
+    elif index == "nasdaq5000":
         index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq100'
+            WHERE i.code = 'nasdaq5000'
         )""")
 
     params: dict[str, Any] = {}

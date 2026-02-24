@@ -142,7 +142,7 @@ def get_dividends(
 def get_ex_dividend_calendar(
     start_date: str,
     end_date: str,
-    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    index: Literal["sp500", "nasdaq5000", "all"] = "all",
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """
@@ -167,11 +167,11 @@ def get_ex_dividend_calendar(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq100":
+    elif index == "nasdaq5000":
         index_filter = sql.SQL("""AND d.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq100'
+            WHERE i.code = 'nasdaq5000'
         )""")
 
     query = sql.SQL("""
@@ -196,7 +196,7 @@ def get_ex_dividend_calendar(
 
 def get_recent_splits(
     days: int = 30,
-    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    index: Literal["sp500", "nasdaq5000", "all"] = "all",
 ) -> list[dict[str, Any]]:
     """
     Get recent stock splits.
@@ -216,11 +216,11 @@ def get_recent_splits(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq100":
+    elif index == "nasdaq5000":
         index_filter = sql.SQL("""AND s.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq100'
+            WHERE i.code = 'nasdaq5000'
         )""")
 
     query = sql.SQL("""
@@ -242,7 +242,7 @@ def get_recent_splits(
 
 
 def get_dividend_yield_leaders(
-    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    index: Literal["sp500", "nasdaq5000", "all"] = "all",
     min_yield: float = 2.0,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
@@ -267,11 +267,11 @@ def get_dividend_yield_leaders(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq100":
+    elif index == "nasdaq5000":
         index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq100'
+            WHERE i.code = 'nasdaq5000'
         )""")
 
     query = sql.SQL("""
@@ -318,7 +318,7 @@ def get_dividend_yield_leaders(
 def get_earnings_calendar(
     start_date: str,
     end_date: str,
-    index: Literal["sp500", "nasdaq100", "all"] = "all",
+    index: Literal["sp500", "nasdaq5000", "all"] = "all",
     timing: Literal["BMO", "AMC", "all"] = "all",
     upcoming_only: bool = False,
     limit: int = 200,
@@ -360,11 +360,11 @@ def get_earnings_calendar(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq100":
+    elif index == "nasdaq5000":
         index_filter = sql.SQL("""AND e.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq100'
+            WHERE i.code = 'nasdaq5000'
         )""")
 
     where_sql = sql.SQL(" AND ").join(sql.SQL(f) for f in filters)

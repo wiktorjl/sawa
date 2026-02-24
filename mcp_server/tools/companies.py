@@ -23,7 +23,7 @@ def list_companies(
         limit: Maximum number of results (default: 100, max: 1000)
         offset: Number of results to skip
         sector: Filter by SIC description (partial match)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
 
     Returns:
         List of company records with indices array
@@ -142,7 +142,7 @@ def search_companies(
     Args:
         query: Search term
         limit: Maximum results (default: 20, max: 100)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
 
     Returns:
         List of matching companies with indices array

@@ -29,7 +29,7 @@ from .sic_mapping import (
 )
 from .symbols import (
     fetch_index_symbols,
-    fetch_nasdaq100_symbols,
+    fetch_nasdaq5000_symbols,
     fetch_sp500_symbols,
     load_symbols,
     validate_ticker,
@@ -76,7 +76,7 @@ __all__ = [
     "validate_ticker",
     "load_symbols",
     "fetch_sp500_symbols",
-    "fetch_nasdaq100_symbols",
+    "fetch_nasdaq5000_symbols",
     "fetch_index_symbols",
     # xdg
     "get_config_dir",
