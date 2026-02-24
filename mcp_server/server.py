@@ -86,8 +86,10 @@ from .tools.patterns import detect_candlestick_patterns, detect_chart_patterns  
 from .tools.scanner import scan_ytd_performance  # noqa: E402
 from .tools.schema import describe_database, describe_table  # noqa: E402
 from .tools.screener import (  # noqa: E402
+    detect_crossovers,
     get_52week_extremes,
     get_daily_range_leaders,
+    get_ytd_returns,
     screen_stocks,
 )
 from .tools.sectors import get_sector_performance, list_sectors  # noqa: E402
@@ -142,8 +144,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                 },
             },
@@ -181,8 +183,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                 },
                 "required": ["query"],
@@ -408,6 +410,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Stock ticker symbol (e.g., AAPL)",
                     },
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Multiple ticker symbols (e.g., ['SPY', 'QQQ', 'DIA']). Use instead of ticker for multi-stock queries.",  # noqa: E501
+                    },
                     "date": {
                         "type": "string",
                         "description": "Date in YYYY-MM-DD format (default: today)",
@@ -419,8 +426,12 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 500,
                     },
+                    "aggregate": {
+                        "type": "boolean",
+                        "description": "Return daily OHLCV summary instead of individual bars",  # noqa: E501
+                        "default": False,
+                    },
                 },
-                "required": ["ticker"],
             },
         ),
         Tool(
@@ -455,8 +466,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "limit": {
                         "type": "integer",
@@ -553,8 +564,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Index to scan: sp500, nasdaq100, or both (default: sp500)",
-                        "enum": ["sp500", "nasdaq100", "both"],
+                        "description": "Index to scan: sp500, nasdaq5000, or both (default: sp500)",
+                        "enum": ["sp500", "nasdaq5000", "both"],
                         "default": "sp500",
                     },
                 },
@@ -578,7 +589,7 @@ async def list_tools() -> list[Tool]:
                 "diluted_earnings_per_share, ...)\n"
                 "  technical_indicators(ticker, date PK, sma_50, sma_150, sma_200, rsi_14, "
                 "macd_line, macd_histogram, bb_upper, bb_lower, atr_14, volume_ratio, ...)\n"
-                "  indices(id PK, code, name) - codes: 'sp500', 'nasdaq100'\n"
+                "  indices(id PK, code, name) - codes: 'sp500', 'nasdaq5000'\n"
                 "  index_constituents(index_id, ticker PK) - JOIN with indices on id\n"
                 "  sic_gics_mapping(sic_code PK, gics_sector, gics_industry) - "
                 "JOIN with companies on sic_code\n"
@@ -596,7 +607,7 @@ async def list_tools() -> list[Tool]:
                 "VIEWS:\n"
                 "  stock_prices_live - union of historical EOD + today's intraday data\n"
                 "  v_company_summary - companies with latest price and ratios\n"
-                "  v_company_with_indices - companies with index membership (in_sp500, in_nasdaq100)\n"
+                "  v_company_with_indices - companies with index membership (in_sp500, in_nasdaq5000)\n"
                 "  v_latest_fundamentals - latest quarterly fundamentals per company\n"
                 "  v_economy_dashboard - combined economy indicators\n"
                 "  v_sector_summary - sector aggregates by SIC code\n\n"
@@ -658,8 +669,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "limit": {
                         "type": "integer",
@@ -685,8 +696,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "limit": {
                         "type": "integer",
@@ -730,8 +741,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "min_price": {
                         "type": "number",
@@ -769,8 +780,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "min_price": {
                         "type": "number",
@@ -791,8 +802,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq100, or all",
-                        "enum": ["sp500", "nasdaq100", "all"],
+                        "description": "Filter by index: sp500, nasdaq5000, or all",
+                        "enum": ["sp500", "nasdaq5000", "all"],
                         "default": "all",
                     },
                 },
@@ -921,6 +932,34 @@ async def list_tools() -> list[Tool]:
                                 "maxItems": 2,
                                 "description": "MACD histogram [min, max]",
                             },
+                            "pe_ratio": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "P/E ratio [min, max]",
+                            },
+                            "dividend_yield": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Dividend yield % [min, max]",
+                            },
+                            "roe": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Return on equity % [min, max]",
+                            },
+                            "debt_to_equity": {
+                                "type": "array",
+                                "items": {"type": ["number", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "Debt to equity ratio [min, max]",
+                            },
                         },
                         "additionalProperties": {
                             "type": "array",
@@ -933,10 +972,14 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector filter (partial match)",
                     },
+                    "sector_exclude": {
+                        "type": "string",
+                        "description": "Optional sector to exclude (partial match)",
+                    },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "taxonomy": {
                         "type": "string",
@@ -954,6 +997,8 @@ async def list_tools() -> list[Tool]:
                             "change_1d",
                             "change_1w",
                             "rsi_14",
+                            "pe_ratio",
+                            "dividend_yield",
                         ],
                         "default": "market_cap",
                     },
@@ -993,13 +1038,22 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq100, or all",
-                        "enum": ["sp500", "nasdaq100", "all"],
+                        "description": "Filter by index: sp500, nasdaq5000, or all",
+                        "enum": ["sp500", "nasdaq5000", "all"],
                         "default": "all",
                     },
                     "min_volume": {
                         "type": "integer",
                         "description": "Minimum volume filter",
+                    },
+                    "since_date": {
+                        "type": "string",
+                        "description": "Only stocks with new 52w extremes since this date",
+                    },
+                    "include_fundamentals": {
+                        "type": "boolean",
+                        "description": "Include PE, dividend yield, ROE, debt/equity",
+                        "default": False,
                     },
                     "limit": {
                         "type": "integer",
@@ -1033,8 +1087,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq100)",
-                        "enum": ["sp500", "nasdaq100"],
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "min_price": {
                         "type": "number",
@@ -1043,6 +1097,71 @@ async def list_tools() -> list[Tool]:
                     "min_volume": {
                         "type": "integer",
                         "description": "Minimum volume filter",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 50, max: 200)",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                },
+            },
+        ),
+        # YTD returns for arbitrary ticker lists
+        Tool(
+            name="get_ytd_returns",
+            description="Get YTD percentage returns for a list of tickers (database-based)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of ticker symbols (e.g., ['AAPL', 'MSFT'])",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date YYYY-MM-DD (default: Jan 1 current year)",
+                    },
+                },
+                "required": ["tickers"],
+            },
+        ),
+        # SMA crossover detection
+        Tool(
+            name="detect_crossovers",
+            description="Detect stocks that recently crossed above or below a moving average (SMA crossover scanner)",  # noqa: E501
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sma_period": {
+                        "type": "integer",
+                        "description": "SMA period to check (50, 100, 150, or 200). Default: 150",
+                        "enum": [50, 100, 150, 200],
+                        "default": 150,
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": "'above' (bullish) or 'below' (bearish) crossover",
+                        "enum": ["above", "below"],
+                        "default": "above",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Number of recent trading days to check (default: 5)",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 30,
+                    },
+                    "min_volume_ratio": {
+                        "type": "number",
+                        "description": "Min volume ratio on crossover day (e.g., 1.5)",
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Filter by index membership (sp500, nasdaq5000)",
+                        "enum": ["sp500", "nasdaq5000"],
                     },
                     "limit": {
                         "type": "integer",
@@ -1071,7 +1190,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Index code (e.g., 'sp500', 'nasdaq100')",
+                        "description": "Index code (e.g., 'sp500', 'nasdaq5000')",
                     },
                 },
                 "required": ["code"],
@@ -1099,7 +1218,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Index code (e.g., 'sp500', 'nasdaq100')",
+                        "description": "Index code (e.g., 'sp500', 'nasdaq5000')",
                     },
                     "limit": {
                         "type": "integer",
@@ -1186,8 +1305,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq100, or all",
-                        "enum": ["sp500", "nasdaq100", "all"],
+                        "description": "Filter by index: sp500, nasdaq5000, or all",
+                        "enum": ["sp500", "nasdaq5000", "all"],
                         "default": "all",
                     },
                     "limit": {
@@ -1212,8 +1331,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq100, or all",
-                        "enum": ["sp500", "nasdaq100", "all"],
+                        "description": "Filter by index: sp500, nasdaq5000, or all",
+                        "enum": ["sp500", "nasdaq5000", "all"],
                         "default": "all",
                     },
                 },
@@ -1227,8 +1346,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq100, or all",
-                        "enum": ["sp500", "nasdaq100", "all"],
+                        "description": "Filter by index: sp500, nasdaq5000, or all",
+                        "enum": ["sp500", "nasdaq5000", "all"],
                         "default": "all",
                     },
                     "min_yield": {
@@ -1260,8 +1379,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq100, or all",
-                        "enum": ["sp500", "nasdaq100", "all"],
+                        "description": "Filter by index: sp500, nasdaq5000, or all",
+                        "enum": ["sp500", "nasdaq5000", "all"],
                         "default": "all",
                     },
                     "timing": {
@@ -1748,15 +1867,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "get_intraday_bars":
             logger.info("  Executing: get_intraday_bars")
             result = get_intraday_bars(
-                ticker=arguments["ticker"],
+                ticker=arguments.get("ticker"),
+                tickers=arguments.get("tickers"),
                 date=arguments.get("date"),
                 limit=arguments.get("limit", 100),
+                aggregate=arguments.get("aggregate", False),
             )
             if not result:
+                ticker_desc = arguments.get("ticker") or arguments.get("tickers", "")
                 return [
                     TextContent(
                         type="text",
-                        text=f"No intraday data found for {arguments['ticker']}",
+                        text=f"No intraday data found for {ticker_desc}",
                     )
                 ]
         elif name == "screen_technical_indicators":
@@ -1875,10 +1997,29 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = screen_stocks(
                 filters=arguments.get("filters", {}),
                 sector=arguments.get("sector"),
+                sector_exclude=arguments.get("sector_exclude"),
                 index=arguments.get("index"),
                 taxonomy=arguments.get("taxonomy", "gics"),
                 sort_by=arguments.get("sort_by", "market_cap"),
                 sort_order=arguments.get("sort_order", "desc"),
+                limit=arguments.get("limit", 50),
+            )
+        # YTD returns for ticker list
+        elif name == "get_ytd_returns":
+            logger.info("  Executing: get_ytd_returns")
+            result = get_ytd_returns(
+                tickers=arguments["tickers"],
+                start_date=arguments.get("start_date"),
+            )
+        # SMA crossover detection
+        elif name == "detect_crossovers":
+            logger.info("  Executing: detect_crossovers")
+            result = detect_crossovers(
+                sma_period=arguments.get("sma_period", 150),
+                direction=arguments.get("direction", "above"),
+                lookback_days=arguments.get("lookback_days", 5),
+                min_volume_ratio=arguments.get("min_volume_ratio"),
+                index=arguments.get("index"),
                 limit=arguments.get("limit", 50),
             )
         # 52-week extremes screener
@@ -1889,6 +2030,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 threshold_pct=arguments.get("threshold_pct", 2.0),
                 index=arguments.get("index", "all"),
                 min_volume=arguments.get("min_volume"),
+                since_date=arguments.get("since_date"),
+                include_fundamentals=arguments.get("include_fundamentals", False),
                 limit=arguments.get("limit", 50),
             )
         # Daily range screener
