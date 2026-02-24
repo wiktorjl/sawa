@@ -36,7 +36,7 @@ from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
 from sawa.utils.symbols import (
-    fetch_nasdaq100_symbols,
+    fetch_nasdaq5000_symbols,
     fetch_sp500_symbols,
 )
 
@@ -376,7 +376,7 @@ def populate_index_constituents(
     logger: logging.Logger,
 ) -> dict[str, int]:
     """
-    Populate index constituents table with S&P 500 and NASDAQ-100 members.
+    Populate index constituents table with S&P 500 and NASDAQ-5000 members.
 
     Args:
         conn: Database connection
@@ -391,7 +391,7 @@ def populate_index_constituents(
     # Fetch current index members from Wikipedia
     index_data = [
         ("sp500", fetch_sp500_symbols),
-        ("nasdaq100", fetch_nasdaq100_symbols),
+        ("nasdaq5000", fetch_nasdaq5000_symbols),
     ]
 
     for code, fetcher in index_data:
@@ -776,17 +776,17 @@ def run_coldstart(
                     logger.info("\n[2/9] Fetching symbols from Wikipedia")
                     logger.info("  - Fetching S&P 500...")
                     sp500_symbols = fetch_sp500_symbols(logger)
-                    logger.info("  - Fetching NASDAQ-100...")
-                    nasdaq100_symbols = fetch_nasdaq100_symbols(logger)
+                    logger.info("  - Loading NASDAQ-5000...")
+                    nasdaq5000_symbols = fetch_nasdaq5000_symbols(logger)
 
                     # Merge and deduplicate
-                    symbols = list(set(sp500_symbols + nasdaq100_symbols))
+                    symbols = list(set(sp500_symbols + nasdaq5000_symbols))
                     symbols.sort()
                     sp_count = len(sp500_symbols)
-                    nq_count = len(nasdaq100_symbols)
+                    nq_count = len(nasdaq5000_symbols)
                     logger.info(
                         f"  Total unique symbols: {len(symbols)} (S&P 500: {sp_count}, "
-                        f"NASDAQ-100: {nq_count})"
+                        f"NASDAQ-5000: {nq_count})"
                     )
 
                 # Save symbols list

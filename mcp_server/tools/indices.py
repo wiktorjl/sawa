@@ -14,7 +14,7 @@ def list_indices() -> list[dict[str, Any]]:
 
     Returns:
         List of index records with:
-        - code: Index code (e.g., 'sp500', 'nasdaq100')
+        - code: Index code (e.g., 'sp500', 'nasdaq5000')
         - name: Full name (e.g., 'S&P 500', 'NASDAQ-100')
         - description: Index description
         - constituent_count: Number of stocks in the index
@@ -41,7 +41,7 @@ def get_index_constituents(code: str) -> dict[str, Any]:
     Get all constituents of a market index.
 
     Args:
-        code: Index code (e.g., 'sp500', 'nasdaq100')
+        code: Index code (e.g., 'sp500', 'nasdaq5000')
 
     Returns:
         Dict with:
@@ -132,7 +132,7 @@ def get_index_with_prices(
     Get index constituents with latest price data.
 
     Args:
-        code: Index code (e.g., 'sp500', 'nasdaq100')
+        code: Index code (e.g., 'sp500', 'nasdaq5000')
         limit: Maximum number of constituents to return (default: 50)
 
     Returns:

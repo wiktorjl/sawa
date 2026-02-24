@@ -1051,7 +1051,7 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         Args:
             filters: Dict mapping indicator name to (min, max) tuple.
             target_date: Date to screen (defaults to most recent)
-            index: Filter by index membership (sp500, nasdaq100)
+            index: Filter by index membership (sp500, nasdaq5000)
             limit: Maximum number of results
 
         Returns:
@@ -1190,7 +1190,7 @@ class DatabaseIndexRepository(IndexRepository):
         """Get a specific index by code.
 
         Args:
-            code: Index code (e.g., 'sp500', 'nasdaq100')
+            code: Index code (e.g., 'sp500', 'nasdaq5000')
 
         Returns:
             MarketIndex object, or None if not found
@@ -1225,7 +1225,7 @@ class DatabaseIndexRepository(IndexRepository):
         """Get all tickers in an index.
 
         Args:
-            code: Index code (e.g., 'sp500', 'nasdaq100')
+            code: Index code (e.g., 'sp500', 'nasdaq5000')
 
         Returns:
             List of ticker symbols in the index

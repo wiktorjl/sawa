@@ -39,7 +39,7 @@ async def scan_ytd_performance(
     Scan index for YTD performance with sector grouping.
 
     Args:
-        index: Index to scan ("sp500", "nasdaq100", or "both")
+        index: Index to scan ("sp500", "nasdaq5000", or "both")
         start_date: Start date in YYYY-MM-DD format (defaults to Jan 1 current year)
         large_cap_threshold: Market cap threshold in billions for large cap classification
         top_n: Number of top gainers to return per table
@@ -76,8 +76,8 @@ async def scan_ytd_performance(
     logger.info(f"Fetching {index} symbols...")
     if index.lower() == "both":
         sp500 = fetch_index_symbols("sp500", logger)
-        nasdaq100 = fetch_index_symbols("nasdaq100", logger)
-        symbols = list(set(sp500 + nasdaq100))  # Remove duplicates
+        nasdaq5000 = fetch_index_symbols("nasdaq5000", logger)
+        symbols = list(set(sp500 + nasdaq5000))  # Remove duplicates
     else:
         symbols = fetch_index_symbols(index, logger)
 

@@ -42,10 +42,10 @@ def __getattr__(name: str):
         from sawa.utils.symbols import fetch_sp500_symbols
 
         return fetch_sp500_symbols
-    elif name == "fetch_nasdaq100_symbols":
-        from sawa.utils.symbols import fetch_nasdaq100_symbols
+    elif name == "fetch_nasdaq5000_symbols":
+        from sawa.utils.symbols import fetch_nasdaq5000_symbols
 
-        return fetch_nasdaq100_symbols
+        return fetch_nasdaq5000_symbols
     elif name == "fetch_index_symbols":
         from sawa.utils.symbols import fetch_index_symbols
 
@@ -75,7 +75,7 @@ __all__ = [
     "scan_ytd_performance",
     # Symbol fetching
     "fetch_sp500_symbols",
-    "fetch_nasdaq100_symbols",
+    "fetch_nasdaq5000_symbols",
     "fetch_index_symbols",
     # API clients
     "PolygonClient",

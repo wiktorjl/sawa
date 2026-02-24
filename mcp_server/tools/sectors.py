@@ -24,7 +24,7 @@ def list_sectors(
 
     Args:
         taxonomy: Classification system - "gics" (S&P Global) or "sic" (SEC)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         limit: Maximum results (default: 100)
 
     Returns:
@@ -91,7 +91,7 @@ def get_sector_performance(
 
     Args:
         taxonomy: Classification system - "sic" or "gics" (default: gics)
-        index: Filter by index membership (sp500, nasdaq100)
+        index: Filter by index membership (sp500, nasdaq5000)
         limit: Maximum sectors to return (default: 50)
 
     Returns:
