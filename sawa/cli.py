@@ -613,6 +613,44 @@ def cmd_corporate_actions(args) -> int:
         return 1
 
 
+def cmd_adjust_splits(args) -> int:
+    """Re-fetch adjusted prices for tickers with recent stock splits."""
+    from sawa.split_adjust import refresh_split_adjusted_prices
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="adjust_splits")
+
+    # Get credentials
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not api_key:
+        logger.error("POLYGON_API_KEY required (env var or --api-key)")
+        return 1
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    # Parse ticker and since date
+    tickers = [args.ticker.upper()] if args.ticker else None
+    since = parse_date(args.since) if args.since else None
+
+    try:
+        stats = refresh_split_adjusted_prices(
+            api_key=api_key,
+            database_url=db_url,
+            tickers=tickers,
+            since=since,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Split adjustment failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_data_status(args) -> int:
     """Show latest stock price data in the database."""
     import psycopg
@@ -702,6 +740,7 @@ Commands:
   index-update        Update index constituents from Wikipedia
   index-check         Check which indices a ticker belongs to
   corporate-actions   Download stock splits and dividends
+  adjust-splits       Re-fetch adjusted prices after stock splits
   data-status         Show latest stock price data in the database
 
 Examples:
@@ -1072,6 +1111,24 @@ Environment Variables:
     corp_parser.add_argument("--log-dir", help="Directory for log files")
     corp_parser.add_argument("-v", "--verbose", action="store_true")
     corp_parser.set_defaults(func=cmd_corporate_actions)
+
+    # Adjust splits subcommand
+    adjust_parser = subparsers.add_parser(
+        "adjust-splits",
+        help="Re-fetch adjusted prices after stock splits",
+        description="Re-fetch split-adjusted price history for tickers with recent splits.",
+    )
+    adjust_parser.add_argument("--ticker", help="Single ticker to adjust (default: auto-detect)")
+    adjust_parser.add_argument(
+        "--since",
+        help="Only consider splits since this date (default: 1 year ago)",
+    )
+    adjust_parser.add_argument("--dry-run", action="store_true", help="Preview without changes")
+    adjust_parser.add_argument("--api-key", help="Polygon API key")
+    adjust_parser.add_argument("--database-url", help="PostgreSQL URL")
+    adjust_parser.add_argument("--log-dir", help="Directory for log files")
+    adjust_parser.add_argument("-v", "--verbose", action="store_true")
+    adjust_parser.set_defaults(func=cmd_adjust_splits)
 
     # Data status subcommand
     status_parser = subparsers.add_parser(
