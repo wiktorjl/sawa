@@ -23,6 +23,22 @@ INTRADAY_STOP_TIMEOUT=60  # seconds to wait for graceful shutdown
 
 mkdir -p "$STATE_DIR"
 
+# ── Lock (prevent overlapping runs) ──────────────────────────────────────────
+
+LOCK_FILE="$STATE_DIR/scheduler.lock"
+
+acquire_lock() {
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "[$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S ET')] Another scheduler is already running, skipping" >&2
+        exit 0
+    fi
+    # Write PID for debugging
+    echo $$ >&9
+}
+
+acquire_lock
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 
 log() {
