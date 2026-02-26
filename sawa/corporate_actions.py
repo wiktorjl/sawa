@@ -211,6 +211,7 @@ def run_corporate_actions_update(
                 ticker_set = set(tickers)
                 splits = [s for s in splits if s.ticker in ticker_set]
                 stats["splits_loaded"] = load_splits(conn, splits, logger)
+                stats["split_tickers"] = [s.ticker for s in splits]
                 logger.info(f"  Loaded {stats['splits_loaded']} splits")
             elif dry_run:
                 logger.info("  [DRY RUN] Would load splits")

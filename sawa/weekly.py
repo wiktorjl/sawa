@@ -222,6 +222,20 @@ def run_weekly(
             )
             stats["corporate_actions"] = ca_stats
 
+            # If splits were loaded, re-fetch adjusted prices for affected tickers
+            split_tickers = ca_stats.get("split_tickers", [])
+            if split_tickers:
+                from sawa.split_adjust import refresh_split_adjusted_prices
+
+                logger.info(f"\nAdjusting prices for {len(split_tickers)} split ticker(s)...")
+                adjust_stats = refresh_split_adjusted_prices(
+                    api_key=api_key,
+                    database_url=database_url,
+                    tickers=split_tickers,
+                    logger=logger,
+                )
+                stats["split_adjust"] = adjust_stats
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info("WEEKLY UPDATE COMPLETE")
