@@ -92,10 +92,10 @@ async def get_live_price(
     # Sort ascending for history
     results.sort(key=lambda x: x["t"])
 
-    # Calculate change
-    first_close = results[0]["c"]
+    # Calculate daily change (from previous close to current)
     last_close = results[-1]["c"]
-    change_percent = ((last_close - first_close) / first_close) * 100
+    prev_close = results[-2]["c"] if len(results) >= 2 else last_close
+    change_percent = ((last_close - prev_close) / prev_close) * 100
 
     return {
         "ticker": ticker,
@@ -164,10 +164,10 @@ async def get_live_prices_batch(
         # Sort ascending
         results.sort(key=lambda x: x["t"])
 
-        # Calculate change
-        first_close = results[0]["c"]
+        # Calculate daily change (from previous close to current)
         last_close = results[-1]["c"]
-        change_percent = ((last_close - first_close) / first_close) * 100
+        prev_close = results[-2]["c"] if len(results) >= 2 else last_close
+        change_percent = ((last_close - prev_close) / prev_close) * 100
 
         output[ticker] = {
             "ticker": ticker,
