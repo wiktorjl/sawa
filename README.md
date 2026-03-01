@@ -9,8 +9,42 @@ Connect it to Claude, ChatGPT, or any MCP-compatible client and just ask:
 - *"Show me the top 10 dividend yield stocks in the healthcare sector"*
 - *"What's the correlation between treasury yields and tech stock performance this year?"*
 - *"Which stocks just crossed above their 150-day SMA on high volume?"*
+- *"How's the market breadth looking today?"*
 
 The AI translates your questions into the right tool calls and SQL queries automatically. No query language to learn -- just ask what you want to know.
+
+### Example
+
+> **You:** *"How's the market breadth looking today? What percentage of S&P 500 stocks are above their 50-day moving average?"*
+
+The AI calls `get_market_breadth` and `get_sector_performance` behind the scenes, then responds:
+
+```
+Market breadth for the S&P 500 today (Feb 27, 2026):
+
+  Advancers:  312  (62.4%)
+  Decliners:  178  (35.6%)
+  Unchanged:   10  ( 2.0%)
+  A/D Ratio:  1.75
+
+  Above 50-day SMA:   58.2%
+  Above 200-day SMA:  64.8%
+
+Breadth is moderately positive. The A/D ratio of 1.75 shows broad
+participation in today's rally rather than a narrow move driven by
+a few large caps. However, only 58% of stocks are above their 50-day
+moving average, suggesting the short-term trend is mixed even as the
+longer-term picture (65% above 200-day) remains constructive.
+
+Sector leaders today:
+  Communication Services  +1.84%
+  Energy                  +1.22%
+  Consumer Discretionary  +0.93%
+
+Laggards:
+  Financials              -0.67%
+  Information Technology  -0.41%
+```
 
 ## How It Works
 
