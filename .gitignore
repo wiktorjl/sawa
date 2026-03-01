@@ -66,5 +66,15 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
-1
 debug-pictures/
+
+# Project-internal working docs
+CLAUDE.md
+AGENTS.md
+MCP_FIXES.md
+SCHEMA_AUDIT.md
+SPRINT_SUMMARY.md
+docs/CODE_REVIEW.md
+plot_cat_sma.py
+.opencode/
+opencode.json
