@@ -1,4 +1,4 @@
-# Sawa
+# Sawa -- AI-Powered Stock Market MCP Server
 
 Ask questions about the stock market in plain English. Sawa is an [MCP server](https://modelcontextprotocol.io/) that gives AI assistants direct access to a PostgreSQL database of S&P 500 and NASDAQ market data -- prices, fundamentals, technicals, economic indicators, and more.
 
