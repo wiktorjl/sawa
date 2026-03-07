@@ -116,6 +116,9 @@
     "csv": "data/economy/market_internals.csv",
     "columns": [
       "date",
+      "vix_open",
+      "vix_high",
+      "vix_low",
       "vix_close",
       "vix3m",
       "hy_spread",

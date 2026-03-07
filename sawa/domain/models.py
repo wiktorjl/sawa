@@ -369,6 +369,9 @@ class MarketInternals:
 
     Attributes:
         date: Trading date
+        vix_open: CBOE VIX opening value
+        vix_high: CBOE VIX daily high
+        vix_low: CBOE VIX daily low
         vix_close: CBOE VIX closing value
         vix3m: CBOE S&P 500 3-Month Volatility Index
         hy_spread: ICE BofA US High Yield Index OAS
@@ -376,6 +379,9 @@ class MarketInternals:
     """
 
     date: date
+    vix_open: Decimal | None = None
+    vix_high: Decimal | None = None
+    vix_low: Decimal | None = None
     vix_close: Decimal | None = None
     vix3m: Decimal | None = None
     hy_spread: Decimal | None = None

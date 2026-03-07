@@ -124,15 +124,87 @@ def insert_prices(
     return inserted
 
 
+def fetch_vix_intraday(
+    client: PolygonClient,
+    start_date: str,
+    end_date: str,
+    bar_size: int,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Fetch VIX intraday bars from Polygon indices API."""
+    from datetime import datetime, timezone
+
+    logger.info(f"Fetching VIX intraday bars ({bar_size}min, {start_date} to {end_date})...")
+    try:
+        results = client.get_index_bars(
+            "I:VIX", start_date, end_date,
+            multiplier=bar_size, timespan="minute",
+        )
+    except Exception as e:
+        logger.warning(f"VIX intraday fetch failed: {e}")
+        return []
+
+    bars = []
+    for r in results:
+        if r.get("t"):
+            ts = datetime.fromtimestamp(r["t"] / 1000, tz=timezone.utc)
+            bars.append({
+                "timestamp": ts,
+                "open": r.get("o"),
+                "high": r.get("h"),
+                "low": r.get("l"),
+                "close": r.get("c"),
+                "bar_size_minutes": bar_size,
+            })
+
+    logger.info(f"  Fetched {len(bars)} VIX intraday bars")
+    return bars
+
+
+def _enrich_vix_ohlc(
+    polygon_client: PolygonClient,
+    rows: list[dict[str, Any]],
+    start_date: str,
+    end_date: str,
+    logger: logging.Logger,
+) -> None:
+    """Enrich market internals rows with VIX OHLC from Polygon daily index bars."""
+    try:
+        vix_bars = polygon_client.get_index_bars(
+            "I:VIX", start_date, end_date,
+            multiplier=1, timespan="day",
+        )
+        vix_ohlc: dict[str, dict[str, Any]] = {}
+        for bar in vix_bars:
+            if bar.get("t"):
+                bar_date = timestamp_to_date(bar["t"]).strftime(DATE_FORMAT)
+                vix_ohlc[bar_date] = {
+                    "vix_open": bar.get("o"),
+                    "vix_high": bar.get("h"),
+                    "vix_low": bar.get("l"),
+                }
+        logger.info(f"  Polygon VIX daily bars: {len(vix_ohlc)} days")
+
+        for row in rows:
+            ohlc = vix_ohlc.get(row["date"])
+            if ohlc:
+                row.update(ohlc)
+    except Exception as e:
+        logger.warning(f"  Polygon VIX daily bars failed: {e}")
+
+
 def fetch_market_internals(
     fred_client: FredClient,
+    polygon_client: PolygonClient,
     start_date: str,
     end_date: str,
     logger: logging.Logger,
 ) -> list[dict[str, Any]]:
-    """Fetch market internals from FRED."""
+    """Fetch market internals from FRED, enriched with Polygon VIX OHLC."""
     logger.info(f"Fetching market internals from FRED ({start_date} to {end_date})...")
-    return fred_client.get_market_internals(start_date, end_date)
+    rows = fred_client.get_market_internals(start_date, end_date)
+    _enrich_vix_ohlc(polygon_client, rows, start_date, end_date, logger)
+    return rows
 
 
 def run_daily(
@@ -374,7 +446,9 @@ def run_daily(
                     # Fetch last 30 days to catch any backfill gaps
                     mi_start = (date.today() - timedelta(days=30)).strftime(DATE_FORMAT)
                     mi_end = date.today().strftime(DATE_FORMAT)
-                    mi_rows = fetch_market_internals(fred_client, mi_start, mi_end, logger)
+                    mi_rows = fetch_market_internals(
+                        fred_client, client, mi_start, mi_end, logger
+                    )
                     if mi_rows:
                         from sawa.database.load import load_market_internals
 
@@ -391,6 +465,21 @@ def run_daily(
         else:
             logger.info("\nSkipping market internals (--skip-market-internals)")
 
+        # Fetch VIX intraday from Polygon (last 2 days to catch gaps)
+        if not skip_market_internals and not skip_prices:
+            logger.info("\nFetching VIX intraday bars from Polygon...")
+            vix_start = (date.today() - timedelta(days=2)).strftime(DATE_FORMAT)
+            vix_end = date.today().strftime(DATE_FORMAT)
+            vix_bars = fetch_vix_intraday(client, vix_start, vix_end, 5, logger)
+            if vix_bars:
+                from sawa.database.load import load_vix_intraday
+
+                with psycopg.connect(database_url) as conn:
+                    vix_loaded = load_vix_intraday(conn, vix_bars, logger)
+                stats["vix_intraday"] = vix_loaded
+            else:
+                stats["vix_intraday"] = 0
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info("DAILY UPDATE COMPLETE")
@@ -402,6 +491,8 @@ def run_daily(
             logger.info(f"  TA indicators: {stats.get('ta_calculated', 0)}")
         if "market_internals" in stats:
             logger.info(f"  Market internals: {stats['market_internals']}")
+        if stats.get("vix_intraday"):
+            logger.info(f"  VIX intraday bars: {stats['vix_intraday']}")
 
     except Exception as e:
         logger.error(f"Daily update failed: {e}")
