@@ -211,6 +211,10 @@ def run_weekly(
             fred_client = FredClient(fred_api_key, logger)
             try:
                 mi_rows = fred_client.get_market_internals(econ_start_str, end_str)
+                # Enrich with VIX OHLC from Polygon daily bars
+                from sawa.daily import _enrich_vix_ohlc
+
+                _enrich_vix_ohlc(client, mi_rows, econ_start_str, end_str, logger)
                 if mi_rows:
                     with psycopg.connect(database_url) as conn:
                         loaded = load_market_internals(conn, mi_rows, logger)

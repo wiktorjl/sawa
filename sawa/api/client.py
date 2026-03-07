@@ -32,6 +32,7 @@ ENDPOINTS = {
     "income-statements": "/stocks/financials/v1/income-statements",
     # Market data
     "aggregates": "/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}",
+    "aggregates-intraday": "/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start}/{end}",
     "ticker-details": "/v3/reference/tickers/{ticker}",
     # Economy
     "treasury-yields": "/fed/v1/treasury-yields",
@@ -289,6 +290,40 @@ class PolygonClient:
         """Get company overview/details."""
         ticker = validate_ticker(ticker)
         return self.get_single("ticker-details", path_params={"ticker": ticker})
+
+    def get_index_bars(
+        self,
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        multiplier: int = 5,
+        timespan: str = "minute",
+    ) -> list[dict[str, Any]]:
+        """
+        Get intraday bars for an index (e.g., I:VIX).
+
+        Args:
+            ticker: Index ticker (e.g., 'I:VIX')
+            start_date: Start date YYYY-MM-DD
+            end_date: End date YYYY-MM-DD
+            multiplier: Bar size multiplier (default: 5)
+            timespan: Bar timespan (minute, hour, day)
+
+        Returns:
+            List of bar dicts with t, o, h, l, c keys
+        """
+        data = self.get(
+            "aggregates-intraday",
+            path_params={
+                "ticker": ticker,
+                "multiplier": str(multiplier),
+                "timespan": timespan,
+                "start": start_date,
+                "end": end_date,
+            },
+            params={"adjusted": "true", "limit": 50000},
+        )
+        return data.get("results", [])
 
     def get_news(
         self,

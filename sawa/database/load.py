@@ -535,7 +535,10 @@ def load_market_internals(
 
     log.info(f"Loading {len(rows)} market internals rows...")
 
-    columns = ["date", "vix_close", "vix3m", "hy_spread", "put_call_ratio"]
+    columns = [
+        "date", "vix_open", "vix_high", "vix_low", "vix_close",
+        "vix3m", "hy_spread", "put_call_ratio",
+    ]
     db_rows = []
     for row in rows:
         db_row = {}
@@ -545,6 +548,61 @@ def load_market_internals(
         db_rows.append(db_row)
 
     return _insert_rows(conn, "market_internals", columns, db_rows, upsert=True, log=log)
+
+
+def load_vix_intraday(
+    conn,
+    bars: list[dict],
+    log: logging.Logger | None = None,
+) -> int:
+    """
+    Load VIX intraday bars into database.
+
+    Args:
+        conn: Database connection
+        bars: List of dicts with keys: timestamp, open, high, low, close, bar_size_minutes
+        log: Logger instance
+
+    Returns:
+        Number of rows loaded
+    """
+    from psycopg import sql as psql
+
+    log = log or logger
+    if not bars:
+        return 0
+
+    log.info(f"Loading {len(bars)} VIX intraday bars...")
+
+    query = psql.SQL("""
+        INSERT INTO vix_intraday (timestamp, open, high, low, close, bar_size_minutes)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (timestamp) DO UPDATE SET
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close
+    """)
+
+    inserted = 0
+    with conn.cursor() as cur:
+        for bar in bars:
+            cur.execute(
+                query,
+                (
+                    bar["timestamp"],
+                    bar["open"],
+                    bar["high"],
+                    bar["low"],
+                    bar["close"],
+                    bar.get("bar_size_minutes", 5),
+                ),
+            )
+            inserted += 1
+        conn.commit()
+
+    log.info(f"  Loaded {inserted} VIX intraday bars")
+    return inserted
 
 
 def load_market_internals_csv(
