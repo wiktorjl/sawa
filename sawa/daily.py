@@ -7,6 +7,7 @@ Uses REST API for near real-time data availability.
 """
 
 import logging
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from sawa.api import PolygonClient
+from sawa.api import FredClient, PolygonClient
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import fetch_and_load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
@@ -123,6 +124,17 @@ def insert_prices(
     return inserted
 
 
+def fetch_market_internals(
+    fred_client: FredClient,
+    start_date: str,
+    end_date: str,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Fetch market internals from FRED."""
+    logger.info(f"Fetching market internals from FRED ({start_date} to {end_date})...")
+    return fred_client.get_market_internals(start_date, end_date)
+
+
 def run_daily(
     api_key: str,
     database_url: str,
@@ -131,6 +143,7 @@ def run_daily(
     skip_news: bool = False,
     skip_ta: bool = False,
     skip_prices: bool = False,
+    skip_market_internals: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -351,6 +364,33 @@ def run_daily(
         else:
             logger.info("\nSkipping technical indicators (--skip-ta)")
 
+        # Fetch and load market internals from FRED
+        if not skip_market_internals:
+            fred_api_key = os.environ.get("FRED_API_KEY")
+            if fred_api_key:
+                logger.info("\nFetching market internals from FRED...")
+                fred_client = FredClient(fred_api_key, logger)
+                try:
+                    # Fetch last 30 days to catch any backfill gaps
+                    mi_start = (date.today() - timedelta(days=30)).strftime(DATE_FORMAT)
+                    mi_end = date.today().strftime(DATE_FORMAT)
+                    mi_rows = fetch_market_internals(fred_client, mi_start, mi_end, logger)
+                    if mi_rows:
+                        from sawa.database.load import load_market_internals
+
+                        with psycopg.connect(database_url) as conn:
+                            loaded = load_market_internals(conn, mi_rows, logger)
+                        stats["market_internals"] = loaded
+                    else:
+                        stats["market_internals"] = 0
+                finally:
+                    fred_client.close()
+            else:
+                logger.info("\nSkipping market internals (FRED_API_KEY not set)")
+                stats["market_internals_skipped"] = "FRED_API_KEY not set"
+        else:
+            logger.info("\nSkipping market internals (--skip-market-internals)")
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info("DAILY UPDATE COMPLETE")
@@ -360,6 +400,8 @@ def run_daily(
             logger.info(f"  News articles: {stats.get('news', 0)}")
         if not skip_ta and "ta_calculated" in stats:
             logger.info(f"  TA indicators: {stats.get('ta_calculated', 0)}")
+        if "market_internals" in stats:
+            logger.info(f"  Market internals: {stats['market_internals']}")
 
     except Exception as e:
         logger.error(f"Daily update failed: {e}")

@@ -455,6 +455,7 @@ def load_economy(conn, economy_dir: Path, log: logging.Logger | None = None) -> 
         "inflation": "inflation.csv",
         "inflation_expectations": "inflation_expectations.csv",
         "labor_market": "labor_market.csv",
+        "market_internals": "market_internals.csv",
     }
 
     for table_name, filename in tables.items():
@@ -509,6 +510,52 @@ def _load_economy_file(
 
     log.info(f"  Loading {table_name}...")
     return load_csv_to_table(conn, csv_path, table_name, column_mapping, log)
+
+
+def load_market_internals(
+    conn,
+    rows: list[dict],
+    log: logging.Logger | None = None,
+) -> int:
+    """
+    Load market internals data directly from FRED API response into database.
+
+    Args:
+        conn: Database connection
+        rows: List of dicts with keys: date, vix_close, vix3m, hy_spread, etc.
+        log: Logger instance
+
+    Returns:
+        Number of rows loaded
+    """
+    log = log or logger
+    if not rows:
+        log.warning("No market internals data to load")
+        return 0
+
+    log.info(f"Loading {len(rows)} market internals rows...")
+
+    columns = ["date", "vix_close", "vix_high", "vix_low", "vix3m", "hy_spread", "put_call_ratio"]
+    db_rows = []
+    for row in rows:
+        db_row = {}
+        for col in columns:
+            val = row.get(col)
+            db_row[col] = val if val not in ("", None) else None
+        db_rows.append(db_row)
+
+    return _insert_rows(conn, "market_internals", columns, db_rows, upsert=True, log=log)
+
+
+def load_market_internals_csv(
+    conn,
+    csv_path: Path,
+    log: logging.Logger | None = None,
+) -> int:
+    """Load market internals from CSV file."""
+    log = log or logger
+    log.info("Loading market internals from CSV...")
+    return _load_economy_file(conn, csv_path, "market_internals", log)
 
 
 def load_news(

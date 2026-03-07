@@ -12,10 +12,10 @@ from typing import Any
 
 import psycopg
 
-from sawa.api import PolygonClient
+from sawa.api import FredClient, PolygonClient
 from sawa.corporate_actions import run_corporate_actions_update
 from sawa.database import get_last_date, get_symbols_from_db
-from sawa.database.load import load_companies, load_economy, load_news
+from sawa.database.load import load_companies, load_economy, load_market_internals, load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
@@ -201,6 +201,29 @@ def run_weekly(
             # Load into database
             with psycopg.connect(database_url) as conn:
                 load_economy(conn, output_dir / "economy", logger)
+
+        # Step: Update market internals from FRED
+        import os as _os
+
+        fred_api_key = _os.environ.get("FRED_API_KEY")
+        if fred_api_key:
+            logger.info(f"\n[{step}/{total_steps}] Updating market internals from FRED...")
+            fred_client = FredClient(fred_api_key, logger)
+            try:
+                mi_rows = fred_client.get_market_internals(econ_start_str, end_str)
+                if mi_rows:
+                    with psycopg.connect(database_url) as conn:
+                        loaded = load_market_internals(conn, mi_rows, logger)
+                    stats["market_internals"] = loaded
+                else:
+                    stats["market_internals"] = 0
+            except Exception as e:
+                logger.warning(f"Market internals update failed: {e}")
+                stats["market_internals"] = 0
+            finally:
+                fred_client.close()
+        else:
+            logger.info("\nSkipping market internals (FRED_API_KEY not set)")
 
         # Step: Update news
         if not skip_news:
