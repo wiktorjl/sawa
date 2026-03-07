@@ -16,6 +16,7 @@ from sawa.domain.models import (
     IncomeStatement,
     InflationData,
     LaborMarketData,
+    MarketInternals,
     MarketSentiment,
     NewsArticle,
     StockPrice,
@@ -35,6 +36,7 @@ __all__ = [
     "TreasuryYield",
     "InflationData",
     "LaborMarketData",
+    "MarketInternals",
     "MarketSentiment",
     "TechnicalIndicators",
     # Exceptions

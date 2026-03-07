@@ -112,6 +112,18 @@
       "job_openings"
     ]
   },
+  "market_internals": {
+    "csv": "data/economy/market_internals.csv",
+    "columns": [
+      "date",
+      "vix_close",
+      "vix_high",
+      "vix_low",
+      "vix3m",
+      "hy_spread",
+      "put_call_ratio"
+    ]
+  },
   "balance_sheets": {
     "csv": "data/fundamentals/balance_sheets.csv",
     "columns": [

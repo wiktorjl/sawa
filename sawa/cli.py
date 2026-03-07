@@ -126,6 +126,7 @@ def cmd_daily(args) -> int:
             skip_news=args.skip_news,
             skip_ta=args.skip_ta or args.news_only,
             skip_prices=args.news_only,
+            skip_market_internals=args.skip_market_internals or args.news_only,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -845,6 +846,9 @@ Environment Variables:
     daily_parser.add_argument("--database-url", help="PostgreSQL URL")
     daily_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
     daily_parser.add_argument("--skip-ta", action="store_true", help="Skip technical indicators")
+    daily_parser.add_argument(
+        "--skip-market-internals", action="store_true", help="Skip market internals (FRED)"
+    )
     daily_parser.add_argument(
         "--news-only", action="store_true", help="Only update news (skip prices and TA)"
     )

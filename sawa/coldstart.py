@@ -20,11 +20,12 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from sawa.api import PolygonClient, PolygonS3Client
+from sawa.api import FredClient, PolygonClient, PolygonS3Client
 from sawa.database.load import (
     load_companies,
     load_economy,
     load_fundamentals,
+    load_market_internals,
     load_news,
     load_prices,
     load_ratios,
@@ -902,10 +903,10 @@ def run_coldstart(
 
                 # Step 8: Download & load economy data
                 if skip_economy:
-                    logger.info("\n[8/9] Skipping economy data (--skip-economy)")
+                    logger.info("\n[8/10] Skipping economy data (--skip-economy)")
                     stats["economy"] = {}
                 else:
-                    logger.info("\n[8/9] Downloading economy data")
+                    logger.info("\n[8/10] Downloading economy data")
                     econ_stats = download_economy(
                         client, start_str, end_str, output_dir / "economy", logger
                     )
@@ -914,17 +915,44 @@ def run_coldstart(
                     logger.info("Loading economy data into database...")
                     load_economy(conn, output_dir / "economy", logger)
 
+                # Step 8b: Download & load market internals from FRED
+                import os as _os
+
+                fred_api_key = _os.environ.get("FRED_API_KEY")
+                if fred_api_key:
+                    logger.info("\n[8b/10] Downloading market internals from FRED")
+                    fred_client = FredClient(fred_api_key, logger)
+                    try:
+                        mi_rows = fred_client.get_market_internals(start_str, end_str)
+                        if mi_rows:
+                            loaded = load_market_internals(conn, mi_rows, logger)
+                            stats["market_internals"] = loaded
+
+                            # Also save CSV for future load-only runs
+                            mi_dir = output_dir / "economy"
+                            mi_dir.mkdir(parents=True, exist_ok=True)
+                            from sawa.utils.csv_utils import write_csv_auto_fields
+
+                            write_csv_auto_fields(mi_dir / "market_internals.csv", mi_rows, logger)
+                        else:
+                            stats["market_internals"] = 0
+                    finally:
+                        fred_client.close()
+                else:
+                    logger.info("\n[8b/10] Skipping market internals (FRED_API_KEY not set)")
+                    stats["market_internals_skipped"] = "FRED_API_KEY not set"
+
                 # Step 9: Download & load news
                 if skip_news:
-                    logger.info("\n[9/9] Skipping news (--skip-news)")
+                    logger.info("\n[9/10] Skipping news (--skip-news)")
                     stats["news"] = 0
                 else:
-                    logger.info("\n[9/9] Downloading news articles")
+                    logger.info("\n[9/10] Downloading news articles")
                     news_count = load_news(conn, client, symbols, days=DEFAULT_NEWS_DAYS)
                     stats["news"] = news_count
 
             # Step 10: Populate index constituents (run for all modes after companies are loaded)
-            logger.info("\n[10/10] Populating index constituents...")
+            logger.info("\nPopulating index constituents...")
             index_stats = populate_index_constituents(conn, logger)
             stats["indices"] = index_stats
 
