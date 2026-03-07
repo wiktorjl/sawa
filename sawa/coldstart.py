@@ -924,10 +924,6 @@ def run_coldstart(
                     fred_client = FredClient(fred_api_key, logger)
                     try:
                         mi_rows = fred_client.get_market_internals(start_str, end_str)
-                        # Enrich with VIX OHLC from Polygon daily bars
-                        from sawa.daily import _enrich_vix_ohlc
-
-                        _enrich_vix_ohlc(client, mi_rows, start_str, end_str, logger)
                         if mi_rows:
                             loaded = load_market_internals(conn, mi_rows, logger)
                             stats["market_internals"] = loaded

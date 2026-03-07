@@ -161,50 +161,15 @@ def fetch_vix_intraday(
     return bars
 
 
-def _enrich_vix_ohlc(
-    polygon_client: PolygonClient,
-    rows: list[dict[str, Any]],
-    start_date: str,
-    end_date: str,
-    logger: logging.Logger,
-) -> None:
-    """Enrich market internals rows with VIX OHLC from Polygon daily index bars."""
-    try:
-        vix_bars = polygon_client.get_index_bars(
-            "I:VIX", start_date, end_date,
-            multiplier=1, timespan="day",
-        )
-        vix_ohlc: dict[str, dict[str, Any]] = {}
-        for bar in vix_bars:
-            if bar.get("t"):
-                bar_date = timestamp_to_date(bar["t"]).strftime(DATE_FORMAT)
-                vix_ohlc[bar_date] = {
-                    "vix_open": bar.get("o"),
-                    "vix_high": bar.get("h"),
-                    "vix_low": bar.get("l"),
-                }
-        logger.info(f"  Polygon VIX daily bars: {len(vix_ohlc)} days")
-
-        for row in rows:
-            ohlc = vix_ohlc.get(row["date"])
-            if ohlc:
-                row.update(ohlc)
-    except Exception as e:
-        logger.warning(f"  Polygon VIX daily bars failed: {e}")
-
-
 def fetch_market_internals(
     fred_client: FredClient,
-    polygon_client: PolygonClient,
     start_date: str,
     end_date: str,
     logger: logging.Logger,
 ) -> list[dict[str, Any]]:
-    """Fetch market internals from FRED, enriched with Polygon VIX OHLC."""
+    """Fetch market internals from FRED."""
     logger.info(f"Fetching market internals from FRED ({start_date} to {end_date})...")
-    rows = fred_client.get_market_internals(start_date, end_date)
-    _enrich_vix_ohlc(polygon_client, rows, start_date, end_date, logger)
-    return rows
+    return fred_client.get_market_internals(start_date, end_date)
 
 
 def run_daily(
@@ -446,9 +411,7 @@ def run_daily(
                     # Fetch last 30 days to catch any backfill gaps
                     mi_start = (date.today() - timedelta(days=30)).strftime(DATE_FORMAT)
                     mi_end = date.today().strftime(DATE_FORMAT)
-                    mi_rows = fetch_market_internals(
-                        fred_client, client, mi_start, mi_end, logger
-                    )
+                    mi_rows = fetch_market_internals(fred_client, mi_start, mi_end, logger)
                     if mi_rows:
                         from sawa.database.load import load_market_internals
 

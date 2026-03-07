@@ -8,9 +8,6 @@
 
 CREATE TABLE IF NOT EXISTS market_internals (
     date DATE PRIMARY KEY,
-    vix_open NUMERIC(8, 4),
-    vix_high NUMERIC(8, 4),
-    vix_low NUMERIC(8, 4),
     vix_close NUMERIC(8, 4),
     vix3m NUMERIC(8, 4),
     hy_spread NUMERIC(8, 4),

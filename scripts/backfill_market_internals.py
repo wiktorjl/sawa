@@ -116,20 +116,6 @@ def main() -> int:
     finally:
         fred_client.close()
 
-    # Enrich with VIX OHLC from Polygon daily index bars
-    polygon_api_key = os.environ.get("POLYGON_API_KEY")
-    if polygon_api_key:
-        from sawa.api.client import PolygonClient
-        from sawa.daily import _enrich_vix_ohlc
-
-        polygon_client = PolygonClient(polygon_api_key, logger)
-        try:
-            _enrich_vix_ohlc(polygon_client, rows, start_date, end_date, logger)
-        finally:
-            polygon_client.close()
-    else:
-        logger.info("  POLYGON_API_KEY not set, skipping VIX OHLC enrichment")
-
     if not rows:
         logger.warning("No data returned from FRED")
         return 1
