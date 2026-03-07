@@ -535,7 +535,7 @@ def load_market_internals(
 
     log.info(f"Loading {len(rows)} market internals rows...")
 
-    columns = ["date", "vix_close", "vix_high", "vix_low", "vix3m", "hy_spread", "put_call_ratio"]
+    columns = ["date", "vix_close", "vix3m", "hy_spread", "put_call_ratio"]
     db_rows = []
     for row in rows:
         db_row = {}

@@ -107,13 +107,32 @@ class FredClient:
                 self.logger.warning(f"  FRED {series_id} failed: {e}")
                 series_data[field] = {}
 
-        # Merge all series by date
-        all_dates: set[str] = set()
-        for date_map in series_data.values():
-            all_dates.update(date_map.keys())
+        # Use VIX dates as anchor (trading days only).
+        # HY spread sometimes reports on weekends/holidays (month-ends),
+        # which would create orphan rows with no VIX data.
+        vix_dates = set(series_data.get("vix_close", {}).keys())
+        vix3m_dates = set(series_data.get("vix3m", {}).keys())
+        trading_dates = vix_dates | vix3m_dates
+
+        # For HY spread dates that fall on non-trading days,
+        # carry the value forward to the next trading day.
+        hy_data = series_data.get("hy_spread", {})
+        if hy_data:
+            hy_non_trading = set(hy_data.keys()) - trading_dates
+            if hy_non_trading:
+                all_trading = sorted(trading_dates)
+                for hy_dt in sorted(hy_non_trading):
+                    # Find next trading day
+                    for td in all_trading:
+                        if td > hy_dt:
+                            # Only carry forward if that day has no value
+                            if td not in hy_data:
+                                hy_data[td] = hy_data[hy_dt]
+                            break
+                    del hy_data[hy_dt]
 
         rows: list[dict[str, Any]] = []
-        for dt in sorted(all_dates):
+        for dt in sorted(trading_dates):
             row: dict[str, Any] = {"date": dt}
             for field in SERIES:
                 val = series_data[field].get(dt)
