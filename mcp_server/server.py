@@ -112,7 +112,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Create MCP server
-app = Server("stock-data-server")
+app = Server(
+    "stock-data-server",
+    instructions=(
+        "PRICE DATA TOOL SELECTION:\n"
+        "- Current session / today's price action / intraday -> get_intraday_bars\n"
+        "- Historical daily OHLCV with chart -> get_stock_prices\n"
+        "- Quick latest closing price -> get_latest_price\n"
+        "- Real-time quote from API -> get_live_price\n"
+        "During market hours (Mon-Fri 9:30AM-4PM ET), prefer get_intraday_bars "
+        "for any question about today's prices."
+    ),
+)
 
 
 @app.list_tools()
@@ -192,7 +203,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_live_price",
-            description="Get live stock price from Polygon API (real-time, not from database)",
+            description="Get live stock price from Polygon API (real-time, not from database). For intraday OHLCV bars and session summaries, use get_intraday_bars.",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -235,7 +246,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_latest_price",
-            description="Get the most recent closing price from the database (fast, always has latest data)",  # noqa: E501
+            description="Get the most recent closing price from the database (fast). Returns yesterday's close or today's if market has closed. For current-session intraday prices during market hours, use get_intraday_bars.",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -254,7 +265,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_stock_prices",
-            description="Get daily OHLCV prices for a ticker with visual chart",
+            description="Get historical daily OHLCV prices with visual chart. Best for multi-day/week/month/year ranges. For current trading session data during market hours, use get_intraday_bars instead.",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -402,7 +413,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_intraday_bars",
-            description="Get intraday 5-minute bars for a ticker (15-min delayed)",
+            description="Get today's intraday price data as 5-minute bars (15-min delayed). PREFERRED tool for any current-session or today's price queries during market hours. Supports multiple tickers and daily OHLCV aggregation via aggregate=true.",  # noqa: E501
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -584,7 +595,8 @@ async def list_tools() -> list[Tool]:
                 "return_on_equity, dividend_yield, ...)\n"
                 "  balance_sheets(ticker, period_end, timeframe PK, total_assets, "
                 "total_liabilities, total_equity, ...)\n"
-                "  cash_flows(ticker, period_end, timeframe PK, net_cash_from_operating_activities, ...)\n"
+                "  cash_flows(ticker, period_end, timeframe PK, "
+                "net_cash_from_operating_activities, ...)\n"
                 "  income_statements(ticker, period_end, timeframe PK, revenue, operating_income, "
                 "diluted_earnings_per_share, ...)\n"
                 "  technical_indicators(ticker, date PK, sma_50, sma_150, sma_200, rsi_14, "
@@ -593,7 +605,8 @@ async def list_tools() -> list[Tool]:
                 "  index_constituents(index_id, ticker PK) - JOIN with indices on id\n"
                 "  sic_gics_mapping(sic_code PK, gics_sector, gics_industry) - "
                 "JOIN with companies on sic_code\n"
-                "  treasury_yields(date PK, yield_1_month, yield_2_year, yield_10_year, yield_30_year, ...)\n"
+                "  treasury_yields(date PK, yield_1_month, yield_2_year, "
+                "yield_10_year, yield_30_year, ...)\n"
                 "  inflation(date PK, cpi, cpi_year_over_year, pce, ...)\n"
                 "  inflation_expectations(date PK, market_5_year, market_10_year, ...)\n"
                 "  labor_market(date PK, unemployment_rate, job_openings, ...)\n"
@@ -607,7 +620,8 @@ async def list_tools() -> list[Tool]:
                 "VIEWS:\n"
                 "  stock_prices_live - union of historical EOD + today's intraday data\n"
                 "  v_company_summary - companies with latest price and ratios\n"
-                "  v_company_with_indices - companies with index membership (in_sp500, in_nasdaq5000)\n"
+                "  v_company_with_indices - companies with index membership "
+                "(in_sp500, in_nasdaq5000)\n"
                 "  v_latest_fundamentals - latest quarterly fundamentals per company\n"
                 "  v_economy_dashboard - combined economy indicators\n"
                 "  v_sector_summary - sector aggregates by SIC code\n\n"
@@ -1459,7 +1473,10 @@ async def list_tools() -> list[Tool]:
         # Support & Resistance tools
         Tool(
             name="calculate_support_resistance_levels",
-            description="Calculate support and resistance levels using pivot points, price clustering, or volume analysis",
+            description=(
+                "Calculate support and resistance levels using "
+                "pivot points, price clustering, or volume analysis"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1483,7 +1500,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "method": {
                         "type": "string",
-                        "description": "Detection method: pivot (pivot points), cluster (price clustering), volume (volume profile)",
+                        "description": (
+                            "Detection method: pivot (pivot points), "
+                            "cluster (price clustering), volume (volume profile)"
+                        ),
                         "enum": ["pivot", "cluster", "volume"],
                         "default": "cluster",
                     },
@@ -1494,7 +1514,10 @@ async def list_tools() -> list[Tool]:
         # Pattern detection tools
         Tool(
             name="detect_candlestick_patterns",
-            description="Detect candlestick patterns (hammer, engulfing, doji, stars, soldiers, etc.)",
+            description=(
+                "Detect candlestick patterns "
+                "(hammer, engulfing, doji, stars, soldiers, etc.)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1512,7 +1535,10 @@ async def list_tools() -> list[Tool]:
                     "patterns_to_detect": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional list of specific patterns to detect (default: all patterns)",
+                        "description": (
+                            "Optional list of specific patterns to detect "
+                            "(default: all patterns)"
+                        ),
                     },
                 },
                 "required": ["ticker"],
@@ -1520,7 +1546,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="detect_chart_patterns",
-            description="Detect chart patterns (cup & handle, head & shoulders, triangles, channels, etc.)",
+            description=(
+                "Detect chart patterns "
+                "(cup & handle, head & shoulders, triangles, channels, etc.)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1548,7 +1577,10 @@ async def list_tools() -> list[Tool]:
         # Momentum & Squeeze tools
         Tool(
             name="get_squeeze_indicators",
-            description="Get TTM Squeeze indicators (Bollinger Bands, Keltner Channels, momentum histogram, squeeze status)",
+            description=(
+                "Get TTM Squeeze indicators (Bollinger Bands, Keltner Channels, "
+                "momentum histogram, squeeze status)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1591,7 +1623,10 @@ async def list_tools() -> list[Tool]:
         # Volume analysis tools
         Tool(
             name="get_volume_profile",
-            description="Get volume distribution by price level (POC, value area, volume by price bins)",
+            description=(
+                "Get volume distribution by price level "
+                "(POC, value area, volume by price bins)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1693,7 +1728,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_multi_timeframe_alignment",
-            description="Check indicator alignment across multiple timeframes (daily, weekly, monthly)",
+            description=(
+                "Check indicator alignment across multiple timeframes "
+                "(daily, weekly, monthly)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1717,7 +1755,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="calculate_relative_strength",
-            description="Calculate relative strength vs benchmark (RS line, trend, beta, outperformance)",
+            description=(
+                "Calculate relative strength vs benchmark "
+                "(RS line, trend, beta, outperformance)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2222,6 +2263,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # Add JSON data
         parts.append(json.dumps(result, indent=2, default=str))
 
+        # Add market-hours hint for EOD tools
+        if name in ("get_latest_price", "get_stock_prices"):
+            hint = _market_hours_hint()
+            if hint:
+                parts.append("")
+                parts.append(hint)
+
         return [TextContent(type="text", text="\n".join(parts))]
 
     except Exception as e:
@@ -2230,6 +2278,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     except BaseException as e:
         logger.error(f"Unexpected error in tool {name}: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Server error: {str(e)}")]
+
+
+def _market_hours_hint() -> str | None:
+    """Return a hint if market is open and an EOD tool was used."""
+    try:
+        from sawa.utils.market_hours import is_market_open
+
+        if is_market_open():
+            return (
+                "[Note: US market is currently open. "
+                "For current-session intraday data, use get_intraday_bars.]"
+            )
+    except ImportError:
+        return None
+    return None
 
 
 async def main():
