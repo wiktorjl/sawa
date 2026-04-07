@@ -6,10 +6,12 @@ An MCP server providing read-only access to stock market data in PostgreSQL.
 Includes colorful Unicode charts for data visualization.
 """
 
+import asyncio
 import json
 import logging
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +85,7 @@ from .tools.multi_timeframe import (  # noqa: E402
 )
 from .tools.news import get_recent_news_sentiment  # noqa: E402
 from .tools.patterns import detect_candlestick_patterns, detect_chart_patterns  # noqa: E402
-from .tools.scanner import scan_ytd_performance  # noqa: E402
+from .tools.scanner import scan_ytd_performance_async  # noqa: E402
 from .tools.schema import describe_database, describe_table  # noqa: E402
 from .tools.screener import (  # noqa: E402
     detect_crossovers,
@@ -110,6 +112,13 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
+
+
+async def _run_sync(func, *args, **kwargs):
+    """Run a sync function in a thread executor to avoid blocking the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+
 
 # Create MCP server
 app = Server(
@@ -1821,7 +1830,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         if name == "list_companies":
             logger.info("  Executing: list_companies")
-            result = list_companies(
+            result = await _run_sync(
+                list_companies,
                 limit=arguments.get("limit", 100),
                 offset=arguments.get("offset", 0),
                 sector=arguments.get("sector"),
@@ -1829,12 +1839,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_company_details":
             logger.info("  Executing: get_company_details")
-            result = get_company_details(arguments["ticker"])
+            result = await _run_sync(get_company_details, arguments["ticker"])
             if result is None:
                 return [TextContent(type="text", text=f"Company {arguments['ticker']} not found")]
         elif name == "search_companies":
             logger.info("  Executing: search_companies")
-            result = search_companies(
+            result = await _run_sync(
+                search_companies,
                 query=arguments["query"],
                 limit=arguments.get("limit", 20),
                 index=arguments.get("index"),
@@ -1853,8 +1864,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_latest_price":
             logger.info("  Executing: get_latest_price")
-            result = get_latest_price(
-                ticker=arguments["ticker"], use_live=arguments.get("use_live", True)
+            result = await _run_sync(
+                get_latest_price,
+                ticker=arguments["ticker"], use_live=arguments.get("use_live", True),
             )
             if result is None:
                 return [
@@ -1862,7 +1874,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 ]
         elif name == "get_stock_prices":
             logger.info("  Executing: get_stock_prices")
-            result = get_stock_prices(
+            result = await _run_sync(
+                get_stock_prices,
                 ticker=arguments["ticker"],
                 start_date=arguments["start_date"],
                 end_date=arguments.get("end_date"),
@@ -1872,7 +1885,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             chart = render_price_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_financial_ratios":
             logger.info("  Executing: get_financial_ratios")
-            result = get_financial_ratios(
+            result = await _run_sync(
+                get_financial_ratios,
                 ticker=arguments["ticker"],
                 start_date=arguments["start_date"],
                 end_date=arguments.get("end_date"),
@@ -1881,7 +1895,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_fundamentals":
             logger.info("  Executing: get_fundamentals")
-            result = get_fundamentals(
+            result = await _run_sync(
+                get_fundamentals,
                 ticker=arguments["ticker"],
                 timeframe=arguments.get("timeframe", "quarterly"),
                 limit=arguments.get("limit", 4),
@@ -1889,7 +1904,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
         elif name == "get_technical_indicators":
             logger.info("  Executing: get_technical_indicators")
-            result = get_technical_indicators(
+            result = await _run_sync(
+                get_technical_indicators,
                 ticker=arguments["ticker"],
                 start_date=arguments["start_date"],
                 end_date=arguments.get("end_date"),
@@ -1897,7 +1913,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_latest_technical_indicators":
             logger.info("  Executing: get_latest_technical_indicators")
-            result = get_latest_technical_indicators(ticker=arguments["ticker"])
+            result = await _run_sync(get_latest_technical_indicators, ticker=arguments["ticker"])
             if result is None:
                 return [
                     TextContent(
@@ -1907,7 +1923,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 ]
         elif name == "get_intraday_bars":
             logger.info("  Executing: get_intraday_bars")
-            result = get_intraday_bars(
+            result = await _run_sync(
+                get_intraday_bars,
                 ticker=arguments.get("ticker"),
                 tickers=arguments.get("tickers"),
                 date=arguments.get("date"),
@@ -1938,7 +1955,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     arguments.get("macd_histogram_min"),
                     arguments.get("macd_histogram_max"),
                 )
-            result = screen_by_technical_indicators(
+            result = await _run_sync(
+                screen_by_technical_indicators,
                 filters=filters,
                 target_date=arguments.get("target_date"),
                 index=arguments.get("index"),
@@ -1946,7 +1964,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_economy_data":
             logger.info("  Executing: get_economy_data")
-            result = get_economy_data(
+            result = await _run_sync(
+                get_economy_data,
                 indicator_type=arguments["indicator_type"],
                 start_date=arguments["start_date"],
                 end_date=arguments.get("end_date"),
@@ -1955,11 +1974,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
         elif name == "get_economy_dashboard":
             logger.info("  Executing: get_economy_dashboard")
-            result = get_economy_dashboard(limit=arguments.get("limit", 10))
+            result = await _run_sync(get_economy_dashboard, limit=arguments.get("limit", 10))
             chart = render_economy_dashboard(result, layout, theme)
         elif name == "scan_ytd_performance":
             logger.info("  Executing: scan_ytd_performance")
-            result = scan_ytd_performance(
+            result = await scan_ytd_performance_async(
                 start_date=arguments.get("start_date"),
                 large_cap_threshold=arguments.get("large_cap_threshold", 100.0),
                 top_n=arguments.get("top_n", 10),
@@ -1977,25 +1996,27 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             sql_query = arguments["sql"]
             log_execute_query(sql_query, arguments.get("params"))
-            result = execute_query(sql_query)
+            result = await _run_sync(execute_query, sql_query)
         # Schema discovery tools
         elif name == "describe_database":
             logger.info("  Executing: describe_database")
-            result = describe_database()
+            result = await _run_sync(describe_database)
         elif name == "describe_table":
             logger.info("  Executing: describe_table")
-            result = describe_table(table_name=arguments["table_name"])
+            result = await _run_sync(describe_table, table_name=arguments["table_name"])
         # Sector tools
         elif name == "list_sectors":
             logger.info("  Executing: list_sectors")
-            result = list_sectors(
+            result = await _run_sync(
+                list_sectors,
                 taxonomy=arguments.get("taxonomy", "gics"),
                 index=arguments.get("index"),
                 limit=arguments.get("limit", 100),
             )
         elif name == "get_sector_performance":
             logger.info("  Executing: get_sector_performance")
-            result = get_sector_performance(
+            result = await _run_sync(
+                get_sector_performance,
                 taxonomy=arguments.get("taxonomy", "gics"),
                 index=arguments.get("index"),
                 limit=arguments.get("limit", 50),
@@ -2003,7 +2024,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # Market movers tools
         elif name == "get_top_movers":
             logger.info("  Executing: get_top_movers")
-            result = get_top_movers(
+            result = await _run_sync(
+                get_top_movers,
                 direction=arguments.get("direction", "both"),
                 period=arguments.get("period", "1d"),
                 limit=arguments.get("limit", 20),
@@ -2014,7 +2036,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_volume_leaders":
             logger.info("  Executing: get_volume_leaders")
-            result = get_volume_leaders(
+            result = await _run_sync(
+                get_volume_leaders,
                 metric=arguments.get("metric", "dollar_volume"),
                 limit=arguments.get("limit", 20),
                 sector=arguments.get("sector"),
@@ -2023,19 +2046,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_market_breadth":
             logger.info("  Executing: get_market_breadth")
-            result = get_market_breadth(
+            result = await _run_sync(
+                get_market_breadth,
                 date=arguments.get("date"),
                 index=arguments.get("index", "all"),
             )
         elif name == "list_technical_indicators":
             logger.info("  Executing: list_technical_indicators")
-            result = list_technical_indicators(
+            result = await _run_sync(
+                list_technical_indicators,
                 category=arguments.get("category"),
             )
         # Flexible screener
         elif name == "screen_stocks":
             logger.info("  Executing: screen_stocks")
-            result = screen_stocks(
+            result = await _run_sync(
+                screen_stocks,
                 filters=arguments.get("filters", {}),
                 sector=arguments.get("sector"),
                 sector_exclude=arguments.get("sector_exclude"),
@@ -2048,14 +2074,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # YTD returns for ticker list
         elif name == "get_ytd_returns":
             logger.info("  Executing: get_ytd_returns")
-            result = get_ytd_returns(
+            result = await _run_sync(
+                get_ytd_returns,
                 tickers=arguments["tickers"],
                 start_date=arguments.get("start_date"),
             )
         # SMA crossover detection
         elif name == "detect_crossovers":
             logger.info("  Executing: detect_crossovers")
-            result = detect_crossovers(
+            result = await _run_sync(
+                detect_crossovers,
                 sma_period=arguments.get("sma_period", 150),
                 direction=arguments.get("direction", "above"),
                 lookback_days=arguments.get("lookback_days", 5),
@@ -2066,7 +2094,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # 52-week extremes screener
         elif name == "get_52week_extremes":
             logger.info("  Executing: get_52week_extremes")
-            result = get_52week_extremes(
+            result = await _run_sync(
+                get_52week_extremes,
                 extreme=arguments.get("extreme", "both"),
                 threshold_pct=arguments.get("threshold_pct", 2.0),
                 index=arguments.get("index", "all"),
@@ -2078,7 +2107,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # Daily range screener
         elif name == "get_daily_range_leaders":
             logger.info("  Executing: get_daily_range_leaders")
-            result = get_daily_range_leaders(
+            result = await _run_sync(
+                get_daily_range_leaders,
                 min_range_pct=arguments.get("min_range_pct", 3.0),
                 max_range_pct=arguments.get("max_range_pct"),
                 sector=arguments.get("sector"),
@@ -2090,23 +2120,25 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # Index tools
         elif name == "list_indices":
             logger.info("  Executing: list_indices")
-            result = list_indices()
+            result = await _run_sync(list_indices)
         elif name == "get_index_constituents":
             logger.info("  Executing: get_index_constituents")
-            result = get_index_constituents(code=arguments["code"])
+            result = await _run_sync(get_index_constituents, code=arguments["code"])
         elif name == "check_index_membership":
             logger.info("  Executing: check_index_membership")
-            result = check_index_membership(ticker=arguments["ticker"])
+            result = await _run_sync(check_index_membership, ticker=arguments["ticker"])
         elif name == "get_index_with_prices":
             logger.info("  Executing: get_index_with_prices")
-            result = get_index_with_prices(
+            result = await _run_sync(
+                get_index_with_prices,
                 code=arguments["code"],
                 limit=arguments.get("limit", 50),
             )
         # Corporate actions tools
         elif name == "get_stock_splits":
             logger.info("  Executing: get_stock_splits")
-            result = get_stock_splits(
+            result = await _run_sync(
+                get_stock_splits,
                 ticker=arguments.get("ticker"),
                 start_date=arguments.get("start_date"),
                 end_date=arguments.get("end_date"),
@@ -2114,7 +2146,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_dividends":
             logger.info("  Executing: get_dividends")
-            result = get_dividends(
+            result = await _run_sync(
+                get_dividends,
                 ticker=arguments.get("ticker"),
                 start_date=arguments.get("start_date"),
                 end_date=arguments.get("end_date"),
@@ -2123,7 +2156,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_ex_dividend_calendar":
             logger.info("  Executing: get_ex_dividend_calendar")
-            result = get_ex_dividend_calendar(
+            result = await _run_sync(
+                get_ex_dividend_calendar,
                 start_date=arguments["start_date"],
                 end_date=arguments["end_date"],
                 index=arguments.get("index", "all"),
@@ -2131,20 +2165,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_recent_splits":
             logger.info("  Executing: get_recent_splits")
-            result = get_recent_splits(
+            result = await _run_sync(
+                get_recent_splits,
                 days=arguments.get("days", 30),
                 index=arguments.get("index", "all"),
             )
         elif name == "get_dividend_yield_leaders":
             logger.info("  Executing: get_dividend_yield_leaders")
-            result = get_dividend_yield_leaders(
+            result = await _run_sync(
+                get_dividend_yield_leaders,
                 index=arguments.get("index", "all"),
                 min_yield=arguments.get("min_yield", 2.0),
                 limit=arguments.get("limit", 50),
             )
         elif name == "get_earnings_calendar":
             logger.info("  Executing: get_earnings_calendar")
-            result = get_earnings_calendar(
+            result = await _run_sync(
+                get_earnings_calendar,
                 start_date=arguments["start_date"],
                 end_date=arguments["end_date"],
                 index=arguments.get("index", "all"),
@@ -2153,23 +2190,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "get_earnings_history":
             logger.info("  Executing: get_earnings_history")
-            result = get_earnings_history(
+            result = await _run_sync(
+                get_earnings_history,
                 ticker=arguments["ticker"],
                 limit=arguments.get("limit", 12),
             )
         elif name == "get_data_status":
             logger.info("  Executing: get_data_status")
-            result = get_data_status()
+            result = await _run_sync(get_data_status)
         elif name == "get_recent_news_sentiment":
             logger.info("  Executing: get_recent_news_sentiment")
-            result = get_recent_news_sentiment(
+            result = await _run_sync(
+                get_recent_news_sentiment,
                 ticker=arguments["ticker"],
                 days_back=arguments.get("days_back", 14),
                 max_articles=arguments.get("max_articles", 10),
             )
         elif name == "calculate_support_resistance_levels":
             logger.info("  Executing: calculate_support_resistance_levels")
-            result = calculate_support_resistance_levels(
+            result = await _run_sync(
+                calculate_support_resistance_levels,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 90),
                 max_levels=arguments.get("max_levels", 5),
@@ -2177,67 +2217,77 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "detect_candlestick_patterns":
             logger.info("  Executing: detect_candlestick_patterns")
-            result = detect_candlestick_patterns(
+            result = await _run_sync(
+                detect_candlestick_patterns,
                 ticker=arguments["ticker"],
                 days=arguments.get("days", 30),
                 patterns_to_detect=arguments.get("patterns_to_detect"),
             )
         elif name == "detect_chart_patterns":
             logger.info("  Executing: detect_chart_patterns")
-            result = detect_chart_patterns(
+            result = await _run_sync(
+                detect_chart_patterns,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 60),
                 min_pattern_days=arguments.get("min_pattern_days", 10),
             )
         elif name == "get_squeeze_indicators":
             logger.info("  Executing: get_squeeze_indicators")
-            result = get_squeeze_indicators(
+            result = await _run_sync(
+                get_squeeze_indicators,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 60),
             )
         elif name == "get_momentum_indicators":
             logger.info("  Executing: get_momentum_indicators")
-            result = get_momentum_indicators(
+            result = await _run_sync(
+                get_momentum_indicators,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 60),
             )
         elif name == "get_volume_profile":
             logger.info("  Executing: get_volume_profile")
-            result = get_volume_profile(
+            result = await _run_sync(
+                get_volume_profile,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 30),
                 price_bins=arguments.get("price_bins", 20),
             )
         elif name == "detect_volume_anomalies":
             logger.info("  Executing: detect_volume_anomalies")
-            result = detect_volume_anomalies(
+            result = await _run_sync(
+                detect_volume_anomalies,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 90),
                 threshold_multiplier=arguments.get("threshold_multiplier", 2.0),
             )
         elif name == "get_advanced_volume_indicators":
             logger.info("  Executing: get_advanced_volume_indicators")
-            result = get_advanced_volume_indicators(
+            result = await _run_sync(
+                get_advanced_volume_indicators,
                 ticker=arguments["ticker"],
                 lookback_days=arguments.get("lookback_days", 60),
             )
         elif name == "get_weekly_monthly_candles":
             logger.info("  Executing: get_weekly_monthly_candles")
-            result = get_weekly_monthly_candles(
+            result = await _run_sync(
+                get_weekly_monthly_candles,
                 ticker=arguments["ticker"],
                 timeframe=arguments["timeframe"],
                 periods=arguments.get("periods"),
             )
         elif name == "get_multi_timeframe_alignment":
             logger.info("  Executing: get_multi_timeframe_alignment")
-            result = get_multi_timeframe_alignment(
+            result = await _run_sync(
+                get_multi_timeframe_alignment,
                 ticker=arguments["ticker"],
                 indicators=arguments.get("indicators"),
                 timeframes=arguments.get("timeframes"),
             )
         elif name == "calculate_relative_strength":
             logger.info("  Executing: calculate_relative_strength")
-            result = calculate_relative_strength(
+            result = await _run_sync(
+                calculate_relative_strength,
                 ticker=arguments["ticker"],
                 benchmark=arguments.get("benchmark", "SPY"),
                 lookback_days=arguments.get("lookback_days", 90),

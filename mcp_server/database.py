@@ -47,6 +47,9 @@ def _get_pool() -> ConnectionPool:
             max_size=POOL_MAX_SIZE,
             configure=_configure_connection,
             open=True,
+            timeout=60,
+            max_idle=300,
+            max_lifetime=1800,
         )
         atexit.register(close_pool)
         logger.info(
