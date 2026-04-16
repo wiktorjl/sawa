@@ -15,7 +15,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_DIR="$HOME/.sawa/scheduler"
 LOG_FILE="$STATE_DIR/scheduler.log"
-NTFY_TOPIC="ntfy.sh/WiktorAI"
+NTFY_TOPIC=""  # set via NTFY_TOPIC in .env
 DAILY_WAIT_HOURS=1  # hours after close before running daily
 INTRADAY_STOP_TIMEOUT=60  # seconds to wait for graceful shutdown
 
@@ -59,6 +59,10 @@ fi
 notify() {
     local title="$1"
     local body="$2"
+    if [ -z "$NTFY_TOPIC" ]; then
+        log "WARN: NTFY_TOPIC not set, skipping notification"
+        return
+    fi
     log "Sending notification: $title"
     curl -s \
         -H "Title: $title" \
