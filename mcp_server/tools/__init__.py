@@ -42,7 +42,7 @@ from .multi_timeframe import (
 from .movers import get_market_breadth, get_top_movers, get_volume_leaders
 from .news import get_recent_news_sentiment
 from .patterns import detect_candlestick_patterns, detect_chart_patterns
-from .scanner import scan_ytd_performance
+from .scanner import scan_ytd_performance_async
 from .schema import describe_database, describe_table
 from .screener import get_52week_extremes, get_daily_range_leaders, screen_stocks
 from .sectors import get_sector_performance, list_sectors
@@ -75,7 +75,7 @@ __all__ = [
     "screen_by_technical_indicators",
     "list_technical_indicators",
     # Scanner
-    "scan_ytd_performance",
+    "scan_ytd_performance_async",
     # Schema discovery
     "describe_database",
     "describe_table",
