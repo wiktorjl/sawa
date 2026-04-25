@@ -7,6 +7,8 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+from sawa.utils.resources import resolve_project_resource
+
 TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
 
@@ -120,8 +122,10 @@ def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     Returns:
         List of ticker symbols
     """
-    # Look for symbols file relative to project root
-    symbols_file = Path(__file__).parent.parent.parent / "nasdaq1000_symbols.txt"
+    symbols_file = resolve_project_resource(
+        Path("nasdaq1000_symbols.txt"),
+        "nasdaq1000_symbols.txt",
+    )
     if not symbols_file.exists():
         raise FileNotFoundError(
             f"NASDAQ-5000 symbols file not found: {symbols_file}"

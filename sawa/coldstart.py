@@ -91,7 +91,9 @@ def download_prices(
     total_records = 0
     skipped_dates = 0
     processed_dates = 0
-    total_trading_days = len([d for d in trading_days if start_date <= date.fromisoformat(d) <= end_date])
+    total_trading_days = len(
+        [d for d in trading_days if start_date <= date.fromisoformat(d) <= end_date]
+    )
 
     current = start_date
     while current <= end_date:
@@ -109,7 +111,10 @@ def download_prices(
 
             # Progress indicator every 50 dates or at milestones
             if processed_dates % 50 == 0 or processed_dates == total_trading_days:
-                logger.info(f"  Progress: {processed_dates}/{total_trading_days} dates, {total_records:,} records")
+                logger.info(
+                    f"  Progress: {processed_dates}/{total_trading_days} dates, "
+                    f"{total_records:,} records"
+                )
 
             records = s3_client.download_and_parse(current, symbols)
             if records:
@@ -458,6 +463,7 @@ def run_coldstart(
     symbols_file: Path | None = None,
     drop_tables: bool = True,
     drop_only: bool = False,
+    confirm_drop: bool = False,
     schema_only: bool = False,
     load_only: bool = False,
     skip_downloads: bool = False,
@@ -483,6 +489,7 @@ def run_coldstart(
         symbols_file: Optional file with symbols to use (one per line)
         drop_tables: Whether to drop existing tables
         drop_only: Only drop tables and clean data directory
+        confirm_drop: Skip interactive confirmation for destructive table drops
         schema_only: Only set up schema (no download/load)
         load_only: Only load existing CSV data (no schema changes)
         skip_downloads: Skip downloads but load existing data
@@ -540,7 +547,9 @@ def run_coldstart(
                         logger.warning("⚠️  ALL DATA WILL BE PERMANENTLY DELETED!")
 
                         # Interactive confirmation
-                        if sys.stdin.isatty():
+                        if confirm_drop:
+                            logger.info("Drop confirmed by --confirm-drop")
+                        elif sys.stdin.isatty():
                             response = input("\n❓ Type 'yes' to confirm deletion: ")
                             if response.lower() != "yes":
                                 logger.info("❌ Aborted by user")
@@ -631,7 +640,9 @@ def run_coldstart(
                                 logger.warning("")
 
                                 # Interactive confirmation
-                                if sys.stdin.isatty():
+                                if confirm_drop:
+                                    logger.info("Drop confirmed by --confirm-drop")
+                                elif sys.stdin.isatty():
                                     response = input("❓ Type 'DELETE' to confirm: ")
                                     if response != "DELETE":
                                         logger.info("❌ Aborted by user - no data was deleted")
@@ -660,7 +671,10 @@ def run_coldstart(
                 # Schema-only mode: exit after schema setup
                 if schema_only:
                     if failed_files:
-                        logger.error(f"\n❌ Schema setup failed! {len(failed_files)} file(s) had errors:")
+                        logger.error(
+                            f"\n❌ Schema setup failed! "
+                            f"{len(failed_files)} file(s) had errors:"
+                        )
                         for fname in failed_files:
                             logger.error(f"   - {fname}")
                         stats["success"] = False

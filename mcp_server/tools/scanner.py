@@ -1,7 +1,7 @@
 """Stock performance scanner MCP tool."""
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ async def scan_ytd_performance_async(
             concurrency=10,
         )
 
-        return results
+        return cast(dict[str, Any], results)
 
     except Exception as e:
         logger.error(f"Scanner error: {e}")

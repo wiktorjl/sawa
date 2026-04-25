@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 
 import numpy as np
-from statsmodels.api import OLS, add_constant
+from statsmodels.api import OLS, add_constant  # type: ignore[import-not-found,import-untyped]
 
 from sawa.calculation.hurst import (
     compute_adx,

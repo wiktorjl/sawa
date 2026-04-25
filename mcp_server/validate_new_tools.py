@@ -84,7 +84,7 @@ async def main():
     passed = sum(1 for _, status, _, _ in validation_results if status == "✓ PASS")
     failed = sum(1 for _, status, _, _ in validation_results if status != "✓ PASS")
 
-    print(f"Validation Summary:")
+    print("Validation Summary:")
     print(f"  Passed: {passed}/{len(new_tools)}")
     print(f"  Failed: {failed}/{len(new_tools)}")
     print("=" * 80)

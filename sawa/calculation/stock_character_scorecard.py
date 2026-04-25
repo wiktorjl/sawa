@@ -11,16 +11,14 @@ from datetime import date
 from decimal import Decimal
 
 import numpy as np
-from scipy.stats import percentileofscore
+from scipy.stats import percentileofscore  # type: ignore[import-untyped]
 
-from sawa.calculation.stock_character import _to_decimal, _extract_ohlcv_arrays, classify_stock
+from sawa.calculation.stock_character import _extract_ohlcv_arrays, _to_decimal, classify_stock
 from sawa.calculation.stock_character_baseline import compute_baseline
-from sawa.calculation.stock_character_detect import detect_flags
 from sawa.calculation.stock_character_config import (
     RECENT_WINDOW_DAYS,
-    HVN_PROXIMITY_PCT,
-    SMA_ADHERENCE_MIN_RATIO,
 )
+from sawa.calculation.stock_character_detect import detect_flags
 from sawa.domain.stock_character import (
     CharacterBaseline,
     CharacterClassification,
@@ -74,7 +72,11 @@ def _compute_spy_corr_recent(
     stock_recent = prices[-window:] if len(prices) >= window else prices
     spy_recent = spy_prices[-window:] if len(spy_prices) >= window else spy_prices
 
-    stock_by_date = {p["date"]: float(p["close"]) for p in stock_recent if p.get("close") is not None}
+    stock_by_date = {
+        p["date"]: float(p["close"])
+        for p in stock_recent
+        if p.get("close") is not None
+    }
     spy_by_date = {p["date"]: float(p["close"]) for p in spy_recent if p.get("close") is not None}
 
     common_dates = sorted(set(stock_by_date) & set(spy_by_date))
@@ -166,7 +168,10 @@ def build_scorecard(
         if residuals_std_f > 0:
             # Expected log price from regression at last index
             n = len(prices)
-            expected_log = float(baseline.regression_intercept) + float(baseline.regression_slope) * (n - 1)
+            expected_log = (
+                float(baseline.regression_intercept)
+                + float(baseline.regression_slope) * (n - 1)
+            )
             actual_log = math.log(current_price_float)
             sigma_dist = (actual_log - expected_log) / residuals_std_f
             sigma_distance = _to_decimal(sigma_dist, 4)
@@ -264,7 +269,15 @@ def analyze_stock(
 
     baseline = compute_baseline(ticker, prices, classification, benchmark_prices, run_date)
     flags = detect_flags(ticker, prices, classification, baseline, benchmark_prices, run_date)
-    scorecard = build_scorecard(ticker, prices, classification, baseline, flags, benchmark_prices, run_date)
+    scorecard = build_scorecard(
+        ticker,
+        prices,
+        classification,
+        baseline,
+        flags,
+        benchmark_prices,
+        run_date,
+    )
 
     return {
         "classification": classification,

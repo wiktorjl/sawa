@@ -27,10 +27,10 @@ load_dotenv()
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sawa.api.fred import FredClient
-from sawa.database.load import load_market_internals
-from sawa.utils import setup_logging
-from sawa.utils.dates import DATE_FORMAT
+from sawa.api.fred import FredClient  # noqa: E402
+from sawa.database.load import load_market_internals  # noqa: E402
+from sawa.utils import setup_logging  # noqa: E402
+from sawa.utils.dates import DATE_FORMAT  # noqa: E402
 
 
 def main() -> int:

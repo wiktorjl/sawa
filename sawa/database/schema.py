@@ -18,6 +18,7 @@ from psycopg import sql
 
 from sawa.utils import setup_logging
 from sawa.utils.cli import add_common_args, create_parser
+from sawa.utils.resources import resolve_project_resource
 
 EXPECTED_TABLES = {
     "companies",
@@ -55,11 +56,13 @@ def get_sql_files(schema_dir: Path) -> list[Path]:
     be run on existing databases. For fresh installations, run all files
     in order.
     """
-    # Get all files matching NN_*.sql pattern
     import re
-    pattern = re.compile(r'^\d{2}_.*\.sql$')
+
+    schema_dir = resolve_project_resource(schema_dir, "sqlschema")
+    pattern = re.compile(r"^\d{2}_.*\.sql$")
     sql_files = [
-        f for f in schema_dir.glob("*.sql")
+        f
+        for f in schema_dir.glob("*.sql")
         if pattern.match(f.name)
     ]
     return sorted(sql_files)
@@ -191,13 +194,15 @@ Examples:
         logger.error("--database-url required or set DATABASE_URL")
         return 1
 
-    if not args.schema_dir.exists():
-        logger.error(f"Schema directory not found: {args.schema_dir}")
+    schema_dir = resolve_project_resource(args.schema_dir, "sqlschema")
+
+    if not schema_dir.exists():
+        logger.error(f"Schema directory not found: {schema_dir}")
         return 1
 
-    sql_files = get_sql_files(args.schema_dir)
+    sql_files = get_sql_files(schema_dir)
     if not sql_files:
-        logger.error(f"No SQL files found in {args.schema_dir}")
+        logger.error(f"No SQL files found in {schema_dir}")
         return 1
 
     logger.info(f"Found {len(sql_files)} SQL files:")

@@ -111,7 +111,7 @@ Then just start asking questions.
 
 ```bash
 sawa daily          # Run after market close -- prices, news, technical indicators
-sawa weekly         # Economy data, corporate actions
+sawa weekly         # Economy data, corporate actions, stock character classification
 sawa quarterly      # Fundamentals (balance sheets, income, cash flow)
 ```
 
@@ -152,7 +152,8 @@ sawa coldstart --skip-downloads            # Load existing CSV files only
 # Incremental updates
 sawa daily                                 # Prices, news, technical indicators
 sawa daily --from-date 2024-01-01          # Force update from specific date
-sawa weekly                                # Economy, corporate actions
+sawa weekly                                # Economy, corporate actions, stock character classification
+sawa weekly --skip-character               # Skip stock character classification
 sawa quarterly                             # Fundamentals
 
 # Intraday streaming

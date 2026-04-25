@@ -47,6 +47,10 @@ sawa = "sawa.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["sawa"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"sqlschema" = "sawa/sqlschema"
+"nasdaq1000_symbols.txt" = "sawa/nasdaq1000_symbols.txt"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

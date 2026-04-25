@@ -87,7 +87,8 @@ def load_state() -> str | None:
     if STATE_FILE.exists():
         lines = STATE_FILE.read_text().strip().split("\n")
         if lines:
-            logger.info(f"Found state file: last ticker={lines[0]}, written {lines[4] if len(lines) > 4 else '?'}")
+            written = lines[4] if len(lines) > 4 else "?"
+            logger.info(f"Found state file: last ticker={lines[0]}, written {written}")
             return lines[0]
     return None
 
@@ -129,6 +130,16 @@ def infer_timing(earnings_dt) -> str | None:
         return None
 
 
+def float_or_none(value) -> float | None:
+    """Convert a yfinance cell to float, treating NaN-like values as missing."""
+    try:
+        if value != value:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_earnings(ticker: str) -> list[dict] | None:
     """Fetch earnings dates from yfinance for a single ticker."""
     try:
@@ -143,14 +154,16 @@ def fetch_earnings(ticker: str) -> list[dict] | None:
             if report_date is None:
                 continue
 
-            records.append({
-                "ticker": ticker,
-                "report_date": report_date,
-                "timing": infer_timing(dt_idx),
-                "eps_estimate": None if (hasattr(row["EPS Estimate"], "__class__") and row["EPS Estimate"] != row["EPS Estimate"]) else float(row["EPS Estimate"]),
-                "eps_actual": None if (hasattr(row["Reported EPS"], "__class__") and row["Reported EPS"] != row["Reported EPS"]) else float(row["Reported EPS"]),
-                "surprise_pct": None if (hasattr(row["Surprise(%)"], "__class__") and row["Surprise(%)"] != row["Surprise(%)"]) else float(row["Surprise(%)"]),
-            })
+            records.append(
+                {
+                    "ticker": ticker,
+                    "report_date": report_date,
+                    "timing": infer_timing(dt_idx),
+                    "eps_estimate": float_or_none(row["EPS Estimate"]),
+                    "eps_actual": float_or_none(row["Reported EPS"]),
+                    "surprise_pct": float_or_none(row["Surprise(%)"]),
+                }
+            )
         return records
     except Exception as e:
         logger.debug(f"  {ticker}: {e}")
@@ -163,8 +176,18 @@ def upsert_earnings(conn: psycopg.Connection, records: list[dict]) -> int:
         return 0
 
     sql = """
-        INSERT INTO earnings (ticker, report_date, timing, eps_estimate, eps_actual, surprise_pct, updated_at)
-        VALUES (%(ticker)s, %(report_date)s, %(timing)s, %(eps_estimate)s, %(eps_actual)s, %(surprise_pct)s, NOW())
+        INSERT INTO earnings (
+            ticker, report_date, timing, eps_estimate, eps_actual, surprise_pct, updated_at
+        )
+        VALUES (
+            %(ticker)s,
+            %(report_date)s,
+            %(timing)s,
+            %(eps_estimate)s,
+            %(eps_actual)s,
+            %(surprise_pct)s,
+            NOW()
+        )
         ON CONFLICT (ticker, report_date) DO UPDATE SET
             timing = COALESCE(EXCLUDED.timing, earnings.timing),
             eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
@@ -259,8 +282,15 @@ def run(
 
             if count > 0:
                 mcap_f = float(mcap) if mcap else 0
-                mcap_str = f"${mcap_f/1e9:.1f}B" if mcap_f > 1e9 else f"${mcap_f/1e6:.0f}M" if mcap_f else "N/A"
-                logger.debug(f"  [{start_idx + i}/{total}] {ticker} ({mcap_str}): {count} earnings")
+                if mcap_f > 1e9:
+                    mcap_str = f"${mcap_f / 1e9:.1f}B"
+                elif mcap_f:
+                    mcap_str = f"${mcap_f / 1e6:.0f}M"
+                else:
+                    mcap_str = "N/A"
+                logger.debug(
+                    f"  [{start_idx + i}/{total}] {ticker} ({mcap_str}): {count} earnings"
+                )
 
         processed += 1
 
@@ -322,8 +352,18 @@ def main():
     parser.add_argument("--resume", type=str, metavar="TICKER", help="Resume after this ticker")
     parser.add_argument("--auto-resume", action="store_true", help="Auto-resume from state file")
     parser.add_argument("--dry-run", action="store_true", help="Preview without DB writes")
-    parser.add_argument("--min-delay", type=float, default=DEFAULT_MIN_DELAY, help=f"Min delay between requests (default: {DEFAULT_MIN_DELAY}s)")
-    parser.add_argument("--max-delay", type=float, default=DEFAULT_MAX_DELAY, help=f"Max delay between requests (default: {DEFAULT_MAX_DELAY}s)")
+    parser.add_argument(
+        "--min-delay",
+        type=float,
+        default=DEFAULT_MIN_DELAY,
+        help=f"Min delay between requests (default: {DEFAULT_MIN_DELAY}s)",
+    )
+    parser.add_argument(
+        "--max-delay",
+        type=float,
+        default=DEFAULT_MAX_DELAY,
+        help=f"Max delay between requests (default: {DEFAULT_MAX_DELAY}s)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     args = parser.parse_args()
 

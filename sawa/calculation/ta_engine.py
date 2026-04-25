@@ -212,7 +212,7 @@ def calculate_indicators_for_ticker(
 
     # Volatility
     bb_upper, bb_middle, bb_lower = talib.BBANDS(
-        close_prices, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+        close_prices, timeperiod=20, nbdevup=2, nbdevdn=2, matype=talib.MA_Type.SMA
     )
     atr_14 = talib.ATR(high_prices, low_prices, close_prices, timeperiod=14)
 

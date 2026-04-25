@@ -59,7 +59,14 @@ def _process_ticker(ticker: str) -> dict[str, Any]:
                 return {"ticker": ticker, "classified": False, "error": "no prices", "time": 0}
 
             prices = [
-                {"date": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
+                {
+                    "date": r[0],
+                    "open": r[1],
+                    "high": r[2],
+                    "low": r[3],
+                    "close": r[4],
+                    "volume": r[5],
+                }
                 for r in rows
             ]
 
@@ -102,7 +109,14 @@ def _fetch_benchmark_prices(db_url: str) -> dict[str, list[dict[str, Any]]]:
                     (sym,),
                 )
                 benchmarks[sym] = [
-                    {"date": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
+                    {
+                        "date": r[0],
+                        "open": r[1],
+                        "high": r[2],
+                        "low": r[3],
+                        "close": r[4],
+                        "volume": r[5],
+                    }
                     for r in cur.fetchall()
                 ]
     return benchmarks
@@ -166,26 +180,32 @@ def run_stock_character_batch(
             for i, res in enumerate(pool.imap_unordered(_process_ticker, all_tickers)):
                 results.append(cast(dict[str, Any], res))
                 if (i + 1) % 200 == 0:
-                    classified = sum(1 for r in results if r.get("classified"))
-                    log.info(f"  Progress: {i + 1}/{len(all_tickers)} ({classified} classified)")
+                    classified_count = sum(1 for r in results if r.get("classified"))
+                    log.info(
+                        f"  Progress: {i + 1}/{len(all_tickers)} "
+                        f"({classified_count} classified)"
+                    )
     else:
         _init_worker(database_url, benchmark_prices, run_date)
         for i, ticker in enumerate(all_tickers):
             results.append(_process_ticker(ticker))
             if (i + 1) % 200 == 0:
-                classified = sum(1 for r in results if r.get("classified"))
-                log.info(f"  Progress: {i + 1}/{len(all_tickers)} ({classified} classified)")
+                classified_count = sum(1 for r in results if r.get("classified"))
+                log.info(
+                    f"  Progress: {i + 1}/{len(all_tickers)} "
+                    f"({classified_count} classified)"
+                )
 
     elapsed = time.time() - start_time
 
     # Stats
-    classified = [r for r in results if r.get("classified")]
+    classified_results = [r for r in results if r.get("classified")]
     errors = [r for r in results if r.get("error")]
     unclassifiable = [r for r in results if not r.get("classified") and not r.get("error")]
 
     # Character breakdown
     char_counts: dict[str, int] = {}
-    for r in classified:
+    for r in classified_results:
         c = r.get("character", "unknown")
         char_counts[c] = char_counts.get(c, 0) + 1
 
@@ -193,24 +213,30 @@ def run_stock_character_batch(
     log.info("BATCH COMPLETE")
     log.info("=" * 60)
     log.info(f"  Total tickers:    {len(all_tickers)}")
-    log.info(f"  Classified:       {len(classified)} ({100*len(classified)/len(all_tickers):.1f}%)")
-    log.info(f"  Unclassifiable:   {len(unclassifiable)} ({100*len(unclassifiable)/len(all_tickers):.1f}%)")
+    log.info(
+        f"  Classified:       {len(classified_results)} "
+        f"({100 * len(classified_results) / len(all_tickers):.1f}%)"
+    )
+    log.info(
+        f"  Unclassifiable:   {len(unclassifiable)} "
+        f"({100 * len(unclassifiable) / len(all_tickers):.1f}%)"
+    )
     log.info(f"  Errors:           {len(errors)}")
     log.info(f"  Time:             {elapsed:.1f}s ({elapsed/60:.1f} min)")
     log.info(f"  Rate:             {len(all_tickers)/elapsed:.1f} tickers/sec")
-    log.info(f"\n  Character breakdown:")
+    log.info("\n  Character breakdown:")
     for char, count in sorted(char_counts.items()):
         log.info(f"    {char:15s} {count:5d}")
 
     if errors:
-        log.warning(f"\n  First 5 errors:")
+        log.warning("\n  First 5 errors:")
         for err in errors[:5]:
             log.warning(f"    {err['ticker']}: {err.get('error', 'unknown')}")
 
     return {
         "success": True,
         "total": len(all_tickers),
-        "classified": len(classified),
+        "classified": len(classified_results),
         "unclassifiable": len(unclassifiable),
         "errors": len(errors),
         "elapsed_seconds": round(elapsed, 1),

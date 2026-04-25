@@ -195,7 +195,7 @@ def _cluster_levels(
             "label": "cluster",
         })
 
-    cluster_levels.sort(key=lambda x: x["strength"], reverse=True)
+    cluster_levels.sort(key=lambda x: float(x["strength"] or 0), reverse=True)
     return cluster_levels[:max_levels]
 
 

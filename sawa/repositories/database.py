@@ -631,6 +631,25 @@ class DatabaseEconomyRepository(EconomyRepository):
     and labor_market tables.
     """
 
+    INFLATION_COLUMNS: tuple[tuple[str, str, str | None], ...] = (
+        ("cpi", "cpi", "cpi_year_over_year"),
+        ("cpi_core", "cpi_core", None),
+        ("cpi_year_over_year", "cpi_year_over_year", None),
+        ("pce", "pce", None),
+        ("pce_core", "pce_core", None),
+        ("pce_spending", "pce_spending", None),
+    )
+    INFLATION_ALIASES = {
+        "cpi_yoy": "cpi_year_over_year",
+        "inflation_yoy": "cpi_year_over_year",
+    }
+    LABOR_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("unemployment_rate", "unemployment_rate"),
+        ("labor_force_participation_rate", "labor_force_participation_rate"),
+        ("avg_hourly_earnings", "avg_hourly_earnings"),
+        ("job_openings", "job_openings"),
+    )
+
     def __init__(self, database_url: str) -> None:
         """Initialize with database URL."""
         self.database_url = database_url
@@ -680,14 +699,14 @@ class DatabaseEconomyRepository(EconomyRepository):
         """Convert database row to TreasuryYield domain model."""
         return TreasuryYield(
             date=row["date"],
-            yield_1mo=_to_decimal(row.get("yield_1mo")),
-            yield_3mo=_to_decimal(row.get("yield_3mo")),
-            yield_6mo=_to_decimal(row.get("yield_6mo")),
-            yield_1yr=_to_decimal(row.get("yield_1yr")),
-            yield_2yr=_to_decimal(row.get("yield_2yr")),
-            yield_5yr=_to_decimal(row.get("yield_5yr")),
-            yield_10yr=_to_decimal(row.get("yield_10yr")),
-            yield_30yr=_to_decimal(row.get("yield_30yr")),
+            yield_1mo=_to_decimal(row.get("yield_1_month")),
+            yield_3mo=_to_decimal(row.get("yield_3_month")),
+            yield_6mo=_to_decimal(row.get("yield_6_month")),
+            yield_1yr=_to_decimal(row.get("yield_1_year")),
+            yield_2yr=_to_decimal(row.get("yield_2_year")),
+            yield_5yr=_to_decimal(row.get("yield_5_year")),
+            yield_10yr=_to_decimal(row.get("yield_10_year")),
+            yield_30yr=_to_decimal(row.get("yield_30_year")),
         )
 
     async def get_inflation(
@@ -696,26 +715,75 @@ class DatabaseEconomyRepository(EconomyRepository):
         end_date: date,
         indicator: str | None = None,
     ) -> list[InflationData]:
-        """Get inflation data.
-
-        DEPRECATED: This method is not implemented. The inflation table uses
-        a wide schema (separate columns per indicator) but this method expects
-        a narrow schema (indicator column). Use direct SQL queries instead:
-
-            SELECT date, cpi, cpi_core, cpi_year_over_year, pce, pce_core
-            FROM inflation WHERE date BETWEEN %s AND %s
-
-        See mcp_server/tools/economy.py for working examples.
-
-        Raises:
-            NotImplementedError: Always raised - method not compatible with schema
-        """
-        raise NotImplementedError(
-            "get_inflation() is not implemented. The inflation table uses a wide "
-            "schema with separate columns (cpi, pce, etc.) not a narrow schema "
-            "with an 'indicator' column. Use direct SQL queries instead. "
-            "See mcp_server/tools/economy.py for examples."
+        """Get inflation data from the wide inflation table as indicator rows."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._get_inflation_sync,
+            start_date,
+            end_date,
+            indicator,
         )
+
+    def _get_inflation_sync(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None = None,
+    ) -> list[InflationData]:
+        """Synchronous implementation of get_inflation."""
+        query = """
+            SELECT date, cpi, cpi_core, cpi_year_over_year, pce, pce_core, pce_spending
+            FROM inflation
+            WHERE date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (start_date, end_date))
+                rows = cur.fetchall()
+
+        return [
+            item
+            for row in rows
+            for item in self._row_to_inflation(row, indicator)
+        ]
+
+    def _row_to_inflation(
+        self,
+        row: dict[str, Any],
+        indicator: str | None = None,
+    ) -> list[InflationData]:
+        """Convert a wide inflation row to narrow InflationData entries."""
+        requested = self._normalize_inflation_indicator(indicator)
+        items: list[InflationData] = []
+
+        for column, indicator_name, yoy_column in self.INFLATION_COLUMNS:
+            if requested is not None and requested != indicator_name:
+                continue
+
+            value = _to_decimal(row.get(column))
+            if value is None:
+                continue
+
+            change_yoy = _to_decimal(row.get(yoy_column)) if yoy_column else None
+            items.append(
+                InflationData(
+                    date=row["date"],
+                    indicator=indicator_name,
+                    value=value,
+                    change_yoy=change_yoy,
+                )
+            )
+
+        return items
+
+    def _normalize_inflation_indicator(self, indicator: str | None) -> str | None:
+        """Normalize inflation indicator filters to repository indicator names."""
+        if indicator is None:
+            return None
+        normalized = indicator.strip().lower().replace("-", "_")
+        return self.INFLATION_ALIASES.get(normalized, normalized)
 
     async def get_labor_market(
         self,
@@ -723,27 +791,71 @@ class DatabaseEconomyRepository(EconomyRepository):
         end_date: date,
         indicator: str | None = None,
     ) -> list[LaborMarketData]:
-        """Get labor market data.
-
-        DEPRECATED: This method is not implemented. The labor_market table uses
-        a wide schema (separate columns per indicator) but this method expects
-        a narrow schema (indicator column). Use direct SQL queries instead:
-
-            SELECT date, unemployment_rate, labor_force_participation_rate,
-                   avg_hourly_earnings, job_openings
-            FROM labor_market WHERE date BETWEEN %s AND %s
-
-        See mcp_server/tools/economy.py for working examples.
-
-        Raises:
-            NotImplementedError: Always raised - method not compatible with schema
-        """
-        raise NotImplementedError(
-            "get_labor_market() is not implemented. The labor_market table uses a wide "
-            "schema with separate columns (unemployment_rate, job_openings, etc.) not a "
-            "narrow schema with an 'indicator' column. Use direct SQL queries instead. "
-            "See mcp_server/tools/economy.py for examples."
+        """Get labor market data from the wide labor table as indicator rows."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._get_labor_market_sync,
+            start_date,
+            end_date,
+            indicator,
         )
+
+    def _get_labor_market_sync(
+        self,
+        start_date: date,
+        end_date: date,
+        indicator: str | None = None,
+    ) -> list[LaborMarketData]:
+        """Synchronous implementation of get_labor_market."""
+        query = """
+            SELECT
+                date,
+                unemployment_rate,
+                labor_force_participation_rate,
+                avg_hourly_earnings,
+                job_openings
+            FROM labor_market
+            WHERE date BETWEEN %s AND %s
+            ORDER BY date
+        """
+        with _get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (start_date, end_date))
+                rows = cur.fetchall()
+
+        return [
+            item
+            for row in rows
+            for item in self._row_to_labor_market(row, indicator)
+        ]
+
+    def _row_to_labor_market(
+        self,
+        row: dict[str, Any],
+        indicator: str | None = None,
+    ) -> list[LaborMarketData]:
+        """Convert a wide labor_market row to narrow LaborMarketData entries."""
+        requested = indicator.strip().lower().replace("-", "_") if indicator else None
+        items: list[LaborMarketData] = []
+
+        for column, indicator_name in self.LABOR_COLUMNS:
+            if requested is not None and requested != indicator_name:
+                continue
+
+            value = _to_decimal(row.get(column))
+            if value is None:
+                continue
+
+            items.append(
+                LaborMarketData(
+                    date=row["date"],
+                    indicator=indicator_name,
+                    value=value,
+                )
+            )
+
+        return items
 
 
 class DatabaseNewsRepository(NewsRepository):

@@ -2,7 +2,7 @@
 
 import os
 from datetime import date
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg import sql
@@ -90,7 +90,7 @@ def get_last_date(conn, table: str, date_column: str = "date") -> date | None:
         cur.execute(query)
         result = cur.fetchone()
         if result and result[0]:
-            return result[0]
+            return cast(date, result[0])
     return None
 
 

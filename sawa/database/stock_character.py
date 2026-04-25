@@ -61,7 +61,8 @@ def load_classification(conn, classification: CharacterClassification, log=None)
     except Exception as e:
         conn.rollback()
         log.warning(
-            f"Insert failed for classification {classification.ticker}/{classification.run_date}: {e}"
+            f"Insert failed for classification "
+            f"{classification.ticker}/{classification.run_date}: {e}"
         )
         return 0
 
@@ -423,7 +424,10 @@ def get_prices_with_benchmarks(
     Returns:
         Dict mapping ticker symbol to list of price dicts:
         {
-            ticker: [{"date": ..., "open": ..., "high": ..., "low": ..., "close": ..., "volume": ...}, ...],
+            ticker: [
+                {"date": ..., "open": ..., "high": ..., "low": ..., "close": ..., "volume": ...},
+                ...
+            ],
             "SPY": [...],
             "GLD": [...],
             "TLT": [...],

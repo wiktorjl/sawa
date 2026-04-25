@@ -85,12 +85,12 @@ class PolygonWebSocketClient:
             # Wait for connection confirmation
             response = await self.websocket.recv()
             data = json.loads(response)
-            self.logger.debug(f"Auth response: {response}")
+            self.logger.debug(f"Auth response: {response!r}")
 
             # Wait for auth_success
             response = await self.websocket.recv()
             data = json.loads(response)
-            self.logger.debug(f"Auth status: {response}")
+            self.logger.debug(f"Auth status: {response!r}")
 
             # Check for auth success
             if isinstance(data, list):
@@ -119,7 +119,7 @@ class PolygonWebSocketClient:
 
         # Wait for subscription confirmation
         response = await self.websocket.recv()
-        self.logger.debug(f"Subscription response: {response}")
+        self.logger.debug(f"Subscription response: {response!r}")
 
         # Check for errors (e.g., real-time access denied)
         data = json.loads(response)

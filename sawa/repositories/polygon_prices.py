@@ -20,7 +20,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from sawa.domain.exceptions import ProviderError
 from sawa.domain.models import StockPrice
@@ -132,7 +132,7 @@ class PolygonPriceRepository(StockPriceRepository):
         cache_key = f"{self.provider_name}:prices:{ticker}:{start_date}:{end_date}"
         cached = self.cache.get(cache_key)
         if cached is not None:
-            return cached
+            return cast(list[StockPrice], cached)
 
         # Fetch from appropriate source
         prices = await self._fetch_prices(ticker, start_date, end_date)
@@ -249,10 +249,13 @@ class PolygonPriceRepository(StockPriceRepository):
     ) -> list[StockPrice]:
         """Fetch S3 data for a specific day."""
         loop = asyncio.get_event_loop()
+        s3_client = self.s3_client
+        if s3_client is None:
+            raise ProviderError("S3 client not configured", self.provider_name)
 
         records = await loop.run_in_executor(
             None,
-            lambda: self.s3_client.download_and_parse(target_date, tickers),
+            lambda: s3_client.download_and_parse(target_date, tickers),
         )
 
         return [self._convert_s3_record(r, target_date) for r in records if r.get("symbol")]
