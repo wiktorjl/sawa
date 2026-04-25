@@ -10,9 +10,10 @@ import logging
 import math
 from datetime import date
 from decimal import Decimal
+from typing import cast
 
 import numpy as np
-from statsmodels.api import OLS, add_constant
+from statsmodels.api import OLS, add_constant  # type: ignore[import-not-found,import-untyped]
 
 from sawa.calculation.stock_character import _extract_ohlcv_arrays, _to_decimal
 from sawa.calculation.stock_character_config import (
@@ -60,7 +61,7 @@ def _compute_atr(
     atr = np.full_like(tr, np.nan)
     cumsum = np.nancumsum(tr)
     atr[period - 1 :] = (cumsum[period - 1 :] - np.concatenate([[0], cumsum[:-period]])) / period
-    return atr
+    return cast(np.ndarray, atr)
 
 
 def _rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
@@ -130,7 +131,12 @@ def _align_returns(
         if bc is None:
             prev_stock = sc
             continue
-        if prev_stock is not None and prev_bench is not None and prev_stock != 0 and prev_bench != 0:
+        if (
+            prev_stock is not None
+            and prev_bench is not None
+            and prev_stock != 0
+            and prev_bench != 0
+        ):
             aligned_stock.append(sc / prev_stock - 1.0)
             aligned_bench.append(bc / prev_bench - 1.0)
         prev_stock = sc
@@ -217,20 +223,20 @@ def _compute_volume_profile(
     hvn_threshold = np.percentile(normalized[normalized > 0], HVN_VOLUME_PERCENTILE)
     lvn_threshold = np.percentile(normalized[normalized > 0], LVN_VOLUME_PERCENTILE)
 
-    hvn_levels = tuple(
+    hvn_candidates = tuple(
         _to_decimal(float(bucket_midpoints[i]), 2)
         for i in range(n_buckets)
         if normalized[i] >= hvn_threshold
     )
-    lvn_levels = tuple(
+    lvn_candidates = tuple(
         _to_decimal(float(bucket_midpoints[i]), 2)
         for i in range(n_buckets)
         if 0 < normalized[i] <= lvn_threshold
     )
 
     # Filter out Nones (shouldn't happen but be safe)
-    hvn_levels = tuple(v for v in hvn_levels if v is not None)
-    lvn_levels = tuple(v for v in lvn_levels if v is not None)
+    hvn_levels: tuple[Decimal, ...] = tuple(v for v in hvn_candidates if v is not None)
+    lvn_levels: tuple[Decimal, ...] = tuple(v for v in lvn_candidates if v is not None)
 
     return hvn_levels, lvn_levels
 
@@ -281,9 +287,9 @@ def _compute_ols_regression(
     if not np.all(np.isfinite(log_prices)):
         return nan_result  # type: ignore[return-value]
 
-    X = add_constant(np.arange(len(log_prices)))
+    design_matrix = add_constant(np.arange(len(log_prices)))
     try:
-        model = OLS(log_prices, X).fit()
+        model = OLS(log_prices, design_matrix).fit()
     except Exception:
         logger.debug("OLS regression failed", exc_info=True)
         return nan_result  # type: ignore[return-value]

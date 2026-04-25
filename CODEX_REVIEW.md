@@ -20,9 +20,47 @@ Commands run from `/home/user/code/sawa`:
 - `.venv/bin/mypy sawa/`: failed with 24 errors across 12 files.
 - `.venv/bin/mypy mcp_server/`: failed with 19 errors across 7 files.
 
+## Post-Review Fix Status
+
+Fixed on 2026-04-24 in `8f75c9f` (`fix: align refresh ranges and screener filters`):
+
+- Finding 1: Added `scipy` and `statsmodels` to main runtime dependencies.
+- Finding 4: Replaced screener filter drift with a `FilterSpec` registry, generated filter
+  selects/output aliases from that registry, added sort alias handling, and covered previously
+  advertised filters with tests.
+
+Fixed in the current working tree:
+
+- Finding 2: Added wheel package data for `sqlschema/` and `nasdaq1000_symbols.txt`, plus runtime
+  fallback resolution for source checkouts and installed packages.
+- Finding 3: Implemented database inflation and labor-market repository methods against the current
+  wide economy tables, and fixed treasury yield column mapping.
+- Finding 12: Added `coldstart --confirm-drop` and threaded it through destructive drop paths.
+- Finding 13: Cleaned the current ruff and mypy baseline.
+- Finding 15: Updated CLI help and README freshness docs to show the default stock-character work
+  and `--skip-character`.
+
+Current verification after fixes:
+
+- `.venv/bin/ruff check .`: passed.
+- `.venv/bin/pytest -q`: passed, `377 passed in 0.90s`.
+- `.venv/bin/mypy sawa/`: passed.
+- `.venv/bin/mypy mcp_server/`: passed.
+- `.venv/bin/pyproject-build --wheel --outdir /tmp/sawa-wheel-test`: passed; inspected wheel
+  contents include `sawa/sqlschema/` and `sawa/nasdaq1000_symbols.txt`.
+
+Additional fixes landed with the same commit:
+
+- Daily updates now refresh `mv_52week_extremes` when it lags `stock_prices`.
+- Weekly economy updates now calculate start dates per economy table instead of using treasury
+  yields as the shared anchor for monthly series.
+- Weekly market-internals updates now use their own last-loaded date.
+- Added focused tests for daily 52-week refresh behavior, weekly economy ranges, and screener
+  filter/query construction.
+
 ## High Severity
 
-### 1. Clean installs can miss runtime dependencies
+### 1. [Fixed] Clean installs can miss runtime dependencies
 
 Refs: [pyproject.toml](pyproject.toml:12), [sawa/weekly.py](sawa/weekly.py:269), [sawa/calculation/stock_character.py](sawa/calculation/stock_character.py:17), [sawa/calculation/stock_character_scorecard.py](sawa/calculation/stock_character_scorecard.py:14)
 
@@ -32,7 +70,10 @@ Impact: a clean install can fail during normal CLI use even though tests pass in
 
 Suggested fix: add these as runtime dependencies, or make stock-character an optional extra and guard the weekly flow with a clear opt-in/error path.
 
-### 2. Wheels omit files required by runtime commands
+Status: Fixed in `8f75c9f` by adding `scipy>=1.10.0` and `statsmodels>=0.14.0` to
+`pyproject.toml`.
+
+### 2. [Fixed] Wheels omit files required by runtime commands
 
 Refs: [pyproject.toml](pyproject.toml:45), [sawa/cli.py](sawa/cli.py:816), [sawa/database/schema.py](sawa/database/schema.py:177), [sawa/utils/symbols.py](sawa/utils/symbols.py:124)
 
@@ -42,7 +83,11 @@ Impact: installed wheels run outside the source checkout can fail for `coldstart
 
 Suggested fix: move required assets under the package, include them as package data, resolve them with `importlib.resources`, and add an install-from-wheel smoke test from a temporary working directory.
 
-### 3. The economy repository exposes methods that always fail
+Status: Fixed in the current working tree. `pyproject.toml` now force-includes `sqlschema/` and
+`nasdaq1000_symbols.txt` under the `sawa` package in wheels, and runtime resource resolution falls
+back to the source checkout for editable installs.
+
+### 3. [Fixed] The economy repository exposes methods that always fail
 
 Refs: [sawa/repositories/factory.py](sawa/repositories/factory.py:221), [sawa/repositories/database.py](sawa/repositories/database.py:693), [sawa/repositories/database.py](sawa/repositories/database.py:713)
 
@@ -52,7 +97,11 @@ Impact: repository consumers get a valid-looking object that fails for normal ec
 
 Suggested fix: align the domain repository contract with the wide economy tables, or remove/split unsupported methods so the factory does not return unusable implementations.
 
-### 4. The MCP screener accepts filters it cannot query
+Status: Fixed in the current working tree. The database economy repository now returns
+`InflationData` and `LaborMarketData` entries by flattening the current wide tables, and treasury
+yield mapping now uses the schema column names.
+
+### 4. [Fixed] The MCP screener accepts filters it cannot query
 
 Refs: [mcp_server/tools/screener.py](mcp_server/tools/screener.py:17), [mcp_server/tools/screener.py](mcp_server/tools/screener.py:270), [mcp_server/tools/screener.py](mcp_server/tools/screener.py:374), [mcp_server/tools/screener.py](mcp_server/tools/screener.py:416)
 
@@ -61,6 +110,10 @@ Refs: [mcp_server/tools/screener.py](mcp_server/tools/screener.py:17), [mcp_serv
 Impact: accepted filters can produce runtime SQL errors, and future filter changes can drift silently.
 
 Suggested fix: replace the separate set and mapper with a single `FilterSpec` registry that defines SQL expression, output alias, sort support, and test coverage for every exposed filter.
+
+Status: Fixed in `8f75c9f`. `mcp_server/tools/screener.py` now uses a single filter registry for
+filter validation, SQL expressions, output aliases, and sort aliases. Tests in
+`tests/tools/test_screener.py` cover the previously missing filters and 52-week snapshot behavior.
 
 ## Medium Severity
 
@@ -134,7 +187,7 @@ Impact: downstream scorecards cannot distinguish "no flags detected" from "flag 
 
 Suggested fix: catch only expected data-shape/numeric exceptions, or return a structured failure status. Let unexpected exceptions propagate to the batch result.
 
-### 12. `coldstart --drop-only` gives an invalid non-interactive remediation
+### 12. [Fixed] `coldstart --drop-only` gives an invalid non-interactive remediation
 
 Refs: [sawa/coldstart.py](sawa/coldstart.py:551), [sawa/cli.py](sawa/cli.py:831)
 
@@ -144,7 +197,10 @@ Impact: automated/CI use is blocked with an instruction that cannot be followed.
 
 Suggested fix: add `--confirm-drop` and pass it into `run_coldstart`, or remove the message and document that destructive drop mode must be interactive.
 
-### 13. Advertised quality gates are currently red
+Status: Fixed in the current working tree. `--confirm-drop` is now defined by the CLI and passed
+through to `run_coldstart` for `--drop-only` and other destructive drop paths.
+
+### 13. [Fixed] Advertised quality gates are currently red
 
 Refs: [pyproject.toml](pyproject.toml:52), [pyproject.toml](pyproject.toml:55)
 
@@ -153,6 +209,9 @@ The repo documents `ruff check .`, `mypy sawa/`, and `mypy mcp_server/`, but all
 Impact: linting and typing cannot protect consistency until the baseline is clean.
 
 Suggested fix: fix or explicitly baseline the current violations, declare missing typing deps, and add the intended quality commands to CI.
+
+Status: Fixed in the current working tree. `.venv/bin/ruff check .`, `.venv/bin/mypy sawa/`, and
+`.venv/bin/mypy mcp_server/` all pass.
 
 ## Low Severity
 
@@ -164,7 +223,7 @@ Package metadata says `0.3.0`, while the public module reports `__version__ = "0
 
 Suggested fix: derive `__version__` from `importlib.metadata.version("sawa")`, or add a test that enforces synchronization.
 
-### 15. Weekly documentation omits default stock-character work
+### 15. [Fixed] Weekly documentation omits default stock-character work
 
 Refs: [README.md](README.md:114), [sawa/cli.py](sawa/cli.py:943), [sawa/weekly.py](sawa/weekly.py:269)
 
@@ -173,6 +232,9 @@ Docs and CLI help describe `sawa weekly` as economy/news/corporate-actions fresh
 Impact: users can get an expensive extra step and extra dependency surface unexpectedly.
 
 Suggested fix: document `--skip-character` prominently or make stock-character classification opt-in.
+
+Status: Fixed in the current working tree. CLI help and README examples now describe weekly stock
+character classification and show `weekly --skip-character`.
 
 ### 16. MCP packaging relies on undeclared or unconstrained dependencies
 

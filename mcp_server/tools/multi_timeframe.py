@@ -235,7 +235,7 @@ def calculate_relative_strength(
     bench_norm = [p / first_bench * 100 for p in bench_prices]
 
     # RS line = ticker_normalized / benchmark_normalized * 100
-    rs_line = []
+    rs_line: list[float | None] = []
     for i in range(len(ticker_norm)):
         if bench_norm[i] > 0:
             rs_line.append(round(ticker_norm[i] / bench_norm[i] * 100, 2))
@@ -504,22 +504,25 @@ def _simple_macd(
 
     # Build EMA-fast series
     ema_fast = sum(closes[:fast]) / fast
-    ema_fast_series = [None] * (fast - 1) + [ema_fast]
+    ema_fast_series: list[float | None] = [None] * (fast - 1) + [ema_fast]
     for i in range(fast, len(closes)):
         ema_fast = (closes[i] - ema_fast) * mult_fast + ema_fast
         ema_fast_series.append(ema_fast)
 
     # Build EMA-slow series
     ema_slow = sum(closes[:slow]) / slow
-    ema_slow_series = [None] * (slow - 1) + [ema_slow]
+    ema_slow_series: list[float | None] = [None] * (slow - 1) + [ema_slow]
     for i in range(slow, len(closes)):
         ema_slow = (closes[i] - ema_slow) * mult_slow + ema_slow
         ema_slow_series.append(ema_slow)
 
     # MACD line (valid from index slow-1 onwards)
-    macd_values = []
+    macd_values: list[float] = []
     for i in range(slow - 1, len(closes)):
-        macd_values.append(ema_fast_series[i] - ema_slow_series[i])
+        fast_value = ema_fast_series[i]
+        slow_value = ema_slow_series[i]
+        if fast_value is not None and slow_value is not None:
+            macd_values.append(fast_value - slow_value)
 
     if len(macd_values) < signal_period:
         return None
@@ -635,7 +638,7 @@ def _sample_rs_line(
 ) -> list[dict[str, Any]]:
     """Sample RS line data to keep response size manageable."""
     step = max(1, len(dates) // max_points)
-    sampled = []
+    sampled: list[dict[str, Any]] = []
 
     for i in range(0, len(dates), step):
         if rs_line[i] is not None:

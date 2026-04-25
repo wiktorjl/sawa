@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Recreate v_company_with_indices view with nasdaq5000."""
 import os
+
 import psycopg
 
 VIEW_SQL = """

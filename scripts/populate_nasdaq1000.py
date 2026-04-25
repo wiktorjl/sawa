@@ -43,7 +43,7 @@ def populate_index_constituents(
             if not row:
                 print(f"ERROR: Index '{index_code}' not found in database")
                 print("Run this first:")
-                print(f"  psql $DATABASE_URL -f scripts/add_nasdaq1000_index.sql")
+                print("  psql $DATABASE_URL -f scripts/add_nasdaq1000_index.sql")
                 return (0, 0)
 
             index_id = row[0]
@@ -83,7 +83,7 @@ def populate_index_constituents(
 
             conn.commit()
 
-            print(f"\nResults:")
+            print("\nResults:")
             print(f"  Added: {added} constituents")
             print(f"  Skipped: {skipped} (not in companies table)")
 

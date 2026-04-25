@@ -82,6 +82,7 @@ def cmd_coldstart(args) -> int:
             symbols_file=args.symbols_file,
             drop_tables=not args.no_drop,
             drop_only=drop_only,
+            confirm_drop=args.confirm_drop,
             schema_only=schema_only,
             load_only=load_only,
             skip_downloads=skip_downloads,
@@ -763,7 +764,7 @@ def main() -> int:
 Commands:
   coldstart           Full database setup from scratch
   daily               Daily stock price update
-  weekly              Weekly fundamentals/economy update
+  weekly              Weekly economy/news/corporate actions/character update
   add-symbol          Add new symbols to database
   ta-backfill         Calculate technical indicators for all history
   ta-show             Show technical indicators for a ticker
@@ -832,6 +833,11 @@ Environment Variables:
         "--drop-only",
         action="store_true",
         help="⚠️  Only drop tables and clean data, then exit (requires confirmation)",
+    )
+    cold_parser.add_argument(
+        "--confirm-drop",
+        action="store_true",
+        help="Confirm destructive table drops for non-interactive runs",
     )
     cold_parser.add_argument(
         "--schema-only",
@@ -942,8 +948,11 @@ Environment Variables:
     # Weekly update subcommand
     weekly_parser = subparsers.add_parser(
         "weekly",
-        help="Weekly economy/news/corporate actions update",
-        description="Update frequently-changing data: economy, overviews, news, corporate actions.",
+        help="Weekly economy/news/corporate actions/character update",
+        description=(
+            "Update frequently-changing data: economy, overviews, news, corporate actions, "
+            "and stock character classification."
+        ),
     )
     weekly_parser.add_argument("--output-dir", default="data", help="Output data directory")
     weekly_parser.add_argument("--api-key", help="Polygon API key")
@@ -1223,7 +1232,7 @@ Environment Variables:
         parser.print_help()
         return 1
 
-    return args.func(args)
+    return int(args.func(args))
 
 
 if __name__ == "__main__":

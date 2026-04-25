@@ -11,24 +11,23 @@ baseline and returns flags.
 import logging
 import math
 from datetime import date
-from decimal import Decimal
 
 import numpy as np
 
-from sawa.calculation.stock_character import _to_decimal, _extract_ohlcv_arrays
+from sawa.calculation.stock_character import _extract_ohlcv_arrays, _to_decimal
 from sawa.calculation.stock_character_config import (
-    RECENT_WINDOW_DAYS,
+    COMPRESSION_RATIO,
+    DECORRELATION_STDDEV,
+    EXPANSION_RATIO,
     EXTREMUM_HIGH_PCT,
     EXTREMUM_LOW_PCT,
-    COMPRESSION_RATIO,
-    EXPANSION_RATIO,
-    DECORRELATION_STDDEV,
-    VOLUME_SPIKE_RATIO,
-    VOLUME_DROUGHT_RATIO,
-    SMA_PROXIMITY_PCT,
     HVN_PROXIMITY_PCT,
+    RECENT_WINDOW_DAYS,
     SIGMA_THRESHOLD,
     SMA_ADHERENCE_MIN_RATIO,
+    SMA_PROXIMITY_PCT,
+    VOLUME_DROUGHT_RATIO,
+    VOLUME_SPIKE_RATIO,
 )
 from sawa.domain.stock_character import (
     CharacterBaseline,

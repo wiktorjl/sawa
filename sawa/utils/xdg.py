@@ -13,14 +13,14 @@ Typical paths:
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # Try to import tomllib (Python 3.11+) or tomli
 if sys.version_info >= (3, 11):
     import tomllib
 else:
     try:
-        import tomli as tomllib
+        import tomli as tomllib  # type: ignore[import-not-found,no-redef]
     except ImportError:
         tomllib = None  # type: ignore
 
@@ -179,7 +179,7 @@ def load_toml(path: Path) -> dict[str, Any]:
         )
 
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        return cast(dict[str, Any], tomllib.load(f))
 
 
 def save_toml(path: Path, data: dict[str, Any]) -> None:

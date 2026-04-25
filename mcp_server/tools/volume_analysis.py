@@ -392,7 +392,7 @@ def get_advanced_volume_indicators(
 
     # Calculate CMF (Chaikin Money Flow) - 20-day window
     cmf_period = 20
-    cmf = [None] * n
+    cmf: list[float | None] = [None] * n
     for i in range(cmf_period - 1, n):
         window_mfv_sum = 0.0
         window_vol_sum = 0
@@ -410,7 +410,7 @@ def get_advanced_volume_indicators(
     # Calculate VWAP (cumulative for the period)
     cum_tp_vol = 0.0
     cum_vol = 0
-    vwap = [None] * n
+    vwap: list[float | None] = [None] * n
     for i in range(n):
         typical_price = (highs[i] + lows[i] + closes[i]) / 3
         cum_tp_vol += typical_price * volumes[i]

@@ -5,7 +5,7 @@ Handles bulk insert/upsert and queries for technical_indicators table.
 
 import logging
 from datetime import date
-from typing import Any
+from typing import Any, cast
 
 from psycopg import sql
 
@@ -100,7 +100,7 @@ def get_last_ta_date(conn, ticker: str) -> date | None:
         cur.execute(query, (ticker.upper(),))
         result = cur.fetchone()
         if result and result[0]:
-            return result[0]
+            return cast(date, result[0])
     return None
 
 

@@ -11,7 +11,7 @@ Handles all REST API calls for:
 
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin
 
 import httpx
@@ -103,7 +103,7 @@ class PolygonClient:
         response = self.client.get(url, params=params, timeout=timeout)
         response.raise_for_status()
 
-        data = response.json()
+        data = cast(dict[str, Any], response.json())
         if data.get("status") not in ("OK", "DELAYED"):
             error = data.get("error", data.get("message", "Unknown error"))
             raise ProviderError(f"API error: {error}", provider="polygon")
@@ -213,12 +213,12 @@ class PolygonClient:
                     continue
 
                 response.raise_for_status()
-                data = response.json()
+                data = cast(dict[str, Any], response.json())
 
                 if data.get("status") != "OK":
                     return None
 
-                return data.get("results")
+                return cast(dict[str, Any] | None, data.get("results"))
 
             except httpx.RequestError as e:
                 if attempt < max_retries - 1:
@@ -248,7 +248,7 @@ class PolygonClient:
         """Get financial ratios for ticker."""
         ticker = validate_ticker(ticker)
         data = self.get("ratios", params={"ticker": ticker, "limit": limit})
-        return data.get("results", [])
+        return cast(list[dict[str, Any]], data.get("results", []))
 
     def get_fundamentals(
         self,
@@ -323,7 +323,7 @@ class PolygonClient:
             },
             params={"adjusted": "true", "limit": 50000},
         )
-        return data.get("results", [])
+        return cast(list[dict[str, Any]], data.get("results", []))
 
     def get_news(
         self,
