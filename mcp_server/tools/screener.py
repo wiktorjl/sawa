@@ -5,6 +5,7 @@ fundamental, and technical indicator filters.
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from psycopg import sql
@@ -13,65 +14,234 @@ from ..database import execute_query
 
 logger = logging.getLogger(__name__)
 
-# Valid filter keys for the screener
-VALID_FILTERS = {
+
+@dataclass(frozen=True)
+class FilterSpec:
+    """SQL expression and output alias for a supported screener filter."""
+
+    expression: str
+    alias: str
+
+
+FILTER_SPECS = {
     # Price filters
+    "price": FilterSpec("p.close", "price"),
+    "price_change_1d": FilterSpec(
+        """
+        CASE WHEN p_prev.close > 0
+             THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "change_1d",
+    ),
+    "price_change_1w": FilterSpec(
+        """
+        CASE WHEN p_week.close > 0
+             THEN ROUND(((p.close - p_week.close) / p_week.close * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "change_1w",
+    ),
+    "price_change_1m": FilterSpec(
+        """
+        CASE WHEN p_month.close > 0
+             THEN ROUND(((p.close - p_month.close) / p_month.close * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "change_1m",
+    ),
+    "price_change_ytd": FilterSpec(
+        """
+        CASE WHEN p_ytd.close > 0
+             THEN ROUND(((p.close - p_ytd.close) / p_ytd.close * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "change_ytd",
+    ),
+    "daily_range_pct": FilterSpec(
+        "ROUND(((p.high - p.low) / NULLIF(p.close, 0) * 100)::numeric, 2)",
+        "daily_range_pct",
+    ),
+    "high_52w_pct": FilterSpec(
+        "ROUND(((p.close - e.high_52w) / NULLIF(e.high_52w, 0) * 100)::numeric, 2)",
+        "high_52w_pct",
+    ),
+    "low_52w_pct": FilterSpec(
+        "ROUND(((p.close - e.low_52w) / NULLIF(e.low_52w, 0) * 100)::numeric, 2)",
+        "low_52w_pct",
+    ),
+    # Volume filters
+    "volume": FilterSpec("p.volume", "volume"),
+    "dollar_volume": FilterSpec("ROUND((p.volume * p.close)::numeric, 0)", "dollar_volume"),
+    "volume_ratio": FilterSpec("ti.volume_ratio", "volume_ratio"),
+    # Fundamental filters
+    "market_cap": FilterSpec("c.market_cap", "market_cap"),
+    "pe_ratio": FilterSpec("fr.price_to_earnings", "pe_ratio"),
+    "dividend_yield": FilterSpec("fr.dividend_yield", "dividend_yield"),
+    "roe": FilterSpec("fr.return_on_equity", "roe"),
+    "debt_to_equity": FilterSpec("fr.debt_to_equity", "debt_to_equity"),
+    # Technical indicator filters - SMAs
+    "sma_5": FilterSpec("ti.sma_5", "sma_5"),
+    "sma_10": FilterSpec("ti.sma_10", "sma_10"),
+    "sma_20": FilterSpec("ti.sma_20", "sma_20"),
+    "sma_50": FilterSpec("ti.sma_50", "sma_50"),
+    "sma_100": FilterSpec("ti.sma_100", "sma_100"),
+    "sma_150": FilterSpec("ti.sma_150", "sma_150"),
+    "sma_200": FilterSpec("ti.sma_200", "sma_200"),
+    # Technical indicator filters - EMAs
+    "ema_12": FilterSpec("ti.ema_12", "ema_12"),
+    "ema_26": FilterSpec("ti.ema_26", "ema_26"),
+    "ema_50": FilterSpec("ti.ema_50", "ema_50"),
+    "ema_100": FilterSpec("ti.ema_100", "ema_100"),
+    "ema_200": FilterSpec("ti.ema_200", "ema_200"),
+    # Technical indicator filters - distance from SMA (%)
+    "sma_20_distance_pct": FilterSpec(
+        """
+        CASE WHEN ti.sma_20 > 0
+             THEN ROUND(((p.close - ti.sma_20) / ti.sma_20 * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "sma_20_distance_pct",
+    ),
+    "sma_50_distance_pct": FilterSpec(
+        """
+        CASE WHEN ti.sma_50 > 0
+             THEN ROUND(((p.close - ti.sma_50) / ti.sma_50 * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "sma_50_distance_pct",
+    ),
+    "sma_100_distance_pct": FilterSpec(
+        """
+        CASE WHEN ti.sma_100 > 0
+             THEN ROUND(((p.close - ti.sma_100) / ti.sma_100 * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "sma_100_distance_pct",
+    ),
+    "sma_150_distance_pct": FilterSpec(
+        """
+        CASE WHEN ti.sma_150 > 0
+             THEN ROUND(((p.close - ti.sma_150) / ti.sma_150 * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "sma_150_distance_pct",
+    ),
+    "sma_200_distance_pct": FilterSpec(
+        """
+        CASE WHEN ti.sma_200 > 0
+             THEN ROUND(((p.close - ti.sma_200) / ti.sma_200 * 100)::numeric, 2)
+             ELSE NULL END
+        """,
+        "sma_200_distance_pct",
+    ),
+    # Technical indicator filters - momentum
+    "rsi_14": FilterSpec("ti.rsi_14", "rsi_14"),
+    "rsi_21": FilterSpec("ti.rsi_21", "rsi_21"),
+    "macd_line": FilterSpec("ti.macd_line", "macd_line"),
+    "macd_signal": FilterSpec("ti.macd_signal", "macd_signal"),
+    "macd_histogram": FilterSpec("ti.macd_histogram", "macd_histogram"),
+    # Technical indicator filters - volatility
+    "bb_upper": FilterSpec("ti.bb_upper", "bb_upper"),
+    "bb_middle": FilterSpec("ti.bb_middle", "bb_middle"),
+    "bb_lower": FilterSpec("ti.bb_lower", "bb_lower"),
+    "atr_14": FilterSpec("ti.atr_14", "atr_14"),
+    # Technical indicator filters - volume
+    "obv": FilterSpec("ti.obv", "obv"),
+    "volume_sma_20": FilterSpec("ti.volume_sma_20", "volume_sma_20"),
+}
+
+VALID_FILTERS = set(FILTER_SPECS)
+
+DEFAULT_OUTPUT_FILTERS = (
     "price",
+    "market_cap",
     "price_change_1d",
     "price_change_1w",
     "price_change_1m",
     "price_change_ytd",
-    # Volume filters
     "volume",
     "dollar_volume",
     "volume_ratio",
-    # Fundamental filters
-    "market_cap",
-    # Technical indicator filters - SMAs
-    "sma_5",
-    "sma_10",
-    "sma_20",
-    "sma_50",
-    "sma_100",
-    "sma_150",
-    "sma_200",
-    # Technical indicator filters - EMAs
-    "ema_12",
-    "ema_26",
-    "ema_50",
-    "ema_100",
-    "ema_200",
-    # Technical indicator filters - distance from SMA (%)
-    "sma_20_distance_pct",
+    "rsi_14",
     "sma_50_distance_pct",
-    "sma_100_distance_pct",
     "sma_150_distance_pct",
     "sma_200_distance_pct",
-    # Technical indicator filters - momentum
-    "rsi_14",
-    "rsi_21",
-    "macd_line",
-    "macd_signal",
-    "macd_histogram",
-    # Technical indicator filters - volatility
-    "bb_upper",
-    "bb_middle",
-    "bb_lower",
-    "atr_14",
-    # Technical indicator filters - volume
-    "obv",
-    "volume_sma_20",
-    # Daily range (intraday volatility)
-    "daily_range_pct",
-    # 52-week position
-    "high_52w_pct",  # % from 52-week high (0 = at high, -10 = 10% below)
-    "low_52w_pct",  # % from 52-week low (0 = at low, +10 = 10% above)
-    # Fundamental filters
     "pe_ratio",
     "dividend_yield",
     "roe",
     "debt_to_equity",
-}
+)
+
+
+def _build_filter_selects(filter_specs: list[FilterSpec] | None = None) -> sql.Composable:
+    """Build base_data SELECT expressions for every supported filter."""
+    specs = filter_specs or list(FILTER_SPECS.values())
+    return sql.SQL(",\n                ").join(
+        sql.SQL("{} AS {}").format(
+            sql.SQL(spec.expression.strip()),
+            sql.Identifier(spec.alias),
+        )
+        for spec in specs
+    )
+
+
+def _build_output_selects(filter_specs: list[FilterSpec] | None = None) -> sql.Composable:
+    """Build final output columns from filter aliases, preserving registry order."""
+    specs = filter_specs or list(FILTER_SPECS.values())
+    seen: set[str] = set()
+    columns: list[sql.Composable] = []
+    for spec in specs:
+        if spec.alias in seen:
+            continue
+        seen.add(spec.alias)
+        columns.append(sql.Identifier(spec.alias))
+    return sql.SQL(",\n            ").join(columns)
+
+
+def _get_sort_alias(sort_by: str) -> str:
+    """Resolve accepted sort names to base_data output aliases."""
+    sort_columns = {
+        "ticker": "ticker",
+        "name": "name",
+        "sector": "sector",
+    }
+    for filter_name, spec in FILTER_SPECS.items():
+        sort_columns[filter_name] = spec.alias
+        sort_columns[spec.alias] = spec.alias
+    return sort_columns.get(sort_by, "market_cap")
+
+
+def _get_required_filter_specs(
+    filters: dict[str, list[float | None]],
+    sort_by: str,
+) -> list[FilterSpec]:
+    """Resolve the filter expressions needed by output, predicates, and sorting."""
+    required_aliases = {FILTER_SPECS[name].alias for name in DEFAULT_OUTPUT_FILTERS}
+
+    for filter_name in filters:
+        spec = FILTER_SPECS.get(filter_name)
+        if spec is not None:
+            required_aliases.add(spec.alias)
+
+    sort_alias = _get_sort_alias(sort_by)
+    if sort_alias not in {"ticker", "name", "sector"}:
+        required_aliases.add(sort_alias)
+
+    seen: set[str] = set()
+    required_specs: list[FilterSpec] = []
+    for spec in FILTER_SPECS.values():
+        if spec.alias not in required_aliases or spec.alias in seen:
+            continue
+        seen.add(spec.alias)
+        required_specs.append(spec)
+
+    return required_specs
+
+
+def _has_expression_reference(filter_specs: list[FilterSpec], token: str) -> bool:
+    """Return whether any selected expression references a table alias."""
+    return any(token in spec.expression for spec in filter_specs)
 
 
 def screen_stocks(
@@ -156,7 +326,8 @@ def screen_stocks(
 
     filter_idx = 0
     for filter_name, bounds in filters.items():
-        if filter_name not in VALID_FILTERS:
+        filter_spec = FILTER_SPECS.get(filter_name)
+        if filter_spec is None:
             logger.warning(f"Unknown filter: {filter_name}, skipping")
             continue
 
@@ -166,9 +337,7 @@ def screen_stocks(
 
         min_val, max_val = bounds
 
-        # Determine the column/expression for this filter
-        col_expr = _get_filter_expression(filter_name)
-        col_ident = sql.Identifier(col_expr)
+        col_ident = sql.Identifier(filter_spec.alias)
 
         # Build condition using safe sql composition
         if min_val is not None and max_val is not None:
@@ -203,34 +372,47 @@ def screen_stocks(
         sql.SQL(" AND ").join(where_conditions) if where_conditions else sql.SQL("1=1")
     )
 
-    # Validate sort_by
-    valid_sort_columns = {
-        "market_cap",
-        "price",
-        "volume",
-        "dollar_volume",
-        "volume_ratio",
-        "change_1d",
-        "change_1w",
-        "change_1m",
-        "change_ytd",
-        "rsi_14",
-        "pe_ratio",
-        "dividend_yield",
-        "roe",
-        "debt_to_equity",
-        "ticker",
-        "name",
-    }
-    if sort_by not in valid_sort_columns:
-        sort_by = "market_cap"
-
+    sort_alias = _get_sort_alias(sort_by)
     sort_dir = sql.SQL("DESC") if sort_order == "desc" else sql.SQL("ASC")
+    required_specs = _get_required_filter_specs(filters, sort_by)
+    filter_selects = _build_filter_selects(required_specs)
+    output_selects = _build_output_selects(required_specs)
+
+    technical_join = sql.SQL("")
+    if _has_expression_reference(required_specs, "ti."):
+        technical_join = sql.SQL(
+            "LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = dr.latest_ta"
+        )
+
+    fundamentals_cte = sql.SQL("")
+    fundamentals_join = sql.SQL("")
+    if _has_expression_reference(required_specs, "fr."):
+        fundamentals_cte = sql.SQL("""
+        latest_ratios AS (
+            SELECT DISTINCT ON (ticker)
+                ticker,
+                price_to_earnings,
+                dividend_yield,
+                return_on_equity,
+                debt_to_equity
+                FROM financial_ratios
+            ORDER BY ticker, date DESC
+        ),
+        """)
+        fundamentals_join = sql.SQL("LEFT JOIN latest_ratios fr ON fr.ticker = c.ticker")
+
+    extremes_join = sql.SQL("")
+    if _has_expression_reference(required_specs, "e."):
+        extremes_join = sql.SQL(
+            "LEFT JOIN mv_52week_extremes e ON c.ticker = e.ticker AND e.date = dr.latest_52w"
+        )
 
     query = sql.SQL("""
         WITH date_refs AS (
             SELECT
                 MAX(date) as latest,
+                (SELECT MAX(date) FROM technical_indicators) as latest_ta,
+                (SELECT MAX(date) FROM mv_52week_extremes) as latest_52w,
                 MAX(date) FILTER (
                     WHERE date < (SELECT MAX(date) FROM stock_prices_live)
                 ) as prev_day,
@@ -245,66 +427,13 @@ def screen_stocks(
                 ) as ytd_start
                 FROM stock_prices_live
         ),
+        {fundamentals_cte}
         base_data AS (
             SELECT
                 c.ticker,
                 c.name,
                 {sector_expr} as sector,
-                c.market_cap,
-                p.close as price,
-                p.volume,
-                ROUND((p.volume * p.close)::numeric, 0) as dollar_volume,
-                -- Price changes
-                CASE WHEN p_prev.close > 0
-                     THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
-                     ELSE NULL END as change_1d,
-                CASE WHEN p_week.close > 0
-                     THEN ROUND(((p.close - p_week.close) / p_week.close * 100)::numeric, 2)
-                     ELSE NULL END as change_1w,
-                CASE WHEN p_month.close > 0
-                     THEN ROUND(((p.close - p_month.close) / p_month.close * 100)::numeric, 2)
-                     ELSE NULL END as change_1m,
-                CASE WHEN p_ytd.close > 0
-                     THEN ROUND(((p.close - p_ytd.close) / p_ytd.close * 100)::numeric, 2)
-                     ELSE NULL END as change_ytd,
-                -- Technical indicators
-                ti.rsi_14,
-                ti.rsi_21,
-                ti.sma_20,
-                ti.sma_50,
-                ti.sma_100,
-                ti.sma_150,
-                ti.sma_200,
-                ti.ema_50,
-                ti.ema_200,
-                ti.macd_line,
-                ti.macd_signal,
-                ti.macd_histogram,
-                ti.bb_upper,
-                ti.bb_lower,
-                ti.atr_14,
-                ti.volume_ratio,
-                -- Fundamental ratios
-                fr.price_to_earnings as pe_ratio,
-                fr.dividend_yield,
-                fr.return_on_equity as roe,
-                fr.debt_to_equity,
-                -- SMA distance percentages
-                CASE WHEN ti.sma_20 > 0
-                     THEN ROUND(((p.close - ti.sma_20) / ti.sma_20 * 100)::numeric, 2)
-                     ELSE NULL END as sma_20_distance_pct,
-                CASE WHEN ti.sma_50 > 0
-                     THEN ROUND(((p.close - ti.sma_50) / ti.sma_50 * 100)::numeric, 2)
-                     ELSE NULL END as sma_50_distance_pct,
-                CASE WHEN ti.sma_100 > 0
-                     THEN ROUND(((p.close - ti.sma_100) / ti.sma_100 * 100)::numeric, 2)
-                     ELSE NULL END as sma_100_distance_pct,
-                CASE WHEN ti.sma_150 > 0
-                     THEN ROUND(((p.close - ti.sma_150) / ti.sma_150 * 100)::numeric, 2)
-                     ELSE NULL END as sma_150_distance_pct,
-                CASE WHEN ti.sma_200 > 0
-                     THEN ROUND(((p.close - ti.sma_200) / ti.sma_200 * 100)::numeric, 2)
-                     ELSE NULL END as sma_200_distance_pct,
+                {filter_selects},
                 -- Index membership
                 ARRAY(
                     SELECT i.code FROM index_constituents ic
@@ -324,8 +453,9 @@ def screen_stocks(
                 ON c.ticker = p_month.ticker AND p_month.date = dr.month_ago
             LEFT JOIN stock_prices_live p_ytd
                 ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
-            LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = dr.latest
-            LEFT JOIN financial_ratios fr ON c.ticker = fr.ticker AND fr.date = dr.latest
+            {technical_join}
+            {fundamentals_join}
+            {extremes_join}
             WHERE c.active = true
             {sector_filter}
             {sector_exclude_filter}
@@ -336,23 +466,7 @@ def screen_stocks(
             name,
             sector,
             indices,
-            market_cap,
-            price,
-            volume,
-            dollar_volume,
-            change_1d,
-            change_1w,
-            change_1m,
-            change_ytd,
-            rsi_14,
-            volume_ratio,
-            sma_50_distance_pct,
-            sma_150_distance_pct,
-            sma_200_distance_pct,
-            pe_ratio,
-            dividend_yield,
-            roe,
-            debt_to_equity
+            {output_selects}
         FROM base_data
         WHERE {where_clause}
         ORDER BY {sort_by} {sort_dir} NULLS LAST
@@ -363,8 +477,14 @@ def screen_stocks(
         sector_filter=sql.SQL(sector_filter),
         sector_exclude_filter=sql.SQL(sector_exclude_filter),
         index_filter=sql.SQL(index_filter),
+        filter_selects=filter_selects,
+        output_selects=output_selects,
+        technical_join=technical_join,
+        fundamentals_cte=fundamentals_cte,
+        fundamentals_join=fundamentals_join,
+        extremes_join=extremes_join,
         where_clause=where_clause,
-        sort_by=sql.Identifier(sort_by),
+        sort_by=sql.Identifier(sort_alias),
         sort_dir=sort_dir,
     )
 
@@ -372,48 +492,9 @@ def screen_stocks(
 
 
 def _get_filter_expression(filter_name: str) -> str:
-    """Map filter name to SQL column/expression."""
-    # Direct column mappings
-    direct_mappings = {
-        "price": "price",
-        "market_cap": "market_cap",
-        "volume": "volume",
-        "dollar_volume": "dollar_volume",
-        "price_change_1d": "change_1d",
-        "price_change_1w": "change_1w",
-        "price_change_1m": "change_1m",
-        "price_change_ytd": "change_ytd",
-        "volume_ratio": "volume_ratio",
-        # Technical indicators
-        "rsi_14": "rsi_14",
-        "rsi_21": "rsi_21",
-        "sma_20": "sma_20",
-        "sma_50": "sma_50",
-        "sma_100": "sma_100",
-        "sma_150": "sma_150",
-        "sma_200": "sma_200",
-        "ema_50": "ema_50",
-        "ema_200": "ema_200",
-        "macd_line": "macd_line",
-        "macd_signal": "macd_signal",
-        "macd_histogram": "macd_histogram",
-        "bb_upper": "bb_upper",
-        "bb_lower": "bb_lower",
-        "atr_14": "atr_14",
-        # SMA distance percentages
-        "sma_20_distance_pct": "sma_20_distance_pct",
-        "sma_50_distance_pct": "sma_50_distance_pct",
-        "sma_100_distance_pct": "sma_100_distance_pct",
-        "sma_150_distance_pct": "sma_150_distance_pct",
-        "sma_200_distance_pct": "sma_200_distance_pct",
-        # Fundamental ratios
-        "pe_ratio": "pe_ratio",
-        "dividend_yield": "dividend_yield",
-        "roe": "roe",
-        "debt_to_equity": "debt_to_equity",
-    }
-
-    return direct_mappings.get(filter_name, filter_name)
+    """Map an external filter name to its base_data alias."""
+    spec = FILTER_SPECS.get(filter_name)
+    return spec.alias if spec else filter_name
 
 
 def get_ytd_returns(
@@ -677,9 +758,19 @@ def get_52week_extremes(
 
     # Fundamentals JOIN and columns
     if include_fundamentals:
-        fundamentals_join = sql.SQL(
-            "LEFT JOIN financial_ratios fr ON c.ticker = fr.ticker AND fr.date = ld.dt"
-        )
+        fundamentals_cte = sql.SQL("""
+        latest_ratios AS (
+            SELECT DISTINCT ON (ticker)
+                ticker,
+                price_to_earnings,
+                dividend_yield,
+                return_on_equity,
+                debt_to_equity
+            FROM financial_ratios
+            ORDER BY ticker, date DESC
+        ),
+        """)
+        fundamentals_join = sql.SQL("LEFT JOIN latest_ratios fr ON fr.ticker = c.ticker")
         fundamentals_cols = sql.SQL(""",
                 fr.price_to_earnings as pe_ratio,
                 fr.dividend_yield,
@@ -691,18 +782,22 @@ def get_52week_extremes(
             roe,
             debt_to_equity""")
     else:
+        fundamentals_cte = sql.SQL("")
         fundamentals_join = sql.SQL("")
         fundamentals_cols = sql.SQL("")
         fundamentals_select = sql.SQL("")
 
     query = sql.SQL("""
-        WITH latest_date AS (
-            SELECT MAX(date) as dt FROM stock_prices
+        WITH date_refs AS (
+            SELECT
+                (SELECT MAX(date) FROM stock_prices_live) as latest_live,
+                (SELECT MAX(date) FROM mv_52week_extremes) as latest_52w
         ),
         prev_date AS (
-            SELECT MAX(date) as dt FROM stock_prices
-            WHERE date < (SELECT dt FROM latest_date)
+            SELECT MAX(date) as dt FROM stock_prices_live
+            WHERE date < (SELECT latest_live FROM date_refs)
         ),
+        {fundamentals_cte}
         stock_data AS (
             SELECT
                 c.ticker,
@@ -716,23 +811,23 @@ def get_52week_extremes(
                 p_prev.close as prev_close,
                 e.high_52w,
                 e.low_52w,
-                ROUND(((p.close - e.high_52w) / e.high_52w * 100)::numeric, 2)
+                ROUND(((p.close - e.high_52w) / NULLIF(e.high_52w, 0) * 100)::numeric, 2)
                     as high_52w_pct,
-                ROUND(((p.close - e.low_52w) / e.low_52w * 100)::numeric, 2)
+                ROUND(((p.close - e.low_52w) / NULLIF(e.low_52w, 0) * 100)::numeric, 2)
                     as low_52w_pct,
-                ROUND(((p.high - p.low) / p.close * 100)::numeric, 2)
+                ROUND(((p.high - p.low) / NULLIF(p.close, 0) * 100)::numeric, 2)
                     as daily_range_pct,
                 CASE WHEN p_prev.close > 0
                      THEN ROUND(((p.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
                      ELSE NULL END as change_1d
                 {fundamentals_cols}
             FROM companies c
-            CROSS JOIN latest_date ld
+            CROSS JOIN date_refs dr
             CROSS JOIN prev_date pd
-            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
+            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = dr.latest_live
             LEFT JOIN stock_prices_live p_prev
                 ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
-            JOIN mv_52week_extremes e ON c.ticker = e.ticker AND e.date = ld.dt
+            JOIN mv_52week_extremes e ON c.ticker = e.ticker AND e.date = dr.latest_52w
             {fundamentals_join}
             WHERE c.active = true
             {index_filter}
@@ -773,6 +868,7 @@ def get_52week_extremes(
         LIMIT %(limit)s
     """).format(
         fundamentals_cols=fundamentals_cols,
+        fundamentals_cte=fundamentals_cte,
         fundamentals_join=fundamentals_join,
         fundamentals_select=fundamentals_select,
         index_filter=index_filter,

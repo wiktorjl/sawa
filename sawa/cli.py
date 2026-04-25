@@ -257,6 +257,8 @@ def cmd_weekly(args) -> int:
             skip_overviews=args.skip_overviews,
             skip_news=args.skip_news,
             skip_corporate_actions=args.skip_corporate_actions,
+            skip_character=args.skip_character,
+            character_workers=args.character_workers,
             dry_run=args.dry_run,
             logger=logger,
         )
@@ -652,6 +654,36 @@ def cmd_adjust_splits(args) -> int:
         return 1
 
 
+def cmd_character(args) -> int:
+    """Run stock character classification batch."""
+    from sawa.stock_character_batch import run_stock_character_batch
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="character")
+
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    tickers = [t.upper() for t in args.tickers] if args.tickers else None
+
+    try:
+        stats = run_stock_character_batch(
+            database_url=db_url,
+            tickers=tickers,
+            workers=args.workers,
+            run_date=args.run_date,
+            log=logger,
+        )
+        return 0 if stats.get("success") else 1
+    except Exception as e:
+        logger.error(f"Stock character batch failed: {e}")
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_data_status(args) -> int:
     """Show latest stock price data in the database."""
     import psycopg
@@ -742,6 +774,7 @@ Commands:
   index-check         Check which indices a ticker belongs to
   corporate-actions   Download stock splits and dividends
   adjust-splits       Re-fetch adjusted prices after stock splits
+  character           Classify stocks by behavioral character (Hurst, regime, scorecard)
   data-status         Show latest stock price data in the database
 
 Examples:
@@ -926,6 +959,17 @@ Environment Variables:
         "--skip-corporate-actions",
         action="store_true",
         help="Skip corporate actions (splits, dividends) update",
+    )
+    weekly_parser.add_argument(
+        "--skip-character",
+        action="store_true",
+        help="Skip stock character classification batch",
+    )
+    weekly_parser.add_argument(
+        "--character-workers",
+        type=int,
+        default=4,
+        help="Worker processes for character batch (default: 4)",
     )
     weekly_parser.add_argument("--log-dir", help="Directory for log files")
     weekly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
@@ -1133,6 +1177,34 @@ Environment Variables:
     adjust_parser.add_argument("--log-dir", help="Directory for log files")
     adjust_parser.add_argument("-v", "--verbose", action="store_true")
     adjust_parser.set_defaults(func=cmd_adjust_splits)
+
+    # Stock character batch subcommand
+    character_parser = subparsers.add_parser(
+        "character",
+        help="Classify stocks by behavioral character (Hurst, regime, scorecard)",
+        description=(
+            "Run the stock character classification pipeline across tickers. "
+            "Writes baseline, classification, flags, and scorecard rows."
+        ),
+    )
+    character_parser.add_argument(
+        "tickers",
+        nargs="*",
+        help="Tickers to process (default: all tickers with prices)",
+    )
+    character_parser.add_argument(
+        "--workers", type=int, default=4, help="Number of parallel workers (default: 4)"
+    )
+    character_parser.add_argument(
+        "--run-date",
+        type=parse_date,
+        metavar="YYYY-MM-DD",
+        help="Classification date (default: today)",
+    )
+    character_parser.add_argument("--database-url", help="PostgreSQL URL")
+    character_parser.add_argument("--log-dir", help="Directory for log files")
+    character_parser.add_argument("-v", "--verbose", action="store_true")
+    character_parser.set_defaults(func=cmd_character)
 
     # Data status subcommand
     status_parser = subparsers.add_parser(
