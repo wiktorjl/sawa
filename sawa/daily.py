@@ -124,6 +124,49 @@ def insert_prices(
     return inserted
 
 
+def refresh_52week_extremes_if_needed(conn, logger: logging.Logger) -> bool:
+    """Refresh the 52-week extremes materialized view when it lags prices.
+
+    Args:
+        conn: PostgreSQL connection
+        logger: Logger instance
+
+    Returns:
+        True if the materialized view was refreshed.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.mv_52week_extremes')")
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            logger.info("52-week extremes materialized view not found - skipping refresh")
+            return False
+
+        cur.execute("""
+            SELECT
+                (SELECT MAX(date) FROM stock_prices) AS latest_price_date,
+                (SELECT MAX(date) FROM mv_52week_extremes) AS latest_extremes_date
+        """)
+        latest_price_date, latest_extremes_date = cur.fetchone()
+
+        if latest_price_date is None:
+            logger.info("No stock price data found - skipping 52-week extremes refresh")
+            return False
+
+        if latest_extremes_date is not None and latest_extremes_date >= latest_price_date:
+            logger.info("52-week extremes materialized view is up to date")
+            return False
+
+        logger.info(
+            "Refreshing 52-week extremes materialized view "
+            f"({latest_extremes_date} -> {latest_price_date})..."
+        )
+        cur.execute("REFRESH MATERIALIZED VIEW mv_52week_extremes")
+
+    conn.commit()
+    logger.info("  Refreshed 52-week extremes materialized view")
+    return True
+
+
 def fetch_vix_intraday(
     client: PolygonClient,
     start_date: str,
@@ -276,6 +319,8 @@ def run_daily(
                 logger.info(f"  - Date range: {start_str} to {end_str}")
             else:
                 logger.info("  - No price updates needed")
+            if not skip_prices:
+                logger.info("  - Refresh 52-week extremes materialized view if stale")
             if not skip_news:
                 logger.info(f"  - News articles (last {DEFAULT_NEWS_DAYS} days)")
             if not skip_ta:
@@ -314,6 +359,16 @@ def run_daily(
 
             logger.info(f"  Inserted {inserted} records")
             stats["prices_inserted"] = inserted
+
+        if not skip_prices:
+            try:
+                with psycopg.connect(database_url) as conn:
+                    stats["52week_extremes_refreshed"] = refresh_52week_extremes_if_needed(
+                        conn, logger
+                    )
+            except psycopg.Error as e:
+                logger.warning(f"52-week extremes refresh failed: {e}")
+                stats["52week_extremes_refresh_error"] = str(e)
 
         # Fetch and load news (always, unless skipped)
         if not skip_news:

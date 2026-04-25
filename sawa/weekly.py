@@ -6,6 +6,7 @@ Re-entrant: Safe to run multiple times (upsert on primary keys).
 """
 
 import logging
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,13 @@ from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
+
+ECONOMY_ENDPOINT_TABLES = {
+    "treasury-yields": "treasury_yields",
+    "inflation": "inflation",
+    "inflation-expectations": "inflation_expectations",
+    "labor-market": "labor_market",
+}
 
 
 def download_overviews(
@@ -68,17 +76,31 @@ def download_economy(
     end_date: str,
     output_dir: Path,
     logger: logging.Logger,
+    start_dates: dict[str, str] | None = None,
 ) -> dict[str, int]:
-    """Download economy data."""
-    endpoints = ["treasury-yields", "inflation", "inflation-expectations", "labor-market"]
+    """Download economy data.
+
+    Args:
+        client: Polygon/Massive API client
+        start_date: Fallback start date for all endpoints
+        end_date: Shared end date for all endpoints
+        output_dir: Directory to write endpoint CSV files
+        logger: Logger instance
+        start_dates: Optional per-endpoint start dates. Keys are endpoint names
+            such as ``treasury-yields`` and ``labor-market``.
+
+    Returns:
+        Dict mapping endpoint names to downloaded row counts.
+    """
     stats: dict[str, int] = {}
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for endpoint in endpoints:
-        logger.info(f"Downloading {endpoint}...")
+    for endpoint in ECONOMY_ENDPOINT_TABLES:
+        endpoint_start = start_dates.get(endpoint, start_date) if start_dates else start_date
+        logger.info(f"Downloading {endpoint} ({endpoint_start} to {end_date})...")
         try:
-            data = client.get_economy_data(endpoint, start_date, end_date)
+            data = client.get_economy_data(endpoint, endpoint_start, end_date)
             if data:
                 filepath = output_dir / f"{endpoint.replace('-', '_')}.csv"
                 write_csv_auto_fields(filepath, data, logger)
@@ -90,6 +112,31 @@ def download_economy(
     return stats
 
 
+def get_economy_start_dates(conn, end_date: date) -> dict[str, str]:
+    """Get per-endpoint start dates for weekly economy updates.
+
+    Each economy table has a different release cadence. Treasury yields are
+    daily-ish, while inflation and labor data are monthly, so a shared treasury
+    anchor can skip monthly backfills.
+
+    Args:
+        conn: Database connection
+        end_date: End date for the update window
+
+    Returns:
+        Dict mapping Polygon/Massive endpoint names to YYYY-MM-DD start dates.
+    """
+    default_start = end_date - timedelta(days=365)
+    start_dates: dict[str, str] = {}
+
+    for endpoint, table_name in ECONOMY_ENDPOINT_TABLES.items():
+        last_date = get_last_date(conn, table_name)
+        start = last_date or default_start
+        start_dates[endpoint] = start.strftime(DATE_FORMAT)
+
+    return start_dates
+
+
 def run_weekly(
     api_key: str,
     database_url: str,
@@ -98,6 +145,8 @@ def run_weekly(
     skip_overviews: bool = False,
     skip_news: bool = False,
     skip_corporate_actions: bool = False,
+    skip_character: bool = False,
+    character_workers: int = 4,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -112,6 +161,8 @@ def run_weekly(
         skip_overviews: Skip company overviews update
         skip_news: Skip news update
         skip_corporate_actions: Skip corporate actions (splits/dividends) update
+        skip_character: Skip stock character classification batch
+        character_workers: Worker processes for character batch
         dry_run: If True, show what would be done without executing
         logger: Logger instance
 
@@ -139,42 +190,50 @@ def run_weekly(
             logger.info(f"Found {len(symbols)} symbols in database")
             stats["symbols"] = len(symbols)
 
-            # Get last date for incremental updates
-            last_treasury_date = get_last_date(conn, "treasury_yields")
-
-            # Calculate date range
             end_date = date.today()
-            if last_treasury_date:
-                econ_start = last_treasury_date
-            else:
-                econ_start = end_date - timedelta(days=365)
-
-            econ_start_str = econ_start.strftime(DATE_FORMAT)
             end_str = end_date.strftime(DATE_FORMAT)
+            economy_start_dates = get_economy_start_dates(conn, end_date)
 
-            logger.info(f"Economy date range: {econ_start_str} to {end_str}")
+            market_internals_last_date = get_last_date(conn, "market_internals")
+            market_internals_start = market_internals_last_date or (end_date - timedelta(days=365))
+            market_internals_start_str = market_internals_start.strftime(DATE_FORMAT)
+            fred_api_key = os.environ.get("FRED_API_KEY")
+
+            logger.info("Economy date ranges:")
+            for endpoint, start_str in economy_start_dates.items():
+                logger.info(f"  {endpoint}: {start_str} to {end_str}")
+            logger.info(f"  market-internals: {market_internals_start_str} to {end_str}")
+            stats["economy_date_ranges"] = economy_start_dates
+            stats["market_internals_start_date"] = market_internals_start_str
 
         if dry_run:
             logger.info("\n[DRY RUN] Would update:")
             if not skip_overviews:
                 logger.info(f"  - Company overviews for {len(symbols)} symbols")
             if not skip_economy:
-                logger.info(f"  - Economy data from {econ_start_str}")
+                logger.info("  - Economy data:")
+                for endpoint, start_str in economy_start_dates.items():
+                    logger.info(f"    - {endpoint} from {start_str}")
             if not skip_news:
                 logger.info(f"  - News articles (last {DEFAULT_NEWS_DAYS} days)")
             if not skip_corporate_actions:
                 logger.info("  - Corporate actions (splits, dividends)")
+            if not skip_character:
+                logger.info(f"  - Stock character batch ({character_workers} workers)")
+            if fred_api_key:
+                logger.info(f"  - Market internals from {market_internals_start_str}")
             stats["success"] = True
             stats["dry_run"] = True
             return stats
 
         step = 1
-        total_steps = 4 - sum(
+        total_steps = 5 - sum(
             [
                 skip_overviews,
                 skip_economy,
                 skip_news,
                 skip_corporate_actions,
+                skip_character,
             ]
         )
 
@@ -195,7 +254,12 @@ def run_weekly(
             logger.info(f"\n[{step}/{total_steps}] Updating economy data...")
             step += 1
             econ_stats = download_economy(
-                client, econ_start_str, end_str, output_dir / "economy", logger
+                client,
+                min(economy_start_dates.values()),
+                end_str,
+                output_dir / "economy",
+                logger,
+                start_dates=economy_start_dates,
             )
             stats["economy"] = econ_stats
             # Load into database
@@ -203,14 +267,11 @@ def run_weekly(
                 load_economy(conn, output_dir / "economy", logger)
 
         # Step: Update market internals from FRED
-        import os as _os
-
-        fred_api_key = _os.environ.get("FRED_API_KEY")
         if fred_api_key:
             logger.info(f"\n[{step}/{total_steps}] Updating market internals from FRED...")
             fred_client = FredClient(fred_api_key, logger)
             try:
-                mi_rows = fred_client.get_market_internals(econ_start_str, end_str)
+                mi_rows = fred_client.get_market_internals(market_internals_start_str, end_str)
                 if mi_rows:
                     with psycopg.connect(database_url) as conn:
                         loaded = load_market_internals(conn, mi_rows, logger)
@@ -259,6 +320,19 @@ def run_weekly(
                 )
                 stats["split_adjust"] = adjust_stats
 
+        # Step: Stock character classification
+        if not skip_character:
+            from sawa.stock_character_batch import run_stock_character_batch
+
+            logger.info(f"\n[{step}/{total_steps}] Running stock character classification...")
+            step += 1
+            character_stats = run_stock_character_batch(
+                database_url=database_url,
+                workers=character_workers,
+                log=logger,
+            )
+            stats["character"] = character_stats
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info("WEEKLY UPDATE COMPLETE")
@@ -275,6 +349,12 @@ def run_weekly(
             logger.info(
                 f"  Corporate actions: {ca.get('splits_loaded', 0)} splits, "
                 f"{ca.get('dividends_loaded', 0)} dividends"
+            )
+        if "character" in stats:
+            ch = stats["character"]
+            logger.info(
+                f"  Character: {ch.get('classified', 0)}/{ch.get('total', 0)} classified "
+                f"({ch.get('errors', 0)} errors)"
             )
 
     except Exception as e:
