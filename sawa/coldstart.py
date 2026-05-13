@@ -953,7 +953,14 @@ def run_coldstart(
                     finally:
                         fred_client.close()
                 else:
-                    logger.info("\n[8b/10] Skipping market internals (FRED_API_KEY not set)")
+                    from sawa.utils import alert_missing_api_key
+
+                    logger.info("\n[8b/10] Market internals: skipping")
+                    alert_missing_api_key(
+                        "FRED_API_KEY",
+                        "FRED market internals (VIX, VIX3M, HY spread)",
+                        logger,
+                    )
                     stats["market_internals_skipped"] = "FRED_API_KEY not set"
 
                 # Step 9: Download & load news

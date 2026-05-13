@@ -18,7 +18,7 @@ from sawa.corporate_actions import run_corporate_actions_update
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.load import load_companies, load_economy, load_market_internals, load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
-from sawa.utils import setup_logging
+from sawa.utils import alert_missing_api_key, setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
@@ -284,7 +284,11 @@ def run_weekly(
             finally:
                 fred_client.close()
         else:
-            logger.info("\nSkipping market internals (FRED_API_KEY not set)")
+            alert_missing_api_key(
+                "FRED_API_KEY",
+                "FRED market internals (VIX, VIX3M, HY spread)",
+                logger,
+            )
 
         # Step: Update news
         if not skip_news:

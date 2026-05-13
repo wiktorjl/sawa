@@ -95,14 +95,14 @@ def get_last_date(conn, table: str, date_column: str = "date") -> date | None:
 
 
 def get_symbols_from_db(conn) -> list[str]:
-    """Get list of ticker symbols from companies table.
+    """Get list of active ticker symbols from companies table.
 
     Args:
         conn: Database connection
 
     Returns:
-        List of ticker symbols, sorted alphabetically
+        List of ticker symbols where active = true, sorted alphabetically.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT ticker FROM companies ORDER BY ticker")
+        cur.execute("SELECT ticker FROM companies WHERE active = true ORDER BY ticker")
         return [row[0] for row in cur.fetchall()]
