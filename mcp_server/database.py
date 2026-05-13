@@ -70,7 +70,8 @@ def close_pool() -> None:
 
 
 # Query audit log
-QUERY_LOG_DIR = Path(os.environ.get("MCP_QUERY_LOG_DIR", "logs"))
+_DEFAULT_QUERY_LOG_DIR = Path.home() / ".sawa" / "logs"
+QUERY_LOG_DIR = Path(os.environ.get("MCP_QUERY_LOG_DIR") or _DEFAULT_QUERY_LOG_DIR)
 QUERY_LOG_FILE = QUERY_LOG_DIR / "execute_query.log"
 
 

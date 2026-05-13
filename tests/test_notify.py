@@ -4,7 +4,14 @@ from typing import Any
 import httpx
 import pytest
 
-from sawa.utils.notify import alert_missing_api_key, notify_ntfy
+from sawa.utils.notify import (
+    NotificationLevel,
+    NtfyNotifier,
+    NullNotifier,
+    alert_missing_api_key,
+    get_notifier,
+    notify_ntfy,
+)
 
 
 class _CapHandler(logging.Handler):
@@ -108,3 +115,63 @@ def test_alert_missing_api_key_logs_error_and_notifies(monkeypatch: pytest.Monke
     assert len(posts) == 1
     assert posts[0]["title"] == "Sawa: missing FRED_API_KEY"
     assert "FRED_API_KEY" in posts[0]["body"]
+
+
+def test_null_notifier_returns_false() -> None:
+    n = NullNotifier()
+    assert n.send(title="t", body="b") is False
+    assert n.send(title="t", body="b", level=NotificationLevel.ERROR) is False
+
+
+def test_ntfy_notifier_sets_priority_and_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, *, content: bytes, headers: dict[str, str], timeout: float) -> httpx.Response:
+        captured.update(url=url, headers=headers, content=content)
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    n = NtfyNotifier("ntfy.sh/MyTopic")
+
+    sent = n.send(
+        title="Sawa: daily FAILED",
+        body="something broke",
+        level=NotificationLevel.ERROR,
+        tags=["rotating_light", "daily"],
+    )
+
+    assert sent is True
+    assert captured["url"] == "https://ntfy.sh/MyTopic"
+    assert captured["headers"]["Title"] == "Sawa: daily FAILED"
+    assert captured["headers"]["Priority"] == "5"
+    assert captured["headers"]["Tags"] == "rotating_light,daily"
+    assert captured["content"] == b"something broke"
+
+
+def test_ntfy_notifier_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_post(*_: Any, **__: Any) -> httpx.Response:
+        raise httpx.ConnectError("net is down")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    n = NtfyNotifier("ntfy.sh/T")
+    assert n.send(title="t", body="b") is False
+
+
+def test_get_notifier_returns_null_when_no_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
+    monkeypatch.delenv("SAWA_NOTIFIER", raising=False)
+    assert isinstance(get_notifier(), NullNotifier)
+
+
+def test_get_notifier_returns_ntfy_when_topic_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SAWA_NOTIFIER", raising=False)
+    monkeypatch.setenv("NTFY_TOPIC", "ntfy.sh/MyTopic")
+    n = get_notifier()
+    assert isinstance(n, NtfyNotifier)
+    assert n.url == "https://ntfy.sh/MyTopic"
+
+
+def test_get_notifier_honors_explicit_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NTFY_TOPIC", "ntfy.sh/MyTopic")
+    monkeypatch.setenv("SAWA_NOTIFIER", "none")
+    assert isinstance(get_notifier(), NullNotifier)

@@ -15,7 +15,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_DIR="$HOME/.sawa/scheduler"
 LOG_FILE="$STATE_DIR/scheduler.log"
-NTFY_TOPIC=""  # set via NTFY_TOPIC in .env
+# NTFY_TOPIC is read by `sawa notify` (Python notifier abstraction). Source
+# .env in setup_env to make it available to the child process.
 DAILY_WAIT_HOURS=1  # hours after close before running daily
 INTRADAY_STOP_TIMEOUT=60  # seconds to wait for graceful shutdown
 
@@ -55,20 +56,25 @@ if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 10000 ]; then
 fi
 
 # ── Notifications ────────────────────────────────────────────────────────────
+#
+# Delegates to `sawa notify`, which uses the same Notifier abstraction as
+# the Python run wrappers. Backend (ntfy, etc.) is selected by the
+# SAWA_NOTIFIER / NTFY_TOPIC env vars sourced from .env in setup_env.
 
 notify() {
     local title="$1"
     local body="$2"
-    if [ -z "$NTFY_TOPIC" ]; then
-        log "WARN: NTFY_TOPIC not set, skipping notification"
-        return
+    local level="${3:-info}"
+    log "Sending notification ($level): $title"
+    if ! sawa notify \
+            --title "$title" \
+            --body "$body" \
+            --level "$level" \
+            --tag chart_with_upwards_trend \
+            --tag scheduler \
+            >> "$LOG_FILE" 2>&1; then
+        log "WARN: sawa notify failed"
     fi
-    log "Sending notification: $title"
-    curl -s \
-        -H "Title: $title" \
-        -H "Tags: chart_with_upwards_trend" \
-        -d "$body" \
-        "$NTFY_TOPIC" > /dev/null 2>&1 || log "WARN: ntfy notification failed"
 }
 
 # ── Environment setup ────────────────────────────────────────────────────────
@@ -89,6 +95,13 @@ setup_env() {
         # shellcheck disable=SC1091
         source .venv/bin/activate
     fi
+
+    # The scheduler emits its own success summaries (richer than Python's
+    # stats dict — it includes intraday start/stop times). Suppress the
+    # Python notifier's success notifications to avoid duplicates. Failure
+    # notifications from monitored_run still fire (with stack traces) — bash
+    # also notifies on non-zero exit, which is intentional belt+suspenders.
+    export SAWA_NOTIFY_SUCCESS=0
 }
 
 # ── Market status detection ──────────────────────────────────────────────────
@@ -232,7 +245,7 @@ run_weekly() {
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa weekly failed (exit $exit_code)"
-        notify "Sawa Weekly FAILED" "sawa weekly exited with code $exit_code at $(cat "$STATE_DIR/weekly_end_time")"
+        notify "Sawa Weekly FAILED" "sawa weekly exited with code $exit_code at $(cat "$STATE_DIR/weekly_end_time")" error
         return 1
     fi
 
@@ -271,7 +284,7 @@ run_daily() {
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa daily failed (exit $exit_code)"
-        notify "Sawa Daily FAILED" "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")"
+        notify "Sawa Daily FAILED" "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")" error
         return 1
     fi
 
