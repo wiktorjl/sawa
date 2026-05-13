@@ -1,123 +1,113 @@
-# SQL Schema for Stock Data
+# SQL Schema
 
-This directory contains PostgreSQL schema definitions for the stock data project.
+PostgreSQL schema files for Sawa, executed in numeric prefix order. The
+loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 
 ## Files
 
-| File | Description |
-|------|-------------|
-| `00_setup.sql` | Complete setup script and verification |
-| `01_companies.sql` | Companies/Overviews table (central reference) |
-| `02_market_data.sql` | Stock prices and financial ratios tables |
-| `03_fundamentals.sql` | Balance sheets, cash flows, income statements |
-| `04_economy.sql` | Treasury yields, inflation, labor market tables |
-| `05_indexes.sql` | Performance indexes for all tables |
-| `06_views.sql` | Common query views |
-| `07_procedures.sql` | Data loading procedures |
-| `10_news.sql` | News articles and sentiment tables |
-| `16_cleanup.sql` | Migration to remove TUI/Web tables |
+| File | Purpose |
+|------|---------|
+| `00_setup.sql` | Documentation + verification queries (does not create anything) |
+| `01_companies.sql` | `companies` (ticker is PK; central reference) |
+| `02_market_data.sql` | `stock_prices`, `financial_ratios` |
+| `03_fundamentals.sql` | `balance_sheets`, `income_statements`, `cash_flows` |
+| `04_economy.sql` | `treasury_yields`, `inflation`, `inflation_expectations`, `labor_market` |
+| `05_indexes.sql` | Performance indexes for the above tables |
+| `06_views.sql` | Read-only views: `v_company_summary`, `v_economy_dashboard`, `v_latest_fundamentals`, `v_sector_summary`, dashboard market internals view |
+| `07_procedures.sql` | PL/pgSQL helpers for loading |
+| `08_sic_gics_mapping.sql` | `sic_gics_mapping` table (SIC → GICS) |
+| `09_sic_gics_data.sql` | Seed data for `sic_gics_mapping` |
+| `10_news.sql` | `news_articles`, `news_article_tickers`, `news_sentiment` |
+| `11_technical_indicators.sql` | `technical_indicators`, `technical_indicator_metadata` |
+| `12_indices.sql` | `indices`, `index_constituents`, seeds (`sp500`, `nasdaq5000`) |
+| `13_gics_sector_function.sql` | `get_gics_sector(sic_code)` helper |
+| `14_52week_extremes.sql` | `mv_52week_extremes` materialized view |
+| `16_cleanup.sql` | Migration: drop old TUI/Web tables (no-op on fresh installs) |
+| `17_extended_sma.sql` | Adds 150/200-day SMA columns |
+| `18_corporate_actions.sql` | `stock_splits`, `dividends`, `earnings` |
+| `19_earnings_yfinance.sql` | Earnings schema additions |
+| `20_drop_revenue_estimate.sql` | Drop a deprecated column |
+| `21_intraday_prices.sql` | `stock_prices_intraday` (5-min bars + view `stock_prices_live`) |
+| `22_views_advanced.sql` | Views that depend on later tables |
+| `23_add_cpi_yoy.sql` | Adds CPI year-over-year column |
+| `24_widen_price_precision.sql` | Widens numeric precision on price columns |
+| `25_trader_cards.sql` | `trader_cards` table |
+| `26_market_internals.sql` | `market_internals` (VIX, VIX3M, HY spread, put/call) |
+| `27_stock_character.sql` | Tables for stock character classification |
+| `28_dashboard_market_internals.sql` | Dashboard view over market internals |
 
-## Usage
+## Setup
 
-### Option 1: Run all at once
+### Recommended: via the pipeline
+
 ```bash
-psql -d your_database -f sqlschema/00_setup.sql
+sawa coldstart --schema-only        # Drops tables, applies all SQL files
+sawa coldstart --no-drop            # Re-applies SQL non-destructively (safe upgrade)
 ```
 
-### Option 2: Run individually (recommended for first setup)
+### Manual
+
 ```bash
-psql -d your_database -f sqlschema/01_companies.sql
-psql -d your_database -f sqlschema/02_market_data.sql
-psql -d your_database -f sqlschema/03_fundamentals.sql
-psql -d your_database -f sqlschema/04_economy.sql
-psql -d your_database -f sqlschema/05_indexes.sql
-psql -d your_database -f sqlschema/06_views.sql
-psql -d your_database -f sqlschema/07_procedures.sql
-psql -d your_database -f sqlschema/10_news.sql
+# All at once
+for f in sqlschema/*.sql; do psql "$DATABASE_URL" -f "$f"; done
+
+# Or via the schema runner module
+python -m sawa.database.schema --database-url "$DATABASE_URL" --drop --force
 ```
 
-### Option 3: Migration (cleanup old TUI/Web tables)
-If upgrading from an older version with TUI/Web tables:
-```bash
-psql -d your_database -f sqlschema/16_cleanup.sql
-```
-
-## Data Loading
-
-### Load Companies
-```sql
-COPY companies (
-    ticker, name, description, market, type, locale, currency_name, active,
-    list_date, delisted_utc, primary_exchange, cik, composite_figi, share_class_figi,
-    sic_code, sic_description, market_cap, weighted_shares_outstanding,
-    share_class_shares_outstanding, total_employees, round_lot, ticker_root,
-    ticker_suffix, homepage_url, phone_number, address_address1, address_city,
-    address_state, address_postal_code, branding_logo_url, branding_icon_url
-) FROM '/path/to/overviews/OVERVIEWS.csv' WITH (FORMAT csv, HEADER true);
-```
-
-### Load Stock Prices
-```sql
--- For each ticker file
-COPY stock_prices (ticker, date, open, high, low, close, volume)
-FROM '/path/to/stocks/AAPL.csv' WITH (FORMAT csv, HEADER true);
-```
-
-### Load Financial Ratios
-```sql
-COPY financial_ratios (
-    ticker, date, average_volume, cash, current, debt_to_equity,
-    dividend_yield, earnings_per_share, enterprise_value, ev_to_ebitda,
-    ev_to_sales, free_cash_flow, market_cap, price, price_to_book,
-    price_to_cash_flow, price_to_earnings, price_to_free_cash_flow,
-    price_to_sales, quick, return_on_assets, return_on_equity
-) FROM '/path/to/ratios/RATIOS.csv' WITH (FORMAT csv, HEADER true);
-```
-
-### Load Economy Data
-```sql
-COPY treasury_yields FROM '/path/to/economy_data/treasury-yields.csv' WITH (FORMAT csv, HEADER true);
-COPY inflation FROM '/path/to/economy_data/inflation.csv' WITH (FORMAT csv, HEADER true);
-COPY inflation_expectations FROM '/path/to/economy_data/inflation-expectations.csv' WITH (FORMAT csv, HEADER true);
-COPY labor_market FROM '/path/to/economy_data/labor-market.csv' WITH (FORMAT csv, HEADER true);
-```
+The runner uses `psycopg.sql.Identifier` for safe table-name handling and
+verifies the expected tables exist after loading. See
+`sawa/database/schema.py` for the list of `EXPECTED_TABLES`.
 
 ## Table Relationships
 
 ```
 companies (ticker PK)
-    |
-    |--< stock_prices (ticker FK, date)
-    |--< financial_ratios (ticker FK, date)
-    |--< balance_sheets (ticker FK, period_end, timeframe)
-    |--< cash_flows (ticker FK, period_end, timeframe)
-    |--< income_statements (ticker FK, period_end, timeframe)
+  ├─< stock_prices              (ticker, date)
+  ├─< stock_prices_intraday     (ticker, ts)
+  ├─< financial_ratios          (ticker, date)
+  ├─< balance_sheets            (ticker, period_end, timeframe)
+  ├─< income_statements         (ticker, period_end, timeframe)
+  ├─< cash_flows                (ticker, period_end, timeframe)
+  ├─< technical_indicators      (ticker, date)
+  ├─< stock_splits              (ticker, execution_date)
+  ├─< dividends                 (ticker, ex_date)
+  ├─< earnings                  (ticker, period_end)
+  ├─< index_constituents        (ticker, index_id) ──> indices
+  └─< news_article_tickers      (article_id, ticker) ──> news_articles ──< news_sentiment
 
 economy tables (independent)
-    |-- treasury_yields (date PK)
-    |-- inflation (date PK)
-    |-- inflation_expectations (date PK)
-    |-- labor_market (date PK)
+  treasury_yields (date PK)
+  inflation (date PK)
+  inflation_expectations (date PK)
+  labor_market (date PK)
+  market_internals (date PK)
 ```
+
+## Adding a Migration
+
+1. Pick the next free `NN` (e.g. `29_*.sql`)
+2. Make it idempotent: `CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT
+   EXISTS`, `DROP ... IF EXISTS`. The runner re-executes every file on
+   `--no-drop` upgrades.
+3. If the migration adds a new table, also add it to `EXPECTED_TABLES` in
+   `sawa/database/schema.py`.
+4. If it changes the contract of an existing load step, update the
+   corresponding loader in `sawa/database/load.py`.
 
 ## Useful Queries
 
-### Get latest stock price for all companies
 ```sql
 SELECT * FROM v_company_summary;
-```
-
-### Get economy dashboard
-```sql
 SELECT * FROM v_economy_dashboard LIMIT 10;
-```
-
-### Get latest fundamentals
-```sql
 SELECT * FROM v_latest_fundamentals WHERE ticker = 'AAPL';
+SELECT * FROM v_sector_summary;
+SELECT * FROM stock_prices_live WHERE ticker = 'AAPL';
+SELECT * FROM mv_52week_extremes WHERE ticker = 'AAPL';
 ```
 
-### Get sector summary
+Refresh materialized views after a price update:
+
 ```sql
-SELECT * FROM v_sector_summary;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_52week_extremes;
 ```

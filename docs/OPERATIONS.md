@@ -1,26 +1,33 @@
 # Operations Guide
 
-This document covers operational procedures for the S&P 500 data pipeline.
+Operational reference for the Sawa data pipeline. For a higher-level overview
+see [MAINTENANCE.md](MAINTENANCE.md); for project intro see the top-level
+[`README.md`](../README.md).
 
 ## Prerequisites
 
 ### Environment Variables
 
-Set these in your shell or `.env` file:
+Set these in your shell or `.env` file (copy `.env.example`):
 
 ```bash
-POLYGON_API_KEY=your_polygon_api_key
-POLYGON_S3_ACCESS_KEY=your_s3_access_key
-POLYGON_S3_SECRET_KEY=your_s3_secret_key
+POLYGON_API_KEY=...              # Polygon REST
+POLYGON_S3_ACCESS_KEY=...        # Polygon S3 (bulk history)
+POLYGON_S3_SECRET_KEY=...
+FRED_API_KEY=...                 # FRED — market internals (VIX, VIX3M, HY spread)
 DATABASE_URL=postgresql://user:pass@host:5432/dbname
+NTFY_TOPIC=https://ntfy.sh/...   # optional; pipeline + scheduler push notifications
 ```
+
+The pipeline alerts (via `NTFY_TOPIC` if set, otherwise log + non-zero exit
+for the affected step) when `POLYGON_API_KEY` or `FRED_API_KEY` are missing.
 
 ### Database
 
-PostgreSQL 14+ with a database created:
+PostgreSQL 12+ (14+ recommended). Create the database:
 
 ```bash
-createdb sp500_data
+createdb sp500_data   # name is arbitrary; match DATABASE_URL
 ```
 
 ### Python Environment
@@ -28,207 +35,213 @@ createdb sp500_data
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
+cd mcp_server && pip install -e ".[dev]" && cd ..
 ```
 
-## Commands Overview
+TA-Lib needs the C library: `brew install ta-lib` (macOS) or
+`apt install libta-lib-dev` (Ubuntu).
+
+## Command Overview
 
 | Command | Purpose | Frequency |
 |---------|---------|-----------|
-| `sawa coldstart` | Full database setup from scratch | Once, or to rebuild |
-| `sawa daily` | Update stock prices | Daily (weekdays) |
-| `sawa weekly` | Update fundamentals, economy, etc. | Weekly |
-| `sawa update` | Legacy combined update | Deprecated |
+| `sawa coldstart` | Full database setup / rebuild | Once, then on schema rebuilds |
+| `sawa daily` | Prices, news, TA, market internals | Daily after market close |
+| `sawa weekly` | Economy, overviews, news, corporate actions, character | Weekly |
+| `sawa quarterly` | Fundamentals + financial ratios | Quarterly |
+| `sawa intraday` | WebSocket 5-min bars (15-min delayed) | During market hours |
+| `sawa add-symbol` | Add new ticker(s) ad-hoc | As needed |
+| `sawa adjust-splits` | Re-fetch adjusted prices after splits | After known split |
+| `sawa ta-backfill` | Recompute technical indicators from history | After schema/code change |
+| `sawa character` | Stock character classification (also runs in weekly) | As needed |
+| `sawa data-status` | Show data freshness | Diagnostic |
+
+All commands accept `--log-dir logs --verbose`.
 
 ## Coldstart Procedure
 
-Use coldstart when:
+Use when:
 - Setting up a new database
-- Rebuilding after schema changes
+- Rebuilding after destructive schema changes
 - Starting fresh after data corruption
 
 ```bash
-# Full bootstrap (5 years of data)
-sawa coldstart --years 5
-
-# With logging to file
+sawa coldstart --years 5                   # Full bootstrap (5y of data)
 sawa coldstart --years 5 --log-dir logs
-
-# Schema only (no data download)
-sawa coldstart --schema-only
-
-# Load existing CSV data (no downloads)
-sawa coldstart --load-only
+sawa coldstart --schema-only               # Schema only, drops tables
+sawa coldstart --no-drop                   # Re-apply schema without dropping (safe upgrade)
+sawa coldstart --load-only                 # Load already-downloaded CSVs only
+sawa coldstart --skip-downloads            # Schema + load existing CSVs
+sawa coldstart --drop-only --confirm-drop  # Destructive: drop everything
 ```
 
-## Daily Update Procedure
+The universe is the union of S&P 500 (scraped from Wikipedia) and
+NASDAQ-5000 (loaded from `data/nasdaq1000_symbols.txt`; despite the filename
+the list contains ~5000 NASDAQ-listed tickers).
 
-Updates stock prices only. Fast operation, safe to run multiple times.
+## Daily Update
+
+Run after market close. Pulls prices, news, technical indicators, and market
+internals (FRED). Safe to re-run — all upserts.
 
 ```bash
-# Standard daily update
 sawa daily
-
-# With logging
-sawa daily --log-dir logs
-
-# Preview what would be done
-sawa daily --dry-run
-
-# Force update from specific date
-sawa daily --from-date 2024-01-15
+sawa daily --log-dir logs --verbose
+sawa daily --dry-run                       # Preview only
+sawa daily --from-date 2024-01-15          # Force replay from date
+sawa daily --skip-news                     # Prices + TA only
+sawa daily --skip-ta                       # Prices + news only
+sawa daily --skip-market-internals         # Skip FRED step
+sawa daily --news-only                     # Only update news
 ```
 
-### Cron Schedule (Daily)
-
-Run at 6 AM on weekdays (after market data is available):
-
-```cron
-0 6 * * 1-5 /path/to/sawa_daily_pipeline/scripts/daily.sh
-```
-
-## Weekly Update Procedure
-
-Updates slow-changing data:
-- Company profiles/overviews
-- Financial fundamentals (balance sheets, income, cash flow)
-- Financial ratios
-- Economy data (treasury yields, inflation, labor market)
-- News articles
+## Weekly Update
 
 ```bash
-# Full weekly update
 sawa weekly
-
-# Skip specific data types
-sawa weekly --skip-news
-sawa weekly --skip-fundamentals --skip-ratios
-
-# Preview what would be done
+sawa weekly --skip-news --skip-overviews
+sawa weekly --skip-corporate-actions
+sawa weekly --skip-character               # Skip character classification batch
+sawa weekly --character-workers 8
 sawa weekly --dry-run
 ```
 
-### Cron Schedule (Weekly)
+Updates:
+- Economy: treasury yields, CPI/PCE, inflation expectations, labor market
+- Company overviews
+- News articles
+- Corporate actions (splits, dividends)
+- Stock character classification (Hurst-based regime classification)
 
-Run Sunday at 2 AM:
+## Quarterly Update
+
+```bash
+sawa quarterly
+sawa quarterly --skip-fundamentals
+sawa quarterly --skip-ratios
+```
+
+Pulls balance sheets, income statements, cash flows, and financial ratios.
+
+## Scheduling
+
+### Recommended: `scripts/market_scheduler.sh`
+
+A single cron entry handles intraday streaming during market hours, runs
+`daily` ~1h after close, and `weekly` on Saturdays:
 
 ```cron
-0 2 * * 0 /path/to/sawa_daily_pipeline/scripts/weekly.sh
+*/15 * * * 1-5 /path/to/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
 ```
+
+State lives under `~/.sawa/scheduler/`. Sends ntfy notifications if
+`NTFY_TOPIC` is set.
+
+### Alternative: discrete cron entries
+
+```cron
+0 18 * * 1-5 /path/to/sawa/scripts/daily.sh
+0  2 * * 0   /path/to/sawa/scripts/weekly.sh
+```
+
+Quarterly is small — run by hand or once a quarter.
 
 ## Re-entrancy
 
-All operations are safe to re-run:
+All operations are safe to re-run.
 
-| Data Type | Key | Behavior |
-|-----------|-----|----------|
-| Stock prices | (ticker, date) | Updates existing records |
-| Fundamentals | (ticker, period_end, timeframe) | Updates existing records |
-| Economy | (date) | Updates existing records |
-| Companies | (ticker) | Updates existing records |
-| Ratios | (ticker, date) | Updates existing records |
+| Data | Key | Behavior |
+|------|-----|----------|
+| Stock prices | (ticker, date) | Upsert |
+| Intraday prices | (ticker, timestamp) | Upsert |
+| Fundamentals | (ticker, period_end, timeframe) | Upsert |
+| Economy | (date) | Upsert |
+| Market internals | (date) | Upsert |
+| Companies | (ticker) | Upsert |
+| Ratios | (ticker, date) | Upsert |
+| News articles | (id) | Upsert |
+| Technical indicators | (ticker, date) | Upsert |
 
-If an update fails partway through:
-1. Check the log file for errors
-2. Fix the underlying issue (network, API limits, etc.)
-3. Re-run the same command - it will pick up where it left off
+If an update fails partway:
+1. Check the log file for the underlying error
+2. Fix it (network, API limits, schema mismatch)
+3. Re-run the same command — the upsert keys mean partial progress is fine
 
 ## Log Files
 
-Logs are written to the `logs/` directory with timestamps:
-
 ```
 logs/
-  daily_20240115_060001.log
-  weekly_20240114_020001.log
-  coldstart_20240101_120000.log
+  coldstart_YYYYMMDD_HHMMSS.log
+  daily_YYYYMMDD_HHMMSS.log
+  weekly_YYYYMMDD_HHMMSS.log
+  quarterly_YYYYMMDD_HHMMSS.log
+  ta_backfill_YYYYMMDD_HHMMSS.log
+  character_YYYYMMDD_HHMMSS.log
 ```
 
-**Console output**: INFO level and above
-**File output**: DEBUG level (more detailed)
-
-### Log Format
-
-```
-2024-01-15 06:00:01 [INFO] Starting daily update
-2024-01-15 06:00:02 [INFO] Found 503 symbols in database
-2024-01-15 06:00:03 [INFO] Downloading prices for 2024-01-15
-2024-01-15 06:00:45 [INFO] Loaded 503 price records
-2024-01-15 06:00:45 [INFO] Daily update complete
-```
+Console output is INFO; the file gets DEBUG.
 
 ## Troubleshooting
 
 ### "No existing data found. Run coldstart first."
-
-The database has no data. Run:
-```bash
-sawa coldstart
-```
+Database empty. Run `sawa coldstart`.
 
 ### "No symbols in database"
+`companies` table is empty. Run `sawa coldstart`, or `sawa coldstart
+--skip-downloads` if you already have CSVs in `data/`.
 
-The companies table is empty. Either:
-1. Run a full coldstart
-2. Or run coldstart with `--skip-downloads` if you have CSV data
+### "FRED_API_KEY not set" / market internals skipped
+The step is skipped with an ntfy alert. Set `FRED_API_KEY` to fix.
+Get a free key at <https://fred.stlouisfed.org/docs/api/api_key.html>.
 
-### API Rate Limits
+### API rate limits
+The pipeline uses `SyncRateLimiter` (default 5 req/s for Polygon — see
+`sawa/utils/constants.py`). On 429s, wait and retry.
 
-The pipeline includes rate limiting. If you hit limits:
-- Wait and retry
-- Check your API plan limits
-- Consider spreading updates over time
+### Database connection
+Confirm: `DATABASE_URL` set, PostgreSQL running, network reachable, user
+has DDL + DML on the target database.
 
-### Database Connection Issues
+### S3 download failures
+Confirm S3 credentials, network, and that the date range falls within
+Polygon's available history (typically 5+ years back).
 
-Check:
-1. DATABASE_URL is set correctly
-2. PostgreSQL is running
-3. Network connectivity to database host
-4. User has required permissions
+### Adjusting after a stock split
+Polygon's daily aggregates are split-adjusted at fetch time, but historical
+data already in the DB will not be retroactively adjusted. Run
+`sawa adjust-splits --ticker XYZ` or let `sawa adjust-splits` auto-detect
+recent splits.
 
-### S3 Download Failures
-
-Check:
-1. S3 credentials are valid
-2. Network connectivity
-3. Date range is within available data
-
-## Data Directory Structure
+## Data Directory Layout
 
 ```
 data/
-  sp500_symbols.txt           # List of tracked symbols
-  prices/
-    AAPL.csv                  # Per-symbol price files
-    MSFT.csv
-    ...
+  nasdaq1000_symbols.txt        # NASDAQ universe list (~5000 tickers)
+  data_mappings.json            # Optional CSV→table mapping for sawa.database.loader
+  prices/AAPL.csv               # Per-symbol price files (coldstart output)
   fundamentals/
-    balance_sheets.csv
-    cash_flow.csv
-    income_statements.csv
+    balance_sheets.csv          income_statements.csv      cash_flow.csv
+    *_update.csv                # Weekly delta files
   economy/
-    treasury_yields.csv
-    inflation.csv
-    inflation_expectations.csv
-    labor_market.csv
-  overviews/
-    overviews.csv
-  ratios/
-    ratios.csv
+    treasury_yields.csv         inflation.csv
+    inflation_expectations.csv  labor_market.csv
+    market_internals.csv        # FRED-sourced VIX / VIX3M / HY spread
+  overviews/overviews.csv
+  ratios/ratios.csv
 ```
 
 ## Monitoring
 
-For production deployments, consider:
+Production deployments should consider:
 
-1. **Cron job monitoring**: Use a service like Healthchecks.io
-2. **Log aggregation**: Send logs to centralized logging
-3. **Alerting**: Alert on failed runs or missing data
-4. **Database monitoring**: Track table sizes and query performance
-
-Example healthcheck integration in cron:
-
-```cron
-0 6 * * 1-5 /path/to/scripts/daily.sh && curl -s https://hc-ping.com/your-uuid
-```
+1. **Job monitoring**: configure `NTFY_TOPIC`; `market_scheduler.sh` already
+   sends start/stop/failure notifications.
+2. **Healthchecks**: pair the cron call with a heartbeat ping:
+   ```cron
+   0 18 * * 1-5 /path/to/scripts/daily.sh && curl -fsS https://hc-ping.com/UUID
+   ```
+3. **Data freshness**: `sawa data-status` reports latest date per price table.
+   Schedule as a sanity check.
+4. **Database size**: views in `sqlschema/06_views.sql` and
+   `22_views_advanced.sql` are good targets for slow-query monitoring.
