@@ -129,7 +129,7 @@ def main() -> int:
     # Show sample
     sample = rows[:3] + rows[-3:] if len(rows) > 6 else rows
     for r in sample:
-        vix = r.get("vix_close", "N/A")
+        vix = r.get("vix", "N/A")
         vix3m = r.get("vix3m", "N/A")
         hy = r.get("hy_spread", "N/A")
         logger.info(f"  {r['date']}: VIX={vix} VIX3M={vix3m} HY_Spread={hy}")

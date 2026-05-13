@@ -522,7 +522,7 @@ def load_market_internals(
 
     Args:
         conn: Database connection
-        rows: List of dicts with keys: date, vix_close, vix3m, hy_spread, etc.
+        rows: List of dicts with keys: date, vix, vix3m, hy_spread, etc.
         log: Logger instance
 
     Returns:
@@ -535,7 +535,7 @@ def load_market_internals(
 
     log.info(f"Loading {len(rows)} market internals rows...")
 
-    columns = ["date", "vix_close", "vix3m", "hy_spread", "put_call_ratio"]
+    columns = ["date", "vix", "vix3m", "hy_spread", "put_call_ratio"]
     db_rows = []
     for row in rows:
         db_row = {}

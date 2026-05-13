@@ -20,7 +20,8 @@ def get_economy_data(
 
     Args:
         indicator_type: One of "treasury_yields", "inflation",
-                       "inflation_expectations", or "labor_market"
+                       "inflation_expectations", "labor_market", or
+                       "market_internals" (VIX, VIX3M, HY spread).
         start_date: Start date in YYYY-MM-DD format
         end_date: End date (defaults to today)
         limit: Maximum rows (default: 100, max: 1000)
@@ -38,6 +39,7 @@ def get_economy_data(
         "inflation": _get_inflation,
         "inflation_expectations": _get_inflation_expectations,
         "labor_market": _get_labor_market,
+        "market_internals": _get_market_internals,
     }
 
     if indicator_type not in valid_indicators:
@@ -47,6 +49,65 @@ def get_economy_data(
         )
 
     return valid_indicators[indicator_type](start_date, end_date, limit)
+
+
+def get_market_internals(
+    start_date: str,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    Get daily market internals: CBOE VIX, VIX3M, HY spread.
+
+    Source: FRED (VIXCLS, VXVCLS, BAMLH0A0HYM2). One row per trading day.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date (defaults to today).
+        limit: Maximum rows (default: 100, max: 1000).
+
+    Returns:
+        Rows of {date, vix, vix3m, hy_spread, term_structure,
+        vix_sma_20, vix_std_20, vix_pct_rank_252d, hy_pct_rank_252d}
+        sorted ascending by date.
+    """
+    limit = min(limit, 1000)
+    if end_date is None:
+        end_date = date.today().isoformat()
+    return _get_market_internals(start_date, end_date, limit)
+
+
+def _get_market_internals(
+    start_date: str,
+    end_date: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Get market internals (VIX, VIX3M, HY spread) plus VIX-native metrics."""
+    sql = """
+        SELECT
+            date,
+            vix,
+            vix3m,
+            hy_spread,
+            term_structure,
+            vix_sma_20,
+            vix_std_20,
+            vix_pct_rank_252d,
+            hy_pct_rank_252d
+        FROM v_market_internals_enriched
+        WHERE date >= %(start_date)s
+            AND date <= %(end_date)s
+        ORDER BY date ASC
+        LIMIT %(limit)s
+    """
+
+    params = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "limit": limit,
+    }
+
+    return execute_query(sql, params)
 
 
 def _get_treasury_yields(
@@ -189,11 +250,14 @@ def get_economy_dashboard(limit: int = 10) -> list[dict[str, Any]]:
             yield_10_year,
             yield_30_year,
             cpi,
-            cpi_year_over_year as inflation_yoy,
-            market_5_year as inflation_expectation_5y,
-            market_10_year as inflation_expectation_10y,
+            inflation_yoy,
+            inflation_expectation_5y,
+            inflation_expectation_10y,
             unemployment_rate,
-            job_openings
+            job_openings,
+            vix,
+            vix3m,
+            hy_spread
         FROM v_economy_dashboard
         LIMIT %(limit)s
     """

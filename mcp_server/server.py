@@ -55,6 +55,7 @@ from .tools.corporate_actions import (  # noqa: E402
 from .tools.economy import (  # noqa: E402
     get_economy_dashboard,
     get_economy_data,
+    get_market_internals,
 )
 from .tools.fundamentals import get_fundamentals  # noqa: E402
 from .tools.indices import (  # noqa: E402
@@ -513,6 +514,7 @@ async def list_tools() -> list[Tool]:
                             "inflation",
                             "inflation_expectations",
                             "labor_market",
+                            "market_internals",
                         ],
                     },
                     "start_date": {
@@ -558,6 +560,37 @@ async def list_tools() -> list[Tool]:
                         "enum": ["compact", "normal", "detailed"],
                     },
                 },
+            },
+        ),
+        Tool(
+            name="get_market_internals",
+            description=(
+                "Get daily market internals from FRED: CBOE VIX (vix), "
+                "3-month VIX (vix3m), and US high-yield credit spread (hy_spread). "
+                "Includes derived metrics: term_structure (vix3m/vix), 20-day "
+                "SMA/stddev of VIX, and 252-day percentile ranks for VIX and "
+                "HY spread. One row per trading day."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in YYYY-MM-DD format",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date (defaults to today)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum rows (default: 100, max: 1000)",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 1000,
+                    },
+                },
+                "required": ["start_date"],
             },
         ),
         Tool(
@@ -619,6 +652,7 @@ async def list_tools() -> list[Tool]:
                 "  inflation(date PK, cpi, cpi_year_over_year, pce, ...)\n"
                 "  inflation_expectations(date PK, market_5_year, market_10_year, ...)\n"
                 "  labor_market(date PK, unemployment_rate, job_openings, ...)\n"
+                "  market_internals(date PK, vix, vix3m, hy_spread) - FRED daily\n"
                 "  stock_splits(ticker, execution_date, split_from, split_to)\n"
                 "  dividends(ticker, ex_dividend_date, cash_amount, frequency, ...)\n"
                 "  earnings(ticker, report_date, eps_estimate, eps_actual, revenue_actual, "
@@ -1976,6 +2010,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             logger.info("  Executing: get_economy_dashboard")
             result = await _run_sync(get_economy_dashboard, limit=arguments.get("limit", 10))
             chart = render_economy_dashboard(result, layout, theme)
+        elif name == "get_market_internals":
+            logger.info("  Executing: get_market_internals")
+            result = await _run_sync(
+                get_market_internals,
+                start_date=arguments["start_date"],
+                end_date=arguments.get("end_date"),
+                limit=arguments.get("limit", 100),
+            )
         elif name == "scan_ytd_performance":
             logger.info("  Executing: scan_ytd_performance")
             result = await scan_ytd_performance_async(
