@@ -44,9 +44,3 @@ SELECT
     ) AS hy_pct_rank_252d
 FROM market_internals
 ORDER BY date DESC;
-
--- Deprecated: vix_intraday was sourced from Polygon I:VIX, which requires
--- the paid Indices plan. The endpoint returns 403 on our plan. The table
--- is no longer created on fresh installs; FRED daily VIX close in
--- market_internals is the supported source. Existing empty tables may be
--- dropped manually: DROP TABLE IF EXISTS vix_intraday;
