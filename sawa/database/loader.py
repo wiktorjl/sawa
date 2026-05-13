@@ -207,7 +207,7 @@ def main() -> int:
         epilog="""\
 Examples:
   %(prog)s --csv data.csv --table companies --columns ticker,name
-  %(prog)s --mapping data_mappings.json
+  %(prog)s --mapping data/data_mappings.json
   %(prog)s --csv data.csv --table companies --upsert
 
 Environment: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD

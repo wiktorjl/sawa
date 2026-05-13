@@ -3,7 +3,7 @@
 Create nasdaq5000 index, populate from symbols file, and remove nasdaq100.
 
 Usage:
-    python scripts/populate_nasdaq5000.py nasdaq1000_symbols.txt
+    python scripts/populate_nasdaq5000.py data/nasdaq1000_symbols.txt
 """
 
 import os

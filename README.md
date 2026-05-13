@@ -110,10 +110,15 @@ Then just start asking questions.
 ### 3. Keep Data Fresh
 
 ```bash
-sawa daily          # Run after market close -- prices, news, technical indicators
-sawa weekly         # Economy data, corporate actions, stock character classification
-sawa quarterly      # Fundamentals (balance sheets, income, cash flow)
+sawa daily          # Run after market close -- prices, news, technical indicators, market internals
+sawa weekly         # Economy, overviews, news, corporate actions, stock character classification
+sawa quarterly      # Fundamentals (balance sheets, income, cash flow, ratios)
 ```
+
+For unattended operation see `scripts/market_scheduler.sh` — a single
+cron-driven script that manages intraday streaming during market hours and
+runs `daily` / `weekly` after close. See [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
+for the full operational playbook.
 
 ## Prerequisites
 
@@ -126,12 +131,14 @@ sawa quarterly      # Fundamentals (balance sheets, income, cash flow)
 
 Copy `.env.example` to `.env` and fill in your credentials:
 
-| Variable | Description |
-|----------|-------------|
-| `POLYGON_API_KEY` | Polygon.io REST API key |
-| `POLYGON_S3_ACCESS_KEY` | Polygon S3 access key |
-| `POLYGON_S3_SECRET_KEY` | Polygon S3 secret key |
-| `DATABASE_URL` | PostgreSQL connection string |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `POLYGON_API_KEY` | yes | Polygon.io REST API key (prices, fundamentals, news, splits/dividends) |
+| `POLYGON_S3_ACCESS_KEY` | yes | Polygon S3 access key (bulk historical price downloads) |
+| `POLYGON_S3_SECRET_KEY` | yes | Polygon S3 secret key |
+| `DATABASE_URL` | yes | PostgreSQL connection string |
+| `FRED_API_KEY` | yes | FRED API key — required for market internals (VIX, VIX3M, HY spread). Pipeline alerts and skips this step if missing. |
+| `NTFY_TOPIC` | no | ntfy.sh URL for pipeline push notifications |
 
 MCP server options (optional):
 
@@ -148,21 +155,35 @@ MCP server options (optional):
 sawa coldstart --years 5                   # Full setup with 5 years of data
 sawa coldstart --schema-only               # Apply schema without downloading data
 sawa coldstart --skip-downloads            # Load existing CSV files only
+sawa coldstart --no-drop                   # Re-apply schema without destroying data (safe upgrade)
 
 # Incremental updates
-sawa daily                                 # Prices, news, technical indicators
+sawa daily                                 # Prices, news, technical indicators, market internals
 sawa daily --from-date 2024-01-01          # Force update from specific date
-sawa weekly                                # Economy, corporate actions, stock character classification
+sawa weekly                                # Economy, overviews, news, corporate actions, character
 sawa weekly --skip-character               # Skip stock character classification
-sawa quarterly                             # Fundamentals
+sawa quarterly                             # Fundamentals + financial ratios
 
-# Intraday streaming
-sawa intraday                              # Stream 5-min bars (15-min delayed)
+# Intraday streaming (WebSocket, 15-min delayed)
+sawa intraday                              # Stream 5-min bars
 
-# Add symbols
-sawa add-symbol TSLA                       # Add a single ticker
-sawa add-symbol --file symbols.txt --years 5
+# Symbol management
+sawa add-symbol TSLA COIN                  # Add tickers ad-hoc
+sawa add-symbol --file data/nasdaq1000_symbols.txt --years 5
+
+# Indices and screens
+sawa index-list                            # List indices and constituent counts
+sawa index-show sp500                      # Show index details
+sawa index-update                          # Refresh constituents from Wikipedia
+sawa ta-screen --rsi-max 30 --index sp500  # Run a TA screener
+
+# Other
+sawa character                             # Stock character classification (also runs in weekly)
+sawa adjust-splits                         # Re-fetch adjusted prices after recent splits
+sawa data-status                           # Show data freshness across price tables
 ```
+
+Full subcommand help: `sawa <command> --help`.
 
 ## Database Schema
 
@@ -182,16 +203,21 @@ Schema files in `sqlschema/` are applied in numeric order. Core tables:
 
 ```
 sawa/                        # Core data pipeline package
-  api/                       # Polygon REST, S3, and WebSocket clients
+  api/                       # Polygon REST, S3, WebSocket clients + FRED
   calculation/               # Technical analysis engine (TA-Lib)
-  database/                  # PostgreSQL schema, loaders, connections
+  database/                  # Schema, loaders (load.py / news / intraday / ta_load), connections
   domain/                    # Immutable dataclasses (StockPrice, CompanyInfo, etc.)
   repositories/              # Repository pattern with caching layer
+  coldstart.py, daily.py,    # Pipeline entry points (invoked by `sawa <command>`)
+  weekly.py, quarterly.py
 mcp_server/                  # MCP server package
   charts/                    # Unicode chart rendering (plotext)
   tools/                     # 60+ MCP tool implementations
   services/                  # Service layer and domain converters
-sqlschema/                   # PostgreSQL schema files (applied in order)
+sqlschema/                   # PostgreSQL schema files (applied in numeric order)
+scripts/                     # Shell wrappers, cron scheduler, ad-hoc backfills
+data/                        # Local CSV cache + bundled symbol list
+docs/                        # Operations and maintenance docs
 tests/                       # Test suite
 ```
 

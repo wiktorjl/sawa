@@ -7,7 +7,7 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-from sawa.utils.resources import resolve_project_resource
+from sawa.utils.resources import packaged_resource_path, project_root
 
 TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
@@ -114,7 +114,12 @@ def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
 
 def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     """
-    Load NASDAQ-5000 symbols from the nasdaq1000_symbols.txt file.
+    Load NASDAQ-5000 symbols from the bundled ``nasdaq1000_symbols.txt`` file.
+
+    Source of truth lives at ``data/nasdaq1000_symbols.txt`` in the repo and is
+    re-shipped inside the wheel at ``sawa/nasdaq1000_symbols.txt`` via
+    ``[tool.hatch.build.targets.wheel.force-include]``. Despite the filename,
+    this list contains ~5000 NASDAQ-listed tickers.
 
     Args:
         logger: Logger instance
@@ -122,13 +127,15 @@ def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     Returns:
         List of ticker symbols
     """
-    symbols_file = resolve_project_resource(
-        Path("nasdaq1000_symbols.txt"),
-        "nasdaq1000_symbols.txt",
-    )
-    if not symbols_file.exists():
+    candidates = [
+        project_root() / "data" / "nasdaq1000_symbols.txt",
+        packaged_resource_path("nasdaq1000_symbols.txt"),
+    ]
+    symbols_file = next((c for c in candidates if c.exists()), None)
+    if symbols_file is None:
         raise FileNotFoundError(
-            f"NASDAQ-5000 symbols file not found: {symbols_file}"
+            "NASDAQ-5000 symbols file not found in any of: "
+            + ", ".join(str(c) for c in candidates)
         )
 
     symbols: list[str] = []
