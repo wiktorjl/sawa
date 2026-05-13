@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sawa.api.fred import FredClient  # noqa: E402
 from sawa.database.load import load_market_internals  # noqa: E402
-from sawa.utils import setup_logging  # noqa: E402
+from sawa.utils import alert_missing_api_key, setup_logging  # noqa: E402
 from sawa.utils.dates import DATE_FORMAT  # noqa: E402
 
 
@@ -55,7 +55,11 @@ def main() -> int:
     database_url = os.environ.get("DATABASE_URL")
 
     if not fred_api_key:
-        logger.error("FRED_API_KEY environment variable is required")
+        alert_missing_api_key(
+            "FRED_API_KEY",
+            "FRED market internals (VIX, VIX3M, HY spread)",
+            logger,
+        )
         logger.error("Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html")
         return 1
     if not database_url:

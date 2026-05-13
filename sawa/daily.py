@@ -19,7 +19,7 @@ from sawa.api import FredClient, PolygonClient
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import fetch_and_load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
-from sawa.utils import setup_logging
+from sawa.utils import alert_missing_api_key, setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 from sawa.utils.market_hours import get_market_date, is_after_market_close
@@ -165,43 +165,6 @@ def refresh_52week_extremes_if_needed(conn, logger: logging.Logger) -> bool:
     conn.commit()
     logger.info("  Refreshed 52-week extremes materialized view")
     return True
-
-
-def fetch_vix_intraday(
-    client: PolygonClient,
-    start_date: str,
-    end_date: str,
-    bar_size: int,
-    logger: logging.Logger,
-) -> list[dict[str, Any]]:
-    """Fetch VIX intraday bars from Polygon indices API."""
-    from datetime import datetime, timezone
-
-    logger.info(f"Fetching VIX intraday bars ({bar_size}min, {start_date} to {end_date})...")
-    try:
-        results = client.get_index_bars(
-            "I:VIX", start_date, end_date,
-            multiplier=bar_size, timespan="minute",
-        )
-    except Exception as e:
-        logger.warning(f"VIX intraday fetch failed: {e}")
-        return []
-
-    bars = []
-    for r in results:
-        if r.get("t"):
-            ts = datetime.fromtimestamp(r["t"] / 1000, tz=timezone.utc)
-            bars.append({
-                "timestamp": ts,
-                "open": r.get("o"),
-                "high": r.get("h"),
-                "low": r.get("l"),
-                "close": r.get("c"),
-                "bar_size_minutes": bar_size,
-            })
-
-    logger.info(f"  Fetched {len(bars)} VIX intraday bars")
-    return bars
 
 
 def fetch_market_internals(
@@ -478,25 +441,14 @@ def run_daily(
                 finally:
                     fred_client.close()
             else:
-                logger.info("\nSkipping market internals (FRED_API_KEY not set)")
+                alert_missing_api_key(
+                    "FRED_API_KEY",
+                    "FRED market internals (VIX, VIX3M, HY spread)",
+                    logger,
+                )
                 stats["market_internals_skipped"] = "FRED_API_KEY not set"
         else:
             logger.info("\nSkipping market internals (--skip-market-internals)")
-
-        # Fetch VIX intraday from Polygon (last 2 days to catch gaps)
-        if not skip_market_internals and not skip_prices:
-            logger.info("\nFetching VIX intraday bars from Polygon...")
-            vix_start = (date.today() - timedelta(days=2)).strftime(DATE_FORMAT)
-            vix_end = date.today().strftime(DATE_FORMAT)
-            vix_bars = fetch_vix_intraday(client, vix_start, vix_end, 5, logger)
-            if vix_bars:
-                from sawa.database.load import load_vix_intraday
-
-                with psycopg.connect(database_url) as conn:
-                    vix_loaded = load_vix_intraday(conn, vix_bars, logger)
-                stats["vix_intraday"] = vix_loaded
-            else:
-                stats["vix_intraday"] = 0
 
         stats["success"] = True
         logger.info("\n" + "=" * 60)
@@ -509,8 +461,6 @@ def run_daily(
             logger.info(f"  TA indicators: {stats.get('ta_calculated', 0)}")
         if "market_internals" in stats:
             logger.info(f"  Market internals: {stats['market_internals']}")
-        if stats.get("vix_intraday"):
-            logger.info(f"  VIX intraday bars: {stats['vix_intraday']}")
 
     except Exception as e:
         logger.error(f"Daily update failed: {e}")

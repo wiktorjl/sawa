@@ -16,6 +16,7 @@ from .dates import (
     timestamp_to_date,
 )
 from .logging import setup_logging
+from .notify import alert_missing_api_key, notify_ntfy
 from .sic_mapping import (
     clear_cache as clear_sic_cache,
 )
@@ -66,6 +67,9 @@ __all__ = [
     "timestamp_to_date",
     # logging
     "setup_logging",
+    # notify
+    "notify_ntfy",
+    "alert_missing_api_key",
     # sic_mapping
     "map_sic_to_gics",
     "get_sic_mapping",
