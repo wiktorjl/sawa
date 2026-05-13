@@ -14,7 +14,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from sawa.utils import setup_logging
+from sawa.utils import monitored_run, setup_logging
 from sawa.utils.dates import parse_date
 
 # Load .env file from current directory or parent directories
@@ -71,32 +71,32 @@ def cmd_coldstart(args) -> int:
         return 1
 
     try:
-        stats = run_coldstart(
-            api_key=api_key,
-            s3_access_key=s3_access,
-            s3_secret_key=s3_secret,
-            database_url=db_url,
-            schema_dir=Path(args.schema_dir),
-            output_dir=Path(args.output_dir),
-            years=args.years,
-            symbols_file=args.symbols_file,
-            drop_tables=not args.no_drop,
-            drop_only=drop_only,
-            confirm_drop=args.confirm_drop,
-            schema_only=schema_only,
-            load_only=load_only,
-            skip_downloads=skip_downloads,
-            skip_prices=args.skip_prices,
-            skip_fundamentals=args.skip_fundamentals,
-            skip_overviews=args.skip_overviews,
-            skip_economy=args.skip_economy,
-            skip_ratios=args.skip_ratios,
-            skip_news=args.skip_news,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Cold start failed: {e}")
+        with monitored_run("coldstart", logger=logger) as ctx:
+            ctx["stats"] = run_coldstart(
+                api_key=api_key,
+                s3_access_key=s3_access,
+                s3_secret_key=s3_secret,
+                database_url=db_url,
+                schema_dir=Path(args.schema_dir),
+                output_dir=Path(args.output_dir),
+                years=args.years,
+                symbols_file=args.symbols_file,
+                drop_tables=not args.no_drop,
+                drop_only=drop_only,
+                confirm_drop=args.confirm_drop,
+                schema_only=schema_only,
+                load_only=load_only,
+                skip_downloads=skip_downloads,
+                skip_prices=args.skip_prices,
+                skip_fundamentals=args.skip_fundamentals,
+                skip_overviews=args.skip_overviews,
+                skip_economy=args.skip_economy,
+                skip_ratios=args.skip_ratios,
+                skip_news=args.skip_news,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -120,20 +120,20 @@ def cmd_daily(args) -> int:
         return 1
 
     try:
-        stats = run_daily(
-            api_key=api_key,
-            database_url=db_url,
-            force_from_date=args.from_date,
-            skip_news=args.skip_news,
-            skip_ta=args.skip_ta or args.news_only,
-            skip_prices=args.news_only,
-            skip_market_internals=args.skip_market_internals or args.news_only,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Daily update failed: {e}")
+        with monitored_run("daily", logger=logger) as ctx:
+            ctx["stats"] = run_daily(
+                api_key=api_key,
+                database_url=db_url,
+                force_from_date=args.from_date,
+                skip_news=args.skip_news,
+                skip_ta=args.skip_ta or args.news_only,
+                skip_prices=args.news_only,
+                skip_market_internals=args.skip_market_internals or args.news_only,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -158,15 +158,15 @@ def cmd_intraday(args) -> int:
         return 1
 
     try:
-        stats = run_intraday(
-            api_key=api_key,
-            database_url=db_url,
-            bar_size=args.bar_size,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Intraday streaming failed: {e}")
+        with monitored_run("intraday", logger=logger) as ctx:
+            ctx["stats"] = run_intraday(
+                api_key=api_key,
+                database_url=db_url,
+                bar_size=args.bar_size,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -216,17 +216,17 @@ def cmd_add_symbol(args) -> int:
             unique_symbols.append(s_upper)
 
     try:
-        stats = run_add_symbols(
-            api_key=api_key,
-            database_url=db_url,
-            symbols=unique_symbols,
-            years=args.years,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Add symbols failed: {e}")
+        with monitored_run("add-symbol", logger=logger) as ctx:
+            ctx["stats"] = run_add_symbols(
+                api_key=api_key,
+                database_url=db_url,
+                symbols=unique_symbols,
+                years=args.years,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -250,22 +250,22 @@ def cmd_weekly(args) -> int:
         return 1
 
     try:
-        stats = run_weekly(
-            api_key=api_key,
-            database_url=db_url,
-            output_dir=Path(args.output_dir),
-            skip_economy=args.skip_economy,
-            skip_overviews=args.skip_overviews,
-            skip_news=args.skip_news,
-            skip_corporate_actions=args.skip_corporate_actions,
-            skip_character=args.skip_character,
-            character_workers=args.character_workers,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Weekly update failed: {e}")
+        with monitored_run("weekly", logger=logger) as ctx:
+            ctx["stats"] = run_weekly(
+                api_key=api_key,
+                database_url=db_url,
+                output_dir=Path(args.output_dir),
+                skip_economy=args.skip_economy,
+                skip_overviews=args.skip_overviews,
+                skip_news=args.skip_news,
+                skip_corporate_actions=args.skip_corporate_actions,
+                skip_character=args.skip_character,
+                character_workers=args.character_workers,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -289,18 +289,18 @@ def cmd_quarterly(args) -> int:
         return 1
 
     try:
-        stats = run_quarterly(
-            api_key=api_key,
-            database_url=db_url,
-            output_dir=Path(args.output_dir),
-            skip_fundamentals=args.skip_fundamentals,
-            skip_ratios=args.skip_ratios,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Quarterly update failed: {e}")
+        with monitored_run("quarterly", logger=logger) as ctx:
+            ctx["stats"] = run_quarterly(
+                api_key=api_key,
+                database_url=db_url,
+                output_dir=Path(args.output_dir),
+                skip_fundamentals=args.skip_fundamentals,
+                skip_ratios=args.skip_ratios,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -323,17 +323,17 @@ def cmd_ta_backfill(args) -> int:
     tickers = [args.ticker] if args.ticker else None
 
     try:
-        stats = run_ta_backfill(
-            database_url=db_url,
-            tickers=tickers,
-            workers=args.workers,
-            dry_run=args.dry_run,
-            estimate_only=args.estimate,
-            log=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"TA backfill failed: {e}")
+        with monitored_run("ta-backfill", logger=logger) as ctx:
+            ctx["stats"] = run_ta_backfill(
+                database_url=db_url,
+                tickers=tickers,
+                workers=args.workers,
+                dry_run=args.dry_run,
+                estimate_only=args.estimate,
+                log=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -598,20 +598,20 @@ def cmd_corporate_actions(args) -> int:
     include_earnings = args.include_earnings and not args.splits_only and not args.dividends_only
 
     try:
-        stats = run_corporate_actions_update(
-            api_key=api_key,
-            database_url=db_url,
-            start_date=start_date,
-            tickers=tickers,
-            include_splits=include_splits,
-            include_dividends=include_dividends,
-            include_earnings=include_earnings,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Corporate actions update failed: {e}")
+        with monitored_run("corporate-actions", logger=logger) as ctx:
+            ctx["stats"] = run_corporate_actions_update(
+                api_key=api_key,
+                database_url=db_url,
+                start_date=start_date,
+                tickers=tickers,
+                include_splits=include_splits,
+                include_dividends=include_dividends,
+                include_earnings=include_earnings,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -639,17 +639,17 @@ def cmd_adjust_splits(args) -> int:
     since = parse_date(args.since) if args.since else None
 
     try:
-        stats = refresh_split_adjusted_prices(
-            api_key=api_key,
-            database_url=db_url,
-            tickers=tickers,
-            since=since,
-            dry_run=args.dry_run,
-            logger=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Split adjustment failed: {e}")
+        with monitored_run("adjust-splits", logger=logger) as ctx:
+            ctx["stats"] = refresh_split_adjusted_prices(
+                api_key=api_key,
+                database_url=db_url,
+                tickers=tickers,
+                since=since,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
@@ -670,19 +670,107 @@ def cmd_character(args) -> int:
     tickers = [t.upper() for t in args.tickers] if args.tickers else None
 
     try:
-        stats = run_stock_character_batch(
-            database_url=db_url,
-            tickers=tickers,
-            workers=args.workers,
-            run_date=args.run_date,
-            log=logger,
-        )
-        return 0 if stats.get("success") else 1
-    except Exception as e:
-        logger.error(f"Stock character batch failed: {e}")
+        with monitored_run("character", logger=logger) as ctx:
+            ctx["stats"] = run_stock_character_batch(
+                database_url=db_url,
+                tickers=tickers,
+                workers=args.workers,
+                run_date=args.run_date,
+                log=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
         if args.verbose:
             raise
         return 1
+
+
+def cmd_logs(args) -> int:
+    """Inspect log files written by sawa runs."""
+    from sawa.logs import (
+        format_entry_row,
+        grep_runs,
+        latest_run,
+        list_runs,
+        tail_lines,
+    )
+    from sawa.utils.logging import get_default_log_dir
+
+    action = args.logs_action
+
+    if action == "path":
+        print(get_default_log_dir())
+        return 0
+
+    if action == "list":
+        entries = list_runs(run_type=args.type, days=args.days)
+        if not entries:
+            print("No matching log files.")
+            return 0
+        print(f"{'When':<19}  {'Type':<12} {'Size':>8}  Filename")
+        print(f"{'‾' * 19}  {'‾' * 12} {'‾' * 8}  {'‾' * 8}")
+        for entry in entries[: args.limit]:
+            print(format_entry_row(entry))
+        if len(entries) > args.limit:
+            print(f"… {len(entries) - args.limit} more (use --limit to show all)")
+        return 0
+
+    if action == "tail":
+        entry = latest_run(run_type=args.type)
+        if entry is None:
+            print("No matching log files.")
+            return 1
+        print(f"# {entry.filename} ({entry.when:%Y-%m-%d %H:%M:%S})")
+        for line in tail_lines(entry.path, args.lines):
+            print(line, end="" if line.endswith("\n") else "\n")
+        return 0
+
+    if action == "grep":
+        results = grep_runs(
+            args.pattern,
+            run_type=args.type,
+            days=args.days,
+            max_matches=args.limit,
+        )
+        if not results:
+            print(f"No matches for {args.pattern!r} in the last {args.days} day(s).")
+            return 1
+        current_file: str | None = None
+        for entry, lineno, line in results:
+            if entry.filename != current_file:
+                print(f"\n# {entry.filename}")
+                current_file = entry.filename
+            print(f"  {lineno}: {line}")
+        return 0
+
+    print("Unknown logs action. Use: list | tail | grep | path")
+    return 1
+
+
+def cmd_notify(args) -> int:
+    """Send a notification through the configured notifier."""
+    from sawa.utils import get_notifier
+    from sawa.utils.notify import NotificationLevel
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="notify")
+    notifier = get_notifier(logger)
+
+    level_map = {
+        "info": NotificationLevel.INFO,
+        "warning": NotificationLevel.WARNING,
+        "error": NotificationLevel.ERROR,
+    }
+
+    sent = notifier.send(
+        title=args.title,
+        body=args.body or "",
+        level=level_map[args.level],
+        tags=args.tag or None,
+    )
+    if not sent:
+        logger.warning("Notification not delivered (no backend configured or send failed)")
+        return 1
+    return 0
 
 
 def cmd_data_status(args) -> int:
@@ -777,6 +865,8 @@ Commands:
   adjust-splits       Re-fetch adjusted prices after stock splits
   character           Classify stocks by behavioral character (Hurst, regime, scorecard)
   data-status         Show latest stock price data in the database
+  logs                Inspect sawa log files (list, tail, grep, path)
+  notify              Send a notification through the configured backend
 
 Examples:
   sawa coldstart --years 5
@@ -1214,6 +1304,79 @@ Environment Variables:
     character_parser.add_argument("--log-dir", help="Directory for log files")
     character_parser.add_argument("-v", "--verbose", action="store_true")
     character_parser.set_defaults(func=cmd_character)
+
+    # Logs subcommand
+    logs_parser = subparsers.add_parser(
+        "logs",
+        help="Inspect log files (list, tail, grep)",
+        description="Browse sawa log files in ~/.sawa/logs/.",
+    )
+    logs_sub = logs_parser.add_subparsers(dest="logs_action", required=True)
+
+    logs_list = logs_sub.add_parser("list", help="List log files, newest first")
+    logs_list.add_argument(
+        "--type",
+        help="Filter to a single run type (daily, weekly, intraday, …)",
+    )
+    logs_list.add_argument(
+        "--days", type=int, help="Only include logs from the last N days"
+    )
+    logs_list.add_argument(
+        "--limit", type=int, default=25, help="Maximum rows to display (default: 25)"
+    )
+
+    logs_tail = logs_sub.add_parser("tail", help="Tail the most recent log of a type")
+    logs_tail.add_argument(
+        "--type", help="Run type to tail (default: most recent of any type)"
+    )
+    logs_tail.add_argument(
+        "--lines", "-n", type=int, default=50, help="Lines to show (default: 50)"
+    )
+
+    logs_grep = logs_sub.add_parser("grep", help="Regex search across recent logs")
+    logs_grep.add_argument("pattern", help="Regex pattern to search for")
+    logs_grep.add_argument("--type", help="Restrict to a single run type")
+    logs_grep.add_argument(
+        "--days", type=int, default=7, help="Search the last N days (default: 7)"
+    )
+    logs_grep.add_argument(
+        "--limit", type=int, default=200, help="Maximum matches (default: 200)"
+    )
+
+    logs_sub.add_parser("path", help="Print the resolved log directory")
+
+    logs_parser.add_argument("-v", "--verbose", action="store_true")
+    logs_parser.set_defaults(func=cmd_logs)
+
+    # Notify subcommand — same Notifier the run wrappers use, callable from bash.
+    notify_parser = subparsers.add_parser(
+        "notify",
+        help="Send a notification via the configured backend (NTFY by default)",
+        description=(
+            "Thin wrapper around the Notifier abstraction so the bash scheduler "
+            "and other shell scripts can dispatch alerts without duplicating "
+            "curl logic."
+        ),
+    )
+    notify_parser.add_argument("--title", required=True, help="Notification title")
+    notify_parser.add_argument(
+        "--body", default="", help="Notification body (default: empty)"
+    )
+    notify_parser.add_argument(
+        "--level",
+        choices=["info", "warning", "error"],
+        default="info",
+        help="Severity (info/warning/error). Maps to ntfy Priority header.",
+    )
+    notify_parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="Tag (repeatable). Maps to ntfy ``Tags`` header.",
+    )
+    notify_parser.add_argument("--log-dir", help="Override log directory")
+    notify_parser.add_argument("-v", "--verbose", action="store_true")
+    notify_parser.set_defaults(func=cmd_notify)
 
     # Data status subcommand
     status_parser = subparsers.add_parser(

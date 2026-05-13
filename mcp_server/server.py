@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sys
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -102,9 +103,12 @@ from .tools.volume_analysis import (  # noqa: E402
     get_advanced_volume_indicators,
     get_volume_profile,
 )
+from .monitoring import configure_file_logging, record_call_outcome  # noqa: E402
 from .validation import validate_tool_arguments  # noqa: E402
 
-# Setup logging
+# Setup logging. stderr handler is kept so MCP clients (Claude Desktop / Code)
+# still see live diagnostics; configure_file_logging attaches a daily-rotated
+# file handler under ~/.sawa/logs/mcp.log so the audit trail survives the pipe.
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
@@ -113,6 +117,7 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
+_mcp_log_file = configure_file_logging(logger)
 
 
 async def _run_sync(func, *args, **kwargs):
@@ -1835,6 +1840,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if arguments:
         logger.info(f"  Arguments: {arguments}")
 
+    started = time.monotonic()
     try:
         # Validate common arguments (tickers, dates, limits, etc.)
         arguments = validate_tool_arguments(name, arguments)
@@ -2362,13 +2368,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 parts.append("")
                 parts.append(hint)
 
+        duration_ms = (time.monotonic() - started) * 1000
+        record_call_outcome(name, success=True, duration_ms=duration_ms, logger=logger)
         return [TextContent(type="text", text="\n".join(parts))]
 
     except Exception as e:
+        duration_ms = (time.monotonic() - started) * 1000
         logger.error(f"Error executing tool {name}: {e}", exc_info=True)
+        record_call_outcome(
+            name, success=False, duration_ms=duration_ms, logger=logger, error=e
+        )
         return [TextContent(type="text", text=f"Error: {str(e)}")]
     except BaseException as e:
+        duration_ms = (time.monotonic() - started) * 1000
         logger.error(f"Unexpected error in tool {name}: {e}", exc_info=True)
+        record_call_outcome(
+            name, success=False, duration_ms=duration_ms, logger=logger, error=e
+        )
         return [TextContent(type="text", text=f"Server error: {str(e)}")]
 
 
@@ -2390,6 +2406,8 @@ def _market_hours_hint() -> str | None:
 async def main():
     """Main entry point."""
     logger.info("Starting Stock Data MCP Server")
+    if _mcp_log_file:
+        logger.info("File log: %s", _mcp_log_file)
     logger.info("Press Ctrl-C to exit gracefully")
 
     # Verify database connection
