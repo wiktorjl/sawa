@@ -19,7 +19,8 @@ from sawa.api import FredClient, PolygonClient
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import fetch_and_load_news
 from sawa.repositories.rate_limiter import SyncRateLimiter
-from sawa.utils import alert_missing_api_key, setup_logging
+from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
+from sawa.utils.notify import NotificationLevel
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 from sawa.utils.market_hours import get_market_date, is_after_market_close
@@ -332,6 +333,17 @@ def run_daily(
             except psycopg.Error as e:
                 logger.warning(f"52-week extremes refresh failed: {e}")
                 stats["52week_extremes_refresh_error"] = str(e)
+                get_notifier(logger).send(
+                    title="Sawa: 52-week extremes refresh failed",
+                    body=(
+                        f"REFRESH MATERIALIZED VIEW mv_52week_extremes failed during daily run.\n"
+                        f"{type(e).__name__}: {e}\n\n"
+                        "Screener results that depend on 52-week highs/lows will be stale "
+                        "until the next successful run."
+                    ),
+                    level=NotificationLevel.WARNING,
+                    tags=["warning", "daily", "mv_refresh"],
+                )
 
         # Fetch and load news (always, unless skipped)
         if not skip_news:

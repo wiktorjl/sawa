@@ -16,9 +16,15 @@ import psycopg
 from sawa.api import FredClient, PolygonClient
 from sawa.corporate_actions import run_corporate_actions_update
 from sawa.database import get_last_date, get_symbols_from_db
-from sawa.database.load import load_companies, load_economy, load_market_internals, load_news
+from sawa.database.load import (
+    load_companies,
+    load_economy,
+    load_market_internals,
+    load_news,
+)
 from sawa.repositories.rate_limiter import SyncRateLimiter
-from sawa.utils import alert_missing_api_key, setup_logging
+from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
+from sawa.utils.notify import NotificationLevel
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
@@ -281,6 +287,17 @@ def run_weekly(
             except Exception as e:
                 logger.warning(f"Market internals update failed: {e}")
                 stats["market_internals"] = 0
+                stats["market_internals_error"] = str(e)
+                get_notifier(logger).send(
+                    title="Sawa: market internals update failed",
+                    body=(
+                        f"FRED market internals fetch/load failed during weekly run.\n"
+                        f"{type(e).__name__}: {e}\n\n"
+                        "VIX/VIX3M/HY spread will be stale until the next successful run."
+                    ),
+                    level=NotificationLevel.WARNING,
+                    tags=["warning", "weekly", "market_internals"],
+                )
             finally:
                 fred_client.close()
         else:

@@ -369,14 +369,14 @@ class MarketInternals:
 
     Attributes:
         date: Trading date
-        vix_close: CBOE VIX closing value
+        vix: CBOE VIX daily close
         vix3m: CBOE S&P 500 3-Month Volatility Index
         hy_spread: ICE BofA US High Yield Index OAS
         put_call_ratio: CBOE equity put/call ratio
     """
 
     date: date
-    vix_close: Decimal | None = None
+    vix: Decimal | None = None
     vix3m: Decimal | None = None
     hy_spread: Decimal | None = None
     put_call_ratio: Decimal | None = None

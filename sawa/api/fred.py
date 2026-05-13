@@ -16,7 +16,7 @@ BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 # FRED series IDs for market internals
 SERIES = {
-    "vix_close": "VIXCLS",
+    "vix": "VIXCLS",
     "vix3m": "VXVCLS",
     "hy_spread": "BAMLH0A0HYM2",
 }
@@ -89,7 +89,7 @@ class FredClient:
         Fetch all market internals series and merge by date.
 
         Returns:
-            List of dicts with keys: date, vix_close, vix3m, hy_spread.
+            List of dicts with keys: date, vix, vix3m, hy_spread.
             Missing values for a given date are None.
         """
         # Fetch all series
@@ -110,7 +110,7 @@ class FredClient:
         # Use VIX dates as anchor (trading days only).
         # HY spread sometimes reports on weekends/holidays (month-ends),
         # which would create orphan rows with no VIX data.
-        vix_dates = set(series_data.get("vix_close", {}).keys())
+        vix_dates = set(series_data.get("vix", {}).keys())
         vix3m_dates = set(series_data.get("vix3m", {}).keys())
         trading_dates = vix_dates | vix3m_dates
 
