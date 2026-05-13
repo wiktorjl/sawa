@@ -84,3 +84,8 @@ ORDER BY date DESC;
 DELETE FROM technical_indicators WHERE ticker IN ('^VIX', '^VIX3M');
 DELETE FROM stock_prices         WHERE ticker IN ('^VIX', '^VIX3M');
 DELETE FROM companies            WHERE ticker IN ('^VIX', '^VIX3M');
+
+-- Step 6: drop the empty vix_intraday table. It was sourced from Polygon
+-- I:VIX (requires paid Indices plan; returns 403 on ours) and never
+-- received data. No code references it.
+DROP TABLE IF EXISTS vix_intraday;
