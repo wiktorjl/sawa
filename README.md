@@ -195,9 +195,28 @@ Schema files in `sqlschema/` are applied in numeric order. Core tables:
 - **balance_sheets, income_statements, cash_flows** -- Quarterly/annual fundamentals
 - **technical_indicators** -- SMA, RSI, MACD, Bollinger Bands, ATR
 - **treasury_yields, inflation, labor_market** -- Economic indicators
+- **market_internals** -- VIX, VIX3M, HY credit spread (FRED)
 - **indices, index_constituents** -- S&P 500 and NASDAQ index membership
 - **stock_splits, dividends, earnings** -- Corporate actions
 - **news_articles, news_sentiment** -- News with per-ticker sentiment
+
+## Data Sources
+
+| Source | Auth | Provides |
+|--------|------|----------|
+| Polygon REST (`api.polygon.io`) | `POLYGON_API_KEY` | Daily prices, fundamentals, ratios, news + sentiment, splits, dividends, ticker details, treasury/inflation/labor (Polygon's `/fed/v1/*`) |
+| Polygon S3 (`files.polygon.io`) | `POLYGON_S3_*` | Bulk historical daily OHLCV (used by `coldstart`; faster than REST for multi-year backfills) |
+| Polygon WebSocket (`delayed.polygon.io`) | `POLYGON_API_KEY` | Live 5-min bars during market hours (15-min delayed on the basic tier) |
+| FRED (`api.stlouisfed.org`) | `FRED_API_KEY` | Market internals: VIX (`VIXCLS`), VIX3M (`VXVCLS`), HY credit spread (`BAMLH0A0HYM2`) |
+| Wikipedia | none | S&P 500 constituent list (HTML scrape) |
+| `data/nasdaq1000_symbols.txt` | none | NASDAQ-5000 constituent list (bundled into the wheel) |
+| `yfinance` (optional script) | none | Earnings dates via `scripts/populate_earnings.py` (Polygon's earnings endpoint currently returns no data) |
+
+Technical indicators and the stock-character tables are **computed
+locally** from `stock_prices` (TA-Lib) — they have no external source.
+
+For the full mapping of every external endpoint, target table, and
+loader module, see [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
 
 ## Project Structure
 
