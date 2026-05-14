@@ -2,7 +2,9 @@
 
 Operational reference for the Sawa data pipeline. For a higher-level overview
 see [MAINTENANCE.md](MAINTENANCE.md); for project intro see the top-level
-[`README.md`](../README.md).
+[`README.md`](../README.md). For the per-table mapping of external data
+sources (which API populates which table) see
+[DATA_SOURCES.md](DATA_SOURCES.md).
 
 ## Prerequisites
 

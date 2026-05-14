@@ -5,36 +5,39 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `00_setup.sql` | Documentation + verification queries (does not create anything) |
-| `01_companies.sql` | `companies` (ticker is PK; central reference) |
-| `02_market_data.sql` | `stock_prices`, `financial_ratios` |
-| `03_fundamentals.sql` | `balance_sheets`, `income_statements`, `cash_flows` |
-| `04_economy.sql` | `treasury_yields`, `inflation`, `inflation_expectations`, `labor_market` |
-| `05_indexes.sql` | Performance indexes for the above tables |
-| `06_views.sql` | Read-only views: `v_company_summary`, `v_economy_dashboard`, `v_latest_fundamentals`, `v_sector_summary`, dashboard market internals view |
-| `07_procedures.sql` | PL/pgSQL helpers for loading |
-| `08_sic_gics_mapping.sql` | `sic_gics_mapping` table (SIC → GICS) |
-| `09_sic_gics_data.sql` | Seed data for `sic_gics_mapping` |
-| `10_news.sql` | `news_articles`, `news_article_tickers`, `news_sentiment` |
-| `11_technical_indicators.sql` | `technical_indicators`, `technical_indicator_metadata` |
-| `12_indices.sql` | `indices`, `index_constituents`, seeds (`sp500`, `nasdaq5000`) |
-| `13_gics_sector_function.sql` | `get_gics_sector(sic_code)` helper |
-| `14_52week_extremes.sql` | `mv_52week_extremes` materialized view |
-| `16_cleanup.sql` | Migration: drop old TUI/Web tables (no-op on fresh installs) |
-| `17_extended_sma.sql` | Adds 150/200-day SMA columns |
-| `18_corporate_actions.sql` | `stock_splits`, `dividends`, `earnings` |
-| `19_earnings_yfinance.sql` | Earnings schema additions |
-| `20_drop_revenue_estimate.sql` | Drop a deprecated column |
-| `21_intraday_prices.sql` | `stock_prices_intraday` (5-min bars + view `stock_prices_live`) |
-| `22_views_advanced.sql` | Views that depend on later tables |
-| `23_add_cpi_yoy.sql` | Adds CPI year-over-year column |
-| `24_widen_price_precision.sql` | Widens numeric precision on price columns |
-| `25_trader_cards.sql` | `trader_cards` table |
-| `26_market_internals.sql` | `market_internals` (VIX, VIX3M, HY spread, put/call) |
-| `27_stock_character.sql` | Tables for stock character classification |
-| `28_dashboard_market_internals.sql` | Dashboard view over market internals |
+| File | Purpose | Data source for the tables it creates |
+|------|---------|---------------------------------------|
+| `00_setup.sql` | Documentation + verification queries (does not create anything) | — |
+| `01_companies.sql` | `companies` (ticker is PK; central reference) | Polygon REST `/v3/reference/tickers/{t}`; ticker universe from Wikipedia (sp500) + bundled `data/nasdaq1000_symbols.txt` (nasdaq5000) |
+| `02_market_data.sql` | `stock_prices`, `financial_ratios` | Polygon S3 (bulk) + Polygon REST `/v2/aggs/...` (incremental); `/stocks/financials/v1/ratios` |
+| `03_fundamentals.sql` | `balance_sheets`, `income_statements`, `cash_flows` | Polygon REST `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements}` |
+| `04_economy.sql` | `treasury_yields`, `inflation`, `inflation_expectations`, `labor_market` | Polygon REST `/fed/v1/{treasury-yields,inflation,inflation-expectations,labor-market}` |
+| `05_indexes.sql` | Performance indexes for the above tables | — (DDL only) |
+| `06_views.sql` | Read-only views: `v_company_summary`, `v_economy_dashboard`, `v_latest_fundamentals`, `v_sector_summary`, dashboard market internals view | computed (views) |
+| `07_procedures.sql` | PL/pgSQL helpers for loading | — |
+| `08_sic_gics_mapping.sql` | `sic_gics_mapping` table (SIC → GICS) | seed data (next file) |
+| `09_sic_gics_data.sql` | Seed data for `sic_gics_mapping` | bundled SQL seed |
+| `10_news.sql` | `news_articles`, `news_article_tickers`, `news_sentiment` | Polygon REST `/v2/reference/news` (sentiment is supplied by Polygon in the `insights` field, not computed locally) |
+| `11_technical_indicators.sql` | `technical_indicators`, `technical_indicator_metadata` | **computed locally** from `stock_prices` via TA-Lib (`sawa/calculation/`, `sawa/ta_backfill.py`) |
+| `12_indices.sql` | `indices`, `index_constituents`, seeds (`sp500`, `nasdaq5000`) | seed data + Wikipedia (sp500) + bundled file (nasdaq5000) |
+| `13_gics_sector_function.sql` | `get_gics_sector(sic_code)` helper | — |
+| `14_52week_extremes.sql` | `mv_52week_extremes` materialized view | computed from `stock_prices` |
+| `16_cleanup.sql` | Migration: drop old TUI/Web tables (no-op on fresh installs) | — |
+| `17_extended_sma.sql` | Adds 150/200-day SMA columns | computed (TA-Lib) |
+| `18_corporate_actions.sql` | `stock_splits`, `dividends`, `earnings` | Polygon REST `/v3/reference/{splits,dividends}`; `earnings` populated manually via `scripts/populate_earnings.py` (yfinance) — see `docs/DATA_SOURCES.md` §2.7 |
+| `19_earnings_yfinance.sql` | Earnings schema additions | yfinance (via populate script) |
+| `20_drop_revenue_estimate.sql` | Drop a deprecated column | — |
+| `21_intraday_prices.sql` | `stock_prices_intraday` (5-min bars + view `stock_prices_live`) | Polygon WebSocket (`wss://delayed.polygon.io/stocks`) |
+| `22_views_advanced.sql` | Views that depend on later tables | computed (views) |
+| `23_add_cpi_yoy.sql` | Adds CPI year-over-year column | computed from `inflation` |
+| `24_widen_price_precision.sql` | Widens numeric precision on price columns | — |
+| `25_trader_cards.sql` | `trader_cards` table | externally parsed from chart-analysis card.md files; no auto loader |
+| `26_market_internals.sql` | `market_internals` (VIX, VIX3M, HY spread) | FRED (`VIXCLS`, `VXVCLS`, `BAMLH0A0HYM2`) — sole source since commit `2d4e350` |
+| `27_stock_character.sql` | Tables for stock character classification (`stock_character_classification`, `stock_character_baseline`, `stock_character_flags`, `stock_character_scorecard`) | **computed locally** from `stock_prices` + `technical_indicators` + fundamentals (`sawa/calculation/stock_character*.py`, `sawa/stock_character_batch.py`) |
+| `29_consolidate_vix.sql` | Migration: drop legacy VIX rows from `stock_prices` / `companies` (see [`docs/VIX_MIGRATION.md`](../docs/VIX_MIGRATION.md)) | — |
+
+For the canonical mapping of external data source → table → loader →
+pipeline command, see [`docs/DATA_SOURCES.md`](../docs/DATA_SOURCES.md).
 
 ## Setup
 

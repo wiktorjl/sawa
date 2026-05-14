@@ -7,6 +7,8 @@ code to recover the mental model.
 
 Companion docs:
 - [`README.md`](../README.md) — short user-facing intro
+- [`docs/DATA_SOURCES.md`](DATA_SOURCES.md) — every external data source
+  mapped to the table(s), loader, and pipeline command that touch it
 - [`docs/OPERATIONS.md`](OPERATIONS.md) — day-to-day operational reference
 - [`sqlschema/README.md`](../sqlschema/README.md) — schema file catalogue
 - [`docs/STOCK_CHARACTER.md`](STOCK_CHARACTER.md) — build spec for the
@@ -26,13 +28,24 @@ Sawa has two halves that share a single PostgreSQL database:
 │   - intraday WebSocket   │        │  - read-only queries + views │
 └──────────────────────────┘        └──────────────────────────────┘
         │
-        ├── Polygon REST   (prices, fundamentals, news, splits, dividends)
-        ├── Polygon S3     (bulk price history)
-        ├── Polygon WS     (live 5-min bars, 15-min delayed)
-        └── FRED API       (market internals: VIX, VIX3M, HY spread)
+        ├── Polygon REST   prices, fundamentals, ratios, news (incl.
+        │                  per-ticker sentiment), splits, dividends,
+        │                  ticker details, treasury / inflation / labor
+        │                  (Polygon's `/fed/v1/*`)
+        ├── Polygon S3     bulk historical OHLCV (coldstart only)
+        ├── Polygon WS     live 5-min bars, 15-min delayed
+        ├── FRED API       market internals: VIX, VIX3M, HY spread
+        ├── Wikipedia      S&P 500 constituent list (HTML scrape)
+        └── bundled file   NASDAQ-5000 list (data/nasdaq1000_symbols.txt)
 ```
 
 The CLI is the writer. The MCP server is the reader. They share PostgreSQL.
+
+For the full per-table mapping (which endpoint, which loader, which
+pipeline command refreshes it, refresh cadence) see
+[`DATA_SOURCES.md`](DATA_SOURCES.md). Technical indicators and the
+stock-character tables are computed locally from `stock_prices` and have
+no external source.
 
 ## 2. The four pipeline commands
 
