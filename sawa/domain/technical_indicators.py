@@ -80,16 +80,21 @@ class TechnicalIndicators:
     macd_signal: Decimal | None = None
     macd_histogram: Decimal | None = None
 
-    # Volatility (4 indicators)
+    # Volatility (5 indicators)
     bb_upper: Decimal | None = None
     bb_middle: Decimal | None = None
     bb_lower: Decimal | None = None
+    bb_width_pct: Decimal | None = None
     atr_14: Decimal | None = None
 
-    # Volume (3 indicators)
+    # Trend strength (1 indicator)
+    adx_14: Decimal | None = None
+
+    # Volume (4 indicators)
     obv: int | None = None
     volume_sma_20: int | None = None
     volume_ratio: Decimal | None = None
+    dollar_volume_sma_20: Decimal | None = None
 
     def __post_init__(self) -> None:
         """Normalize ticker to uppercase."""
@@ -125,11 +130,15 @@ class TechnicalIndicators:
             "bb_upper",
             "bb_middle",
             "bb_lower",
+            "bb_width_pct",
             "atr_14",
+            # Trend strength
+            "adx_14",
             # Volume
             "obv",
             "volume_sma_20",
             "volume_ratio",
+            "dollar_volume_sma_20",
         ]
 
     def to_tuple(self) -> tuple:
@@ -161,9 +170,13 @@ class TechnicalIndicators:
             self.bb_upper,
             self.bb_middle,
             self.bb_lower,
+            self.bb_width_pct,
             self.atr_14,
+            # Trend strength
+            self.adx_14,
             # Volume
             self.obv,
             self.volume_sma_20,
             self.volume_ratio,
+            self.dollar_volume_sma_20,
         )

@@ -1,6 +1,6 @@
 """Technical indicator calculation engine using ta-lib.
 
-Calculates 20 technical indicators from OHLCV price data.
+Calculates 28 technical indicators from OHLCV price data.
 Handles NaN values for insufficient data and validates bounded indicators.
 """
 
@@ -25,9 +25,12 @@ logger = logging.getLogger(__name__)
 INDICATOR_BOUNDS: dict[str, tuple[float | None, float | None]] = {
     "rsi_14": (0.0, 100.0),
     "rsi_21": (0.0, 100.0),
+    "adx_14": (0.0, 100.0),
     "atr_14": (0.0, None),
+    "bb_width_pct": (0.0, None),
     "volume_sma_20": (0.0, None),
     "volume_ratio": (0.0, None),
+    "dollar_volume_sma_20": (0.0, None),
 }
 
 # Minimum periods required for each indicator
@@ -53,10 +56,13 @@ MIN_PERIODS: dict[str, int] = {
     "bb_upper": 20,
     "bb_middle": 20,
     "bb_lower": 20,
+    "bb_width_pct": 20,
     "atr_14": 14,
+    "adx_14": 27,  # Wilder ADX warm-up: 14 (DM/TR smoothing) + 13 (DX averaging) = 27
     "obv": 1,
     "volume_sma_20": 20,
     "volume_ratio": 20,
+    "dollar_volume_sma_20": 20,
 }
 
 
@@ -147,7 +153,7 @@ def calculate_indicators_for_ticker(
     prices: list[dict[str, Any]],
     log: logging.Logger | None = None,
 ) -> list[TechnicalIndicators]:
-    """Calculate all 25 technical indicators for one ticker.
+    """Calculate all 28 technical indicators for one ticker.
 
     Args:
         ticker: Stock symbol
@@ -214,11 +220,17 @@ def calculate_indicators_for_ticker(
     bb_upper, bb_middle, bb_lower = talib.BBANDS(
         close_prices, timeperiod=20, nbdevup=2, nbdevdn=2, matype=talib.MA_Type.SMA
     )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bb_width_pct = np.where(bb_middle > 0, (bb_upper - bb_lower) / bb_middle * 100, np.nan)
     atr_14 = talib.ATR(high_prices, low_prices, close_prices, timeperiod=14)
+
+    # Trend strength
+    adx_14 = talib.ADX(high_prices, low_prices, close_prices, timeperiod=14)
 
     # Volume
     obv = talib.OBV(close_prices, volumes)
     volume_sma_20 = talib.SMA(volumes, timeperiod=20)
+    dollar_volume_sma_20 = talib.SMA(close_prices * volumes, timeperiod=20)
 
     # Volume ratio (today / 20-day avg)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -261,12 +273,21 @@ def calculate_indicators_for_ticker(
                 bb_upper=_to_decimal(validate_indicator("bb_upper", bb_upper[i], log)),
                 bb_middle=_to_decimal(validate_indicator("bb_middle", bb_middle[i], log)),
                 bb_lower=_to_decimal(validate_indicator("bb_lower", bb_lower[i], log)),
+                bb_width_pct=_to_decimal(
+                    validate_indicator("bb_width_pct", bb_width_pct[i], log), precision=6
+                ),
                 atr_14=_to_decimal(validate_indicator("atr_14", atr_14[i], log)),
+                # Trend strength
+                adx_14=_to_decimal(validate_indicator("adx_14", adx_14[i], log), precision=6),
                 # Volume
                 obv=_to_int(validate_indicator("obv", obv[i], log)),
                 volume_sma_20=_to_int(validate_indicator("volume_sma_20", volume_sma_20[i], log)),
                 volume_ratio=_to_decimal(
                     validate_indicator("volume_ratio", volume_ratio[i], log), precision=6
+                ),
+                dollar_volume_sma_20=_to_decimal(
+                    validate_indicator("dollar_volume_sma_20", dollar_volume_sma_20[i], log),
+                    precision=2,
                 ),
             )
             results.append(indicators)
