@@ -146,10 +146,13 @@ def _insert_rows(
             for row in batch:
                 values = [row.get(col) for col in columns]
                 try:
+                    cur.execute("SAVEPOINT row_insert")
                     cur.execute(query, values)
+                    cur.execute("RELEASE SAVEPOINT row_insert")
                     inserted += 1
                 except psycopg.Error as e:
-                    conn.rollback()  # Rollback to recover from error
+                    cur.execute("ROLLBACK TO SAVEPOINT row_insert")
+                    cur.execute("RELEASE SAVEPOINT row_insert")
                     errors += 1
                     if errors <= 3:
                         log.warning(f"  Insert failed: {e}")

@@ -43,6 +43,26 @@ EXPECTED_TABLES = {
     "dividends",
     "earnings",
     "stock_prices_intraday",
+    "market_internals",
+    "trader_cards",
+    "stock_character_classification",
+    "stock_character_baseline",
+    "stock_character_flags",
+    "stock_character_scorecard",
+}
+
+EXPECTED_VIEWS = {
+    "stock_prices_live",
+    "v_company_summary",
+    "v_company_with_indices",
+    "v_economy_dashboard",
+    "v_latest_fundamentals",
+    "v_market_internals_enriched",
+    "v_sector_summary",
+}
+
+EXPECTED_MATERIALIZED_VIEWS = {
+    "mv_52week_extremes",
 }
 
 
@@ -143,10 +163,32 @@ def verify_tables(conn) -> list[str]:
     with conn.cursor() as cur:
         cur.execute("""
             SELECT table_name FROM information_schema.tables
-            WHERE table_schema = 'public'
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
         """)
         actual = {row[0] for row in cur.fetchall()}
     return list(EXPECTED_TABLES - actual)
+
+
+def verify_views(conn) -> list[str]:
+    """Verify expected regular views exist."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT table_name FROM information_schema.views
+            WHERE table_schema = 'public'
+        """)
+        actual = {row[0] for row in cur.fetchall()}
+    return list(EXPECTED_VIEWS - actual)
+
+
+def verify_materialized_views(conn) -> list[str]:
+    """Verify expected materialized views exist."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT matviewname FROM pg_matviews
+            WHERE schemaname = 'public'
+        """)
+        actual = {row[0] for row in cur.fetchall()}
+    return list(EXPECTED_MATERIALIZED_VIEWS - actual)
 
 
 def confirm_rebuild() -> bool:
@@ -226,19 +268,40 @@ Examples:
                     return 1
 
             success = 0
+            failed_files = []
             for sql_file in sql_files:
                 if execute_sql_file(conn, sql_file, args.dry_run, logger):
                     success += 1
+                else:
+                    failed_files.append(sql_file.name)
 
             logger.info(f"\n{success}/{len(sql_files)} files executed")
+            if failed_files:
+                logger.error("Failed schema files: %s", ", ".join(failed_files))
+                return 1
 
             if not args.dry_run:
                 logger.info("\nVerifying tables...")
                 missing = verify_tables(conn)
                 if missing:
-                    logger.warning(f"  Missing tables: {', '.join(missing)}")
+                    logger.error(f"  Missing tables: {', '.join(missing)}")
+                    return 1
                 else:
                     logger.info("  All expected tables present")
+
+                missing_views = verify_views(conn)
+                if missing_views:
+                    logger.error(f"  Missing views: {', '.join(missing_views)}")
+                    return 1
+                logger.info("  All expected views present")
+
+                missing_matviews = verify_materialized_views(conn)
+                if missing_matviews:
+                    logger.error(
+                        f"  Missing materialized views: {', '.join(missing_matviews)}"
+                    )
+                    return 1
+                logger.info("  All expected materialized views present")
 
     except psycopg.OperationalError as e:
         logger.error(f"Could not connect: {e}")

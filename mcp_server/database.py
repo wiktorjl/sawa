@@ -188,12 +188,11 @@ def execute_query(
         if validate:
             validate_select_query(query)
 
-        # Add LIMIT if not present and query is a SELECT
-        query_upper = query.strip().upper()
-        if query_upper.startswith("SELECT") and "LIMIT" not in query_upper:
-            query = f"{query.rstrip(';')} LIMIT {MAX_ROWS}"
-
-        query_sql: sql.Composable = sql.SQL(query)
+        query = query.strip().rstrip(";")
+        query_sql: sql.Composable = sql.SQL("SELECT * FROM ({}) AS _mcp_limited LIMIT {}").format(
+            sql.SQL(query),
+            sql.Literal(MAX_ROWS),
+        )
     else:
         # Composable queries are built safely via psycopg sql module
         query_sql = query

@@ -20,8 +20,27 @@
 -- Step 1: drop the view that depends on vix_close so we can rename the column.
 DROP VIEW IF EXISTS v_economy_dashboard;
 
--- Step 2: rename the column.
-ALTER TABLE market_internals RENAME COLUMN vix_close TO vix;
+-- Step 2: rename the column when upgrading databases that still have the
+-- legacy name. Fresh schemas already create market_internals.vix.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'market_internals'
+          AND column_name = 'vix_close'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'market_internals'
+          AND column_name = 'vix'
+    ) THEN
+        ALTER TABLE market_internals RENAME COLUMN vix_close TO vix;
+    END IF;
+END $$;
 
 -- Step 3: recreate v_economy_dashboard against mi.vix.
 CREATE OR REPLACE VIEW v_economy_dashboard AS

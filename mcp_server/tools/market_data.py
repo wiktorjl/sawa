@@ -655,6 +655,25 @@ def get_intraday_bars(
     else:
         # Return individual bars
         query = """
+            WITH ranked_bars AS (
+                SELECT
+                    ticker,
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ticker
+                        ORDER BY timestamp ASC
+                    ) AS rn
+                FROM stock_prices_intraday
+                WHERE ticker = ANY(%(tickers)s)
+                  AND timestamp::date = %(date)s
+                  AND timestamp::time >= '14:30:00'
+                  AND timestamp::time < '21:00:00'
+            )
             SELECT
                 ticker,
                 timestamp,
@@ -663,12 +682,8 @@ def get_intraday_bars(
                 low,
                 close,
                 volume
-            FROM stock_prices_intraday
-            WHERE ticker = ANY(%(tickers)s)
-              AND timestamp::date = %(date)s
-              AND timestamp::time >= '14:30:00'
-              AND timestamp::time < '21:00:00'
+            FROM ranked_bars
+            WHERE rn <= %(limit)s
             ORDER BY ticker, timestamp ASC
-            LIMIT %(limit)s
         """
         return execute_query(query, params)

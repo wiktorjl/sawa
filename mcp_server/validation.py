@@ -208,8 +208,9 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, A
         days = arguments["days"]
         if not isinstance(days, (int, float)) or int(days) < 1:
             raise ValueError(f"days must be a positive integer, got {days}")
-        if int(days) > 30:
-            raise ValueError(f"days too large: {int(days)} (max 30)")
+        max_days = 252 if name == "detect_candlestick_patterns" else 30
+        if int(days) > max_days:
+            raise ValueError(f"days too large: {int(days)} (max {max_days})")
         arguments["days"] = int(days)
 
     return arguments

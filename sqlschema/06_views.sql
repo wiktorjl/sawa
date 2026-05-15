@@ -29,32 +29,6 @@ LEFT JOIN LATERAL (
 ) fr ON true
 WHERE c.active = TRUE;
 
--- Economy dashboard view (most recent data with all indicators).
--- Includes market_internals (VIX, VIX3M, HY spread) from FRED so volatility
--- regime shows up alongside rates, inflation, and labor data.
-CREATE OR REPLACE VIEW v_economy_dashboard AS
-SELECT
-    ty.date,
-    ty.yield_1_month,
-    ty.yield_3_month,
-    ty.yield_10_year,
-    ty.yield_30_year,
-    i.cpi,
-    i.cpi_year_over_year as inflation_yoy,
-    ie.market_5_year as inflation_expectation_5y,
-    ie.market_10_year as inflation_expectation_10y,
-    lm.unemployment_rate,
-    lm.job_openings,
-    mi.vix,
-    mi.vix3m,
-    mi.hy_spread
-FROM treasury_yields ty
-LEFT JOIN inflation i ON ty.date = i.date
-LEFT JOIN inflation_expectations ie ON ty.date = ie.date
-LEFT JOIN labor_market lm ON ty.date = lm.date
-LEFT JOIN market_internals mi ON ty.date = mi.date
-ORDER BY ty.date DESC;
-
 -- Latest fundamentals summary for each company
 CREATE OR REPLACE VIEW v_latest_fundamentals AS
 SELECT 
