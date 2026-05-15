@@ -13,7 +13,7 @@ from sawa.utils.resources import packaged_resource_path, project_root
 
 NASDAQ_POLYGON_TYPES = ("CS", "ETF", "ADRC")
 
-TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
+TICKER_PATTERN = re.compile(r"^[A-Z]{1,7}(\.[A-Z])?$")
 
 
 def validate_ticker(ticker: str) -> str:
