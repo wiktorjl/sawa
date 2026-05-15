@@ -468,8 +468,8 @@ class DatabaseCompanyRepository(CompanyRepository):
             sector=row.get("sector"),
             industry=row.get("industry"),
             market_cap=_to_decimal(row.get("market_cap")),
-            employees=row.get("employees"),
-            website=row.get("website"),
+            employees=row.get("total_employees"),
+            website=row.get("homepage_url"),
             ceo=row.get("ceo"),
             headquarters=row.get("headquarters"),
         )
@@ -513,8 +513,8 @@ class DatabaseCompanyRepository(CompanyRepository):
                 sector=r.get("sector"),
                 industry=r.get("industry"),
                 market_cap=_to_decimal(r.get("market_cap")),
-                employees=r.get("employees"),
-                website=r.get("website"),
+                employees=r.get("total_employees"),
+                website=r.get("homepage_url"),
             )
             for r in rows
         ]
@@ -579,16 +579,16 @@ class DatabaseRatiosRepository(RatiosRepository):
         return FinancialRatio(
             ticker=row["ticker"],
             date=row["date"],
-            pe_ratio=_to_decimal(row.get("pe_ratio")),
-            pb_ratio=_to_decimal(row.get("pb_ratio")),
-            ps_ratio=_to_decimal(row.get("ps_ratio")),
+            pe_ratio=_to_decimal(row.get("price_to_earnings")),
+            pb_ratio=_to_decimal(row.get("price_to_book")),
+            ps_ratio=_to_decimal(row.get("price_to_sales")),
             peg_ratio=_to_decimal(row.get("peg_ratio")),
-            roe=_to_decimal(row.get("roe")),
-            roa=_to_decimal(row.get("roa")),
+            roe=_to_decimal(row.get("return_on_equity")),
+            roa=_to_decimal(row.get("return_on_assets")),
             profit_margin=_to_decimal(row.get("profit_margin")),
             operating_margin=_to_decimal(row.get("operating_margin")),
-            current_ratio=_to_decimal(row.get("current_ratio")),
-            quick_ratio=_to_decimal(row.get("quick_ratio")),
+            current_ratio=_to_decimal(row.get("current")),
+            quick_ratio=_to_decimal(row.get("quick")),
             debt_to_equity=_to_decimal(row.get("debt_to_equity")),
             debt_to_assets=_to_decimal(row.get("debt_to_assets")),
             asset_turnover=_to_decimal(row.get("asset_turnover")),
@@ -1116,11 +1116,15 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
             bb_upper=_to_decimal(row.get("bb_upper")),
             bb_middle=_to_decimal(row.get("bb_middle")),
             bb_lower=_to_decimal(row.get("bb_lower")),
+            bb_width_pct=_to_decimal(row.get("bb_width_pct")),
             atr_14=_to_decimal(row.get("atr_14")),
+            # Trend strength
+            adx_14=_to_decimal(row.get("adx_14")),
             # Volume
             obv=row.get("obv"),
             volume_sma_20=row.get("volume_sma_20"),
             volume_ratio=_to_decimal(row.get("volume_ratio")),
+            dollar_volume_sma_20=_to_decimal(row.get("dollar_volume_sma_20")),
         )
 
     async def get_latest_indicators(self, ticker: str) -> TechnicalIndicators | None:

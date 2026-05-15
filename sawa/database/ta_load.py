@@ -7,6 +7,7 @@ import logging
 from datetime import date
 from typing import Any, cast
 
+import psycopg
 from psycopg import sql
 
 from sawa.domain.technical_indicators import TechnicalIndicators
@@ -65,10 +66,13 @@ def load_technical_indicators(
             batch = indicators[i : i + batch_size]
             for ind in batch:
                 try:
+                    cur.execute("SAVEPOINT row_insert")
                     cur.execute(query, ind.to_tuple())
+                    cur.execute("RELEASE SAVEPOINT row_insert")
                     inserted += 1
-                except Exception as e:
-                    conn.rollback()
+                except psycopg.Error as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT row_insert")
+                    cur.execute("RELEASE SAVEPOINT row_insert")
                     errors += 1
                     if errors <= 3:
                         log.warning(f"Insert failed for {ind.ticker}/{ind.date}: {e}")
