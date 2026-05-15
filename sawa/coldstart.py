@@ -394,10 +394,15 @@ def populate_index_constituents(
     logger.info("Populating index constituents...")
     stats: dict[str, int] = {}
 
-    # Fetch current index members from Wikipedia
-    index_data = [
+    # Fetch current index members
+    from typing import Callable
+
+    from sawa.utils.symbols import fetch_us_active_from_polygon
+
+    index_data: list[tuple[str, Callable[[logging.Logger], list[str]]]] = [
         ("sp500", fetch_sp500_symbols),
         ("nasdaq5000", fetch_nasdaq5000_symbols),
+        ("us_active", fetch_us_active_from_polygon),
     ]
 
     for code, fetcher in index_data:

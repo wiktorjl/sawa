@@ -188,6 +188,93 @@ def fetch_nasdaq_active_from_polygon(
     return symbols
 
 
+def fetch_us_active_from_polygon(
+    logger: logging.Logger,
+    types: tuple[str, ...] = ("CS", "ETF", "ADRC"),
+    api_key: str | None = None,
+) -> list[str]:
+    """
+    Fetch all currently-active US-tradeable tickers from Polygon across
+    every major exchange (no ``exchange`` filter), filtered to common
+    stock, ETFs, and ADRs by default.
+
+    This is the broadest US equity universe Sawa tracks. ETFs are the
+    dominant gap that ``fetch_nasdaq_active_from_polygon()`` misses —
+    only ~24% of US ETFs are XNAS-listed; the rest live on NYSE Arca
+    (ARCX) and Cboe BZX (BATS).
+
+    Like the NASDAQ fetcher, paginates once per type and merges. Drops
+    XASE-listed CS (NYSE American — almost entirely microcap) and the
+    one BATS-listed CS (irrelevant) by post-filtering.
+
+    Args:
+        logger: Logger instance
+        types: Polygon ticker types to include. Defaults to (CS, ETF, ADRC).
+        api_key: Polygon API key. Falls back to ``POLYGON_API_KEY`` env var.
+
+    Returns:
+        Sorted list of ticker symbols, deduplicated across types.
+
+    Raises:
+        ValueError: If no API key available.
+        requests.RequestException: If the Polygon endpoint is unreachable.
+    """
+    api_key = api_key or os.environ.get("POLYGON_API_KEY")
+    if not api_key:
+        raise ValueError("POLYGON_API_KEY required (env var or argument)")
+
+    base_url = "https://api.polygon.io/v3/reference/tickers"
+    seen: set[str] = set()
+
+    # Exchanges to drop entirely for type=CS — XASE is NYSE American (microcap
+    # noise); BATS-CS is a single irrelevant ticker per Polygon's catalog.
+    cs_exclude_exchanges = {"XASE", "BATS"}
+
+    for ticker_type in types:
+        params: dict[str, str | int] = {
+            "market": "stocks",
+            "active": "true",
+            "type": ticker_type,
+            "limit": 1000,
+            "apiKey": api_key,
+        }
+        url: str | None = base_url
+        page = 0
+        type_count = 0
+        type_dropped = 0
+        while url:
+            page += 1
+            resp = requests.get(
+                url,
+                params=params if page == 1 else None,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for row in data.get("results", []):
+                ticker = row.get("ticker")
+                if not ticker:
+                    continue
+                exchange = row.get("primary_exchange", "")
+                if ticker_type == "CS" and exchange in cs_exclude_exchanges:
+                    type_dropped += 1
+                    continue
+                seen.add(ticker.upper())
+                type_count += 1
+            next_url = data.get("next_url")
+            if not next_url:
+                break
+            sep = "&" if "?" in next_url else "?"
+            url = f"{next_url}{sep}apiKey={api_key}"
+            time.sleep(0.05)
+        suffix = f", dropped {type_dropped} from XASE/BATS" if type_dropped else ""
+        logger.info(f"  Polygon type={ticker_type} (any exchange): {type_count} tickers{suffix}")
+
+    symbols = sorted(seen)
+    logger.info(f"Polygon US active total ({'+'.join(types)}): {len(symbols)} tickers")
+    return symbols
+
+
 def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     """
     Load NASDAQ-listed tickers, primary source Polygon REST.
@@ -257,5 +344,7 @@ def fetch_index_symbols(index: str, logger: logging.Logger) -> list[str]:
         return fetch_sp500_symbols(logger)
     elif index_lower in ("nasdaq5000", "nasdaq-5000", "nasdaq 5000"):
         return fetch_nasdaq5000_symbols(logger)
+    elif index_lower in ("us_active", "us-active", "us active"):
+        return fetch_us_active_from_polygon(logger)
     else:
-        raise ValueError(f"Unknown index: {index}. Use 'sp500' or 'nasdaq5000'")
+        raise ValueError(f"Unknown index: {index}. Use 'sp500', 'nasdaq5000', or 'us_active'")
