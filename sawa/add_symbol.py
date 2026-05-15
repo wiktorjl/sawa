@@ -375,51 +375,57 @@ def run_add_symbols(
             if symbol in existing:
                 logger.info("  Already exists, updating...")
 
-            # Fetch company details
-            rate_limiter.acquire()
-            logger.info("  Fetching company details...")
-            company_data = client.get_ticker_details(symbol)
+            try:
+                # Fetch company details
+                rate_limiter.acquire()
+                logger.info("  Fetching company details...")
+                company_data = client.get_ticker_details(symbol)
 
-            if not company_data:
-                logger.warning(f"  Could not fetch company details for {symbol}")
+                if not company_data:
+                    logger.warning(f"  Could not fetch company details for {symbol}")
+                    stats["failed"].append(symbol)
+                    continue
+
+                # Insert company
+                with psycopg.connect(database_url) as conn:
+                    insert_company(conn, company_data, logger)
+                logger.info(f"  Inserted company: {company_data.get('name', symbol)}")
+
+                # Fetch and insert prices
+                rate_limiter.acquire()
+                logger.info(f"  Fetching {years} years of price history...")
+                with psycopg.connect(database_url) as conn:
+                    price_count = fetch_and_insert_prices(
+                        conn, client, symbol, start_str, end_str, logger
+                    )
+                logger.info(f"  Inserted {price_count} price records")
+
+                # Fetch and insert ratios
+                rate_limiter.acquire()
+                logger.info("  Fetching financial ratios...")
+                with psycopg.connect(database_url) as conn:
+                    ratio_count = fetch_and_insert_ratios(conn, client, symbol, logger)
+                logger.info(f"  Inserted {ratio_count} ratio records")
+
+                # Fetch and insert fundamentals
+                rate_limiter.acquire()
+                logger.info("  Fetching fundamentals...")
+                with psycopg.connect(database_url) as conn:
+                    fund_stats = fetch_and_insert_fundamentals(
+                        conn, client, symbol, start_str, end_str, logger
+                    )
+                total_fund = sum(fund_stats.values())
+                logger.info(f"  Inserted {total_fund} fundamental records")
+
+                if symbol in existing:
+                    stats["skipped"].append(symbol)  # Updated existing
+                else:
+                    stats["added"].append(symbol)
+
+            except Exception as ticker_err:
+                logger.warning(f"  {symbol}: {ticker_err}")
                 stats["failed"].append(symbol)
                 continue
-
-            # Insert company
-            with psycopg.connect(database_url) as conn:
-                insert_company(conn, company_data, logger)
-            logger.info(f"  Inserted company: {company_data.get('name', symbol)}")
-
-            # Fetch and insert prices
-            rate_limiter.acquire()
-            logger.info(f"  Fetching {years} years of price history...")
-            with psycopg.connect(database_url) as conn:
-                price_count = fetch_and_insert_prices(
-                    conn, client, symbol, start_str, end_str, logger
-                )
-            logger.info(f"  Inserted {price_count} price records")
-
-            # Fetch and insert ratios
-            rate_limiter.acquire()
-            logger.info("  Fetching financial ratios...")
-            with psycopg.connect(database_url) as conn:
-                ratio_count = fetch_and_insert_ratios(conn, client, symbol, logger)
-            logger.info(f"  Inserted {ratio_count} ratio records")
-
-            # Fetch and insert fundamentals
-            rate_limiter.acquire()
-            logger.info("  Fetching fundamentals...")
-            with psycopg.connect(database_url) as conn:
-                fund_stats = fetch_and_insert_fundamentals(
-                    conn, client, symbol, start_str, end_str, logger
-                )
-            total_fund = sum(fund_stats.values())
-            logger.info(f"  Inserted {total_fund} fundamental records")
-
-            if symbol in existing:
-                stats["skipped"].append(symbol)  # Updated existing
-            else:
-                stats["added"].append(symbol)
 
         stats["success"] = True
         logger.info("\n" + "=" * 60)
