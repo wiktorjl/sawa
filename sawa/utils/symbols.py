@@ -1,13 +1,17 @@
 """Symbol file loading and validation utilities."""
 
 import logging
+import os
 import re
+import time
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 
 from sawa.utils.resources import packaged_resource_path, project_root
+
+NASDAQ_POLYGON_TYPES = ("CS", "ETF", "ADRC")
 
 TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
@@ -112,14 +116,91 @@ def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
     return symbols
 
 
+def fetch_nasdaq_active_from_polygon(
+    logger: logging.Logger,
+    types: tuple[str, ...] = NASDAQ_POLYGON_TYPES,
+    api_key: str | None = None,
+) -> list[str]:
+    """
+    Fetch all currently-active NASDAQ-listed tickers from Polygon, filtered
+    to common stock, ETFs, and ADRs by default.
+
+    Polygon's ``type`` filter only accepts a single value, so this function
+    paginates through the endpoint once per type and returns the merged
+    deduplicated list.
+
+    Args:
+        logger: Logger instance
+        types: Polygon ticker types to include. Defaults to (CS, ETF, ADRC).
+            Other available types include WARRANT, UNIT, RIGHT, PFD, FUND.
+        api_key: Polygon API key. Falls back to ``POLYGON_API_KEY`` env var.
+
+    Returns:
+        Sorted list of ticker symbols, deduplicated across types.
+
+    Raises:
+        ValueError: If no API key available.
+        requests.RequestException: If the Polygon endpoint is unreachable.
+    """
+    api_key = api_key or os.environ.get("POLYGON_API_KEY")
+    if not api_key:
+        raise ValueError("POLYGON_API_KEY required (env var or argument)")
+
+    base_url = "https://api.polygon.io/v3/reference/tickers"
+    seen: set[str] = set()
+
+    for ticker_type in types:
+        params: dict[str, str | int] = {
+            "market": "stocks",
+            "exchange": "XNAS",
+            "active": "true",
+            "type": ticker_type,
+            "limit": 1000,
+            "apiKey": api_key,
+        }
+        url: str | None = base_url
+        page = 0
+        type_count = 0
+        while url:
+            page += 1
+            resp = requests.get(
+                url,
+                params=params if page == 1 else None,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for row in data.get("results", []):
+                ticker = row.get("ticker")
+                if ticker:
+                    seen.add(ticker.upper())
+                    type_count += 1
+            next_url = data.get("next_url")
+            if not next_url:
+                break
+            sep = "&" if "?" in next_url else "?"
+            url = f"{next_url}{sep}apiKey={api_key}"
+            time.sleep(0.05)
+        logger.info(f"  Polygon XNAS type={ticker_type}: {type_count} tickers")
+
+    symbols = sorted(seen)
+    logger.info(f"Polygon XNAS total ({'+'.join(types)}): {len(symbols)} tickers")
+    return symbols
+
+
 def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     """
-    Load NASDAQ-5000 symbols from the bundled ``nasdaq1000_symbols.txt`` file.
+    Load NASDAQ-listed tickers, primary source Polygon REST.
 
-    Source of truth lives at ``data/nasdaq1000_symbols.txt`` in the repo and is
-    re-shipped inside the wheel at ``sawa/nasdaq1000_symbols.txt`` via
-    ``[tool.hatch.build.targets.wheel.force-include]``. Despite the filename,
-    this list contains ~5000 NASDAQ-listed tickers.
+    Tries the Polygon ``/v3/reference/tickers`` endpoint filtered to
+    ``exchange=XNAS, active=true, type IN (CS, ETF, ADRC)`` first. On any
+    failure (network, missing API key, etc.) falls back to the bundled
+    ``data/nasdaq1000_symbols.txt`` file.
+
+    The bundled file is a 2021-era snapshot kept as a recovery fallback; it
+    contains warrant/unit/right tickers that the Polygon path now filters
+    out, so the two sources are not 1:1 — expect a ~12% reduction when
+    switching from bundled to Polygon (Polygon: ~4,681; bundled: ~5,316).
 
     Args:
         logger: Logger instance
@@ -127,6 +208,13 @@ def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     Returns:
         List of ticker symbols
     """
+    try:
+        return fetch_nasdaq_active_from_polygon(logger)
+    except Exception as e:
+        logger.warning(
+            f"Polygon NASDAQ fetch failed ({e}); falling back to bundled file"
+        )
+
     candidates = [
         project_root() / "data" / "nasdaq1000_symbols.txt",
         packaged_resource_path("nasdaq1000_symbols.txt"),
@@ -145,7 +233,7 @@ def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
             if sym and not sym.startswith("#"):
                 symbols.append(sym)
 
-    logger.info(f"Loaded {len(symbols)} NASDAQ-5000 symbols from {symbols_file}")
+    logger.info(f"Loaded {len(symbols)} NASDAQ symbols from {symbols_file}")
     return symbols
 
 
