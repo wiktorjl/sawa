@@ -6,6 +6,7 @@ from typing import Any, Literal
 from psycopg import sql
 
 from ..database import execute_query
+from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ def get_dividends(
 def get_ex_dividend_calendar(
     start_date: str,
     end_date: str,
-    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """
@@ -159,20 +160,8 @@ def get_ex_dividend_calendar(
     """
     limit = min(limit, 500)
 
-    # Index filter
-    index_filter = sql.SQL("")
-    if index == "sp500":
-        index_filter = sql.SQL("""AND d.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'sp500'
-        )""")
-    elif index == "nasdaq_listed":
-        index_filter = sql.SQL("""AND d.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq_listed'
-        )""")
+    params: dict[str, Any] = {"start_date": start_date, "end_date": end_date, "limit": limit}
+    index_filter = build_index_filter(index, "d", params)
 
     query = sql.SQL("""
         SELECT
@@ -191,12 +180,12 @@ def get_ex_dividend_calendar(
         LIMIT %(limit)s
     """).format(index_filter=index_filter)
 
-    return execute_query(query, {"start_date": start_date, "end_date": end_date, "limit": limit})
+    return execute_query(query, params)
 
 
 def get_recent_splits(
     days: int = 30,
-    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
 ) -> list[dict[str, Any]]:
     """
     Get recent stock splits.
@@ -208,20 +197,8 @@ def get_recent_splits(
     Returns:
         List of recent splits with company info
     """
-    # Index filter
-    index_filter = sql.SQL("")
-    if index == "sp500":
-        index_filter = sql.SQL("""AND s.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'sp500'
-        )""")
-    elif index == "nasdaq_listed":
-        index_filter = sql.SQL("""AND s.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq_listed'
-        )""")
+    params: dict[str, Any] = {"days": days}
+    index_filter = build_index_filter(index, "s", params)
 
     query = sql.SQL("""
         SELECT
@@ -238,11 +215,11 @@ def get_recent_splits(
         ORDER BY s.execution_date DESC
     """).format(index_filter=index_filter)
 
-    return execute_query(query, {"days": days})
+    return execute_query(query, params)
 
 
 def get_dividend_yield_leaders(
-    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
     min_yield: float = 2.0,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
@@ -259,20 +236,8 @@ def get_dividend_yield_leaders(
     """
     limit = min(limit, 200)
 
-    # Index filter
-    index_filter = sql.SQL("")
-    if index == "sp500":
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'sp500'
-        )""")
-    elif index == "nasdaq_listed":
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq_listed'
-        )""")
+    params: dict[str, Any] = {"min_yield": min_yield, "limit": limit}
+    index_filter = build_index_filter(index, "c", params)
 
     query = sql.SQL("""
         WITH latest_prices AS (
@@ -312,13 +277,13 @@ def get_dividend_yield_leaders(
         LIMIT %(limit)s
     """).format(index_filter=index_filter)
 
-    return execute_query(query, {"min_yield": min_yield, "limit": limit})
+    return execute_query(query, params)
 
 
 def get_earnings_calendar(
     start_date: str,
     end_date: str,
-    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
     timing: Literal["BMO", "AMC", "all"] = "all",
     upcoming_only: bool = False,
     limit: int = 200,
@@ -352,20 +317,7 @@ def get_earnings_calendar(
     if upcoming_only:
         filters.append("e.eps_actual IS NULL")
 
-    # Index filter
-    index_filter = sql.SQL("")
-    if index == "sp500":
-        index_filter = sql.SQL("""AND e.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'sp500'
-        )""")
-    elif index == "nasdaq_listed":
-        index_filter = sql.SQL("""AND e.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq_listed'
-        )""")
+    index_filter = build_index_filter(index, "e", params)
 
     where_sql = sql.SQL(" AND ").join(sql.SQL(f) for f in filters)
 

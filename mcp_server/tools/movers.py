@@ -9,6 +9,7 @@ from typing import Any, Literal
 from psycopg import sql
 
 from ..database import execute_query
+from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,7 @@ def get_volume_leaders(
 
 def get_market_breadth(
     date: str | None = None,
-    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
 ) -> dict[str, Any]:
     """
     Get market breadth statistics (advancers vs decliners, MA breadth).
@@ -339,22 +340,8 @@ def get_market_breadth(
         - above_50dma, above_200dma counts (stocks above moving averages)
         - pct_above_50dma, pct_above_200dma (percentage)
     """
-    # Build index filter (uses index_constituents junction table)
-    index_filter = sql.SQL("")
-    if index == "sp500":
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'sp500'
-        )""")
-    elif index == "nasdaq_listed":
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq_listed'
-        )""")
-
     params: dict[str, Any] = {}
+    index_filter = build_index_filter(index, "c", params)
 
     if date:
         date_cte = sql.SQL("""

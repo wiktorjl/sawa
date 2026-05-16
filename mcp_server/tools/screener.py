@@ -11,6 +11,7 @@ from typing import Any, Literal
 from psycopg import sql
 
 from ..database import execute_query
+from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -686,7 +687,7 @@ def detect_crossovers(
 def get_52week_extremes(
     extreme: Literal["highs", "lows", "both"] = "both",
     threshold_pct: float = 2.0,
-    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
     min_volume: int | None = None,
     since_date: str | None = None,
     include_fundamentals: bool = False,
@@ -714,20 +715,8 @@ def get_52week_extremes(
     limit = min(limit, 200)
 
     # Index filter (uses index_constituents junction table)
-    index_filter = sql.SQL("")
     params: dict[str, Any] = {}
-    if index == "sp500":
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'sp500'
-        )""")
-    elif index == "nasdaq_listed":
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq_listed'
-        )""")
+    index_filter = build_index_filter(index, "c", params)
 
     # Volume filter (parameterized)
     volume_filter = sql.SQL("")
