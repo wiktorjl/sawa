@@ -11,7 +11,15 @@ from bs4 import BeautifulSoup
 
 from sawa.utils.resources import packaged_resource_path, project_root
 
-NASDAQ_POLYGON_TYPES = ("CS", "ETF", "ADRC")
+# Polygon ticker types Sawa tracks across the broad US universe.
+# - CS:   Common Stock
+# - ETF:  Exchange-Traded Fund (Section 8 Investment Company Act)
+# - ADRC: American Depositary Receipt Common
+# - ETV:  Exchange-Traded Vehicle (commodity pools / grantor trusts —
+#         USO, UNG, GBTC, DBA, PALL, PPLT etc.; not technically ETFs
+#         under the '40 Act but trade like them and matter for macro
+#         exposure tracking).
+NASDAQ_POLYGON_TYPES = ("CS", "ETF", "ADRC", "ETV")
 
 TICKER_PATTERN = re.compile(r"^[A-Z]{1,7}(\.[A-Z])?$")
 
@@ -286,13 +294,14 @@ def fetch_nasdaq_active_from_polygon(
 
 def fetch_us_active_from_polygon(
     logger: logging.Logger,
-    types: tuple[str, ...] = ("CS", "ETF", "ADRC"),
+    types: tuple[str, ...] = NASDAQ_POLYGON_TYPES,
     api_key: str | None = None,
 ) -> list[str]:
     """
     Fetch all currently-active US-tradeable tickers from Polygon across
     every major exchange (no ``exchange`` filter), filtered to common
-    stock, ETFs, and ADRs by default.
+    stock, ETFs, ADRs, and ETVs (commodity pools / grantor trusts) by
+    default.
 
     This is the broadest US equity universe Sawa tracks. ETFs are the
     dominant gap that ``fetch_nasdaq_active_from_polygon()`` misses —
