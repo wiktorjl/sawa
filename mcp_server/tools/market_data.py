@@ -412,7 +412,7 @@ def screen_by_technical_indicators(
                  Use None for unbounded side.
                  Example: {"rsi_14": (None, 30), "volume_ratio": (1.5, None)}
         target_date: Date to screen (defaults to most recent)
-        index: Filter by index membership (sp500, nasdaq5000)
+        index: Filter by index membership (sp500, nasdaq_listed)
         limit: Maximum results (default: 100, max: 500)
 
     Returns:

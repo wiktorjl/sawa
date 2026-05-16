@@ -1247,7 +1247,7 @@ Environment Variables:
     )
     ta_screen_parser.add_argument(
         "--index",
-        choices=["sp500", "nasdaq5000"],
+        choices=["sp500", "nasdaq_listed"],
         help="Filter by index membership",
     )
     ta_screen_parser.add_argument(
@@ -1277,7 +1277,7 @@ Environment Variables:
         help="Show index details and constituents",
         description="Display details and constituent stocks for a market index.",
     )
-    index_show_parser.add_argument("code", help="Index code (e.g., sp500, nasdaq5000)")
+    index_show_parser.add_argument("code", help="Index code (e.g., sp500, nasdaq_listed)")
     index_show_parser.add_argument(
         "--no-tickers", action="store_true", help="Don't list constituent tickers"
     )

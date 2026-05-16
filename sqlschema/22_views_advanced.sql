@@ -31,8 +31,8 @@ SELECT
     (EXISTS (
         SELECT 1 FROM index_constituents ic
         JOIN indices i ON ic.index_id = i.id
-        WHERE ic.ticker = c.ticker AND i.code = 'nasdaq5000'
-    )) as in_nasdaq5000
+        WHERE ic.ticker = c.ticker AND i.code = 'nasdaq_listed'
+    )) as in_nasdaq_listed
 FROM companies c;
 
 -- ============================================

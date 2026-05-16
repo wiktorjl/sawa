@@ -274,7 +274,7 @@ def screen_stocks(
 
         sector: Optional sector filter (partial match on SIC or GICS)
         sector_exclude: Optional sector to exclude (partial match)
-        index: Filter by index membership (sp500, nasdaq5000)
+        index: Filter by index membership (sp500, nasdaq_listed)
         taxonomy: Sector taxonomy - "sic" or "gics" (default: gics)
         sort_by: Column to sort by (default: market_cap)
         sort_order: Sort direction - "asc" or "desc" (default: desc)
@@ -564,7 +564,7 @@ def detect_crossovers(
         direction: "above" (bullish) or "below" (bearish) crossover
         lookback_days: How many recent days to check for crossover (default: 5)
         min_volume_ratio: Minimum volume ratio on crossover day for confirmation
-        index: Filter by index membership (sp500, nasdaq5000)
+        index: Filter by index membership (sp500, nasdaq_listed)
         limit: Maximum results (default: 50, max: 200)
 
     Returns:
@@ -686,7 +686,7 @@ def detect_crossovers(
 def get_52week_extremes(
     extreme: Literal["highs", "lows", "both"] = "both",
     threshold_pct: float = 2.0,
-    index: Literal["sp500", "nasdaq5000", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "all"] = "all",
     min_volume: int | None = None,
     since_date: str | None = None,
     include_fundamentals: bool = False,
@@ -698,7 +698,7 @@ def get_52week_extremes(
     Args:
         extreme: Which extreme to find - "highs", "lows", or "both"
         threshold_pct: How close to extreme (default 2% = within 2% of high/low)
-        index: Filter by index membership (requires sp500/nasdaq5000 columns)
+        index: Filter by index membership (requires sp500/nasdaq_listed columns)
         min_volume: Minimum volume filter
         since_date: Only return stocks that hit new 52w extreme on or after this date
         include_fundamentals: Include PE, dividend yield, ROE, and net margin
@@ -722,11 +722,11 @@ def get_52week_extremes(
             JOIN indices i ON ic.index_id = i.id
             WHERE i.code = 'sp500'
         )""")
-    elif index == "nasdaq5000":
+    elif index == "nasdaq_listed":
         index_filter = sql.SQL("""AND c.ticker IN (
             SELECT ic.ticker FROM index_constituents ic
             JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = 'nasdaq5000'
+            WHERE i.code = 'nasdaq_listed'
         )""")
 
     # Volume filter (parameterized)
@@ -902,7 +902,7 @@ def get_daily_range_leaders(
         min_range_pct: Minimum daily range % (default: 3%)
         max_range_pct: Maximum daily range % (optional)
         sector: Optional sector filter
-        index: Filter by index membership (sp500, nasdaq5000)
+        index: Filter by index membership (sp500, nasdaq_listed)
         min_price: Minimum stock price filter
         min_volume: Minimum volume filter
         limit: Maximum results (default: 50, max: 200)

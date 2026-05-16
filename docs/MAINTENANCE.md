@@ -278,11 +278,11 @@ sawa add-symbol PLTR COIN          # ad-hoc
 sawa add-symbol --file new.txt --years 5
 ```
 
-Then if the ticker should belong to `nasdaq5000`:
+Then refresh the `nasdaq_listed` and `us_active` index memberships from
+Polygon (picks up new tickers automatically — no manual list to edit):
 
 ```bash
-echo PLTR >> data/nasdaq1000_symbols.txt
-python scripts/populate_nasdaq5000.py data/nasdaq1000_symbols.txt
+sawa index-update
 ```
 
 ### "Prices look stale after a split"

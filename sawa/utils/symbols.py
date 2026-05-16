@@ -204,8 +204,8 @@ def fetch_us_active_from_polygon(
     (ARCX) and Cboe BZX (BATS).
 
     Like the NASDAQ fetcher, paginates once per type and merges. Drops
-    XASE-listed CS (NYSE American — almost entirely microcap) and the
-    one BATS-listed CS (irrelevant) by post-filtering.
+    XASE-listed CS (NYSE American — almost entirely microcap) by
+    post-filtering.
 
     Args:
         logger: Logger instance
@@ -226,9 +226,10 @@ def fetch_us_active_from_polygon(
     base_url = "https://api.polygon.io/v3/reference/tickers"
     seen: set[str] = set()
 
-    # Exchanges to drop entirely for type=CS — XASE is NYSE American (microcap
-    # noise); BATS-CS is a single irrelevant ticker per Polygon's catalog.
-    cs_exclude_exchanges = {"XASE", "BATS"}
+    # Exchanges to drop entirely for type=CS — XASE is NYSE American
+    # (microcap noise). BATS-CS is intentionally NOT excluded: the only
+    # BATS-listed CS is CBOE (Cboe Global Markets), an S&P 500 member.
+    cs_exclude_exchanges = {"XASE"}
 
     for ticker_type in types:
         params: dict[str, str | int] = {
@@ -267,7 +268,7 @@ def fetch_us_active_from_polygon(
             sep = "&" if "?" in next_url else "?"
             url = f"{next_url}{sep}apiKey={api_key}"
             time.sleep(0.05)
-        suffix = f", dropped {type_dropped} from XASE/BATS" if type_dropped else ""
+        suffix = f", dropped {type_dropped} from XASE" if type_dropped else ""
         logger.info(f"  Polygon type={ticker_type} (any exchange): {type_count} tickers{suffix}")
 
     symbols = sorted(seen)
@@ -275,7 +276,7 @@ def fetch_us_active_from_polygon(
     return symbols
 
 
-def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
+def fetch_nasdaq_listed_symbols(logger: logging.Logger) -> list[str]:
     """
     Load NASDAQ-listed tickers, primary source Polygon REST.
 
@@ -309,7 +310,7 @@ def fetch_nasdaq5000_symbols(logger: logging.Logger) -> list[str]:
     symbols_file = next((c for c in candidates if c.exists()), None)
     if symbols_file is None:
         raise FileNotFoundError(
-            "NASDAQ-5000 symbols file not found in any of: "
+            "NASDAQ-listed symbols file not found in any of: "
             + ", ".join(str(c) for c in candidates)
         )
 
@@ -329,7 +330,7 @@ def fetch_index_symbols(index: str, logger: logging.Logger) -> list[str]:
     Fetch symbols for a market index.
 
     Args:
-        index: Index name ("sp500" or "nasdaq5000")
+        index: Index code ("sp500", "nasdaq_listed", or "us_active")
         logger: Logger instance
 
     Returns:
@@ -342,9 +343,11 @@ def fetch_index_symbols(index: str, logger: logging.Logger) -> list[str]:
 
     if index_lower in ("sp500", "s&p500", "s&p 500"):
         return fetch_sp500_symbols(logger)
-    elif index_lower in ("nasdaq5000", "nasdaq-5000", "nasdaq 5000"):
-        return fetch_nasdaq5000_symbols(logger)
+    elif index_lower in ("nasdaq_listed", "nasdaq-listed", "nasdaq listed"):
+        return fetch_nasdaq_listed_symbols(logger)
     elif index_lower in ("us_active", "us-active", "us active"):
         return fetch_us_active_from_polygon(logger)
     else:
-        raise ValueError(f"Unknown index: {index}. Use 'sp500', 'nasdaq5000', or 'us_active'")
+        raise ValueError(
+            f"Unknown index: {index}. Use 'sp500', 'nasdaq_listed', or 'us_active'"
+        )
