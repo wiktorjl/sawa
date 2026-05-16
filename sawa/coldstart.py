@@ -37,6 +37,9 @@ from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
 from sawa.utils.symbols import (
+    fetch_dow30_symbols,
+    fetch_mag7_symbols,
+    fetch_nasdaq100_symbols,
     fetch_nasdaq_listed_symbols,
     fetch_sp500_symbols,
 )
@@ -403,6 +406,9 @@ def populate_index_constituents(
         ("sp500", fetch_sp500_symbols),
         ("nasdaq_listed", fetch_nasdaq_listed_symbols),
         ("us_active", fetch_us_active_from_polygon),
+        ("nasdaq100", fetch_nasdaq100_symbols),
+        ("dow30", fetch_dow30_symbols),
+        ("mag7", fetch_mag7_symbols),
     ]
 
     for code, fetcher in index_data:

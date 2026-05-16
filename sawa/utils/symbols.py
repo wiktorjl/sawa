@@ -79,41 +79,120 @@ def load_symbols(
     return symbols
 
 
-def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
+_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SawaDataBot/1.0)"}
+_TICKER_HEADER_PATTERN = re.compile(r"^(ticker|symbol)( symbol)?$", re.IGNORECASE)
+
+
+def _fetch_wikipedia_constituents(
+    url: str,
+    name: str,
+    logger: logging.Logger,
+    table_id: str = "constituents",
+) -> list[str]:
     """
-    Fetch current S&P 500 symbols from Wikipedia.
+    Scrape a Wikipedia "List of …" article for constituent tickers.
+
+    Locates the table by ``id`` (default ``"constituents"`` — the
+    convention every major US index article uses), inspects the header
+    row to find the "Ticker" or "Symbol" column, then collects each
+    row's cell from that column.
 
     Args:
-        logger: Logger instance
+        url: Wikipedia URL to scrape.
+        name: Human-readable index name (for logs and error messages).
+        logger: Logger instance.
+        table_id: HTML ``id`` of the constituents table.
 
     Returns:
-        List of ticker symbols
+        List of ticker symbols.
 
     Raises:
-        requests.RequestException: If fetch fails
+        ValueError: If the table or a ticker column can't be found.
+        requests.RequestException: On network failure.
     """
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SawaDataBot/1.0)"}
-
-    logger.info("Fetching S&P 500 symbols from Wikipedia...")
-    response = requests.get(url, headers=headers, timeout=30)
+    logger.info(f"Fetching {name} symbols from Wikipedia ({url})...")
+    response = requests.get(url, headers=_WIKI_HEADERS, timeout=30)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    table = soup.find("table", {"id": "constituents"})
-
+    table = soup.find("table", {"id": table_id})
     if not table:
-        raise ValueError("Could not find S&P 500 constituents table")
+        raise ValueError(f"Could not find {name} constituents table (id={table_id})")
+
+    header_cells = table.find("tr").find_all(["th", "td"])
+    ticker_col = next(
+        (i for i, c in enumerate(header_cells)
+         if _TICKER_HEADER_PATTERN.match(c.get_text(strip=True))),
+        None,
+    )
+    if ticker_col is None:
+        raise ValueError(
+            f"Could not locate a ticker/symbol column in {name} table; "
+            f"headers were: {[c.get_text(strip=True) for c in header_cells]}"
+        )
 
     symbols: list[str] = []
-    for row in table.find_all("tr")[1:]:  # Skip header
-        cells = row.find_all("td")
-        if cells:
-            ticker = cells[0].text.strip()
-            symbols.append(ticker)
+    # Wikipedia sometimes renders the first body cell as ``<th scope="row">``
+    # rather than ``<td>``. To keep header and body indices aligned we
+    # collect both ``td`` and ``th`` from each row.
+    for row in table.find_all("tr")[1:]:
+        cells = row.find_all(["td", "th"])
+        if len(cells) > ticker_col:
+            ticker = cells[ticker_col].get_text(strip=True)
+            if ticker:
+                symbols.append(ticker)
 
-    logger.info(f"Found {len(symbols)} S&P 500 symbols")
+    logger.info(f"Found {len(symbols)} {name} symbols")
     return symbols
+
+
+def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
+    """Fetch current S&P 500 symbols from Wikipedia."""
+    return _fetch_wikipedia_constituents(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "S&P 500",
+        logger,
+    )
+
+
+def fetch_nasdaq100_symbols(logger: logging.Logger) -> list[str]:
+    """Fetch current NASDAQ-100 symbols from Wikipedia."""
+    return _fetch_wikipedia_constituents(
+        "https://en.wikipedia.org/wiki/Nasdaq-100",
+        "NASDAQ-100",
+        logger,
+    )
+
+
+def fetch_dow30_symbols(logger: logging.Logger) -> list[str]:
+    """Fetch current Dow Jones Industrial Average symbols from Wikipedia."""
+    return _fetch_wikipedia_constituents(
+        "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
+        "Dow 30",
+        logger,
+    )
+
+
+# The Magnificent Seven is an informal cohort, not an official index, so
+# constituents live in code. GOOGL and GOOG are both included because
+# both Alphabet share classes trade and most index providers count them
+# separately.
+_MAG7 = ("AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA")
+
+
+def fetch_mag7_symbols(logger: logging.Logger) -> list[str]:
+    """Return the Magnificent Seven (hard-coded)."""
+    logger.info(f"Loaded {len(_MAG7)} Magnificent 7 symbols (hard-coded)")
+    return list(_MAG7)
+
+
+# Russell 1000 / 2000 fetchers were planned for this PR using the
+# iShares IWB/IWM holdings CSV, but iShares actively gates those
+# endpoints behind a JS-based consent page and serves HTML (with a
+# misleading text/csv Content-Type) to programmatic clients. Russell
+# coverage is deferred to a follow-up PR pending a workable source
+# (Vanguard VONE/VTWO holdings, a bundled snapshot, or an authenticated
+# iShares session).
 
 
 def fetch_nasdaq_active_from_polygon(
@@ -325,29 +404,56 @@ def fetch_nasdaq_listed_symbols(logger: logging.Logger) -> list[str]:
     return symbols
 
 
+_INDEX_FETCHERS: dict[str, "callable[[logging.Logger], list[str]]"] = {
+    "sp500": fetch_sp500_symbols,
+    "nasdaq_listed": fetch_nasdaq_listed_symbols,
+    "us_active": fetch_us_active_from_polygon,
+    "nasdaq100": fetch_nasdaq100_symbols,
+    "dow30": fetch_dow30_symbols,
+    "mag7": fetch_mag7_symbols,
+}
+
+
 def fetch_index_symbols(index: str, logger: logging.Logger) -> list[str]:
     """
     Fetch symbols for a market index.
 
+    Recognized codes (case-insensitive): ``sp500``, ``nasdaq_listed``,
+    ``us_active``, ``nasdaq100``, ``dow30``, ``russell1000``,
+    ``russell2000``, ``mag7``. Common dashed/spaced variants are
+    accepted (e.g. ``"S&P 500"``, ``"nasdaq-100"``, ``"Russell 1000"``).
+
     Args:
-        index: Index code ("sp500", "nasdaq_listed", or "us_active")
-        logger: Logger instance
+        index: Index code.
+        logger: Logger instance.
 
     Returns:
-        List of ticker symbols
+        List of ticker symbols.
 
     Raises:
-        ValueError: If index not recognized
+        ValueError: If index not recognized.
     """
-    index_lower = index.lower()
+    normalized = re.sub(r"[\s\-&]+", "_", index.lower()).strip("_")
+    aliases = {
+        "sp_500": "sp500",
+        "s_p500": "sp500",
+        "s_p_500": "sp500",
+        "nasdaq_100": "nasdaq100",
+        "dow_30": "dow30",
+        "dow_jones": "dow30",
+        "dow_jones_industrial_average": "dow30",
+        "djia": "dow30",
+        "mag_7": "mag7",
+        "magnificent_7": "mag7",
+        "magnificent_seven": "mag7",
+        "us_active": "us_active",
+    }
+    code = aliases.get(normalized, normalized)
 
-    if index_lower in ("sp500", "s&p500", "s&p 500"):
-        return fetch_sp500_symbols(logger)
-    elif index_lower in ("nasdaq_listed", "nasdaq-listed", "nasdaq listed"):
-        return fetch_nasdaq_listed_symbols(logger)
-    elif index_lower in ("us_active", "us-active", "us active"):
-        return fetch_us_active_from_polygon(logger)
-    else:
+    fetcher = _INDEX_FETCHERS.get(code)
+    if fetcher is None:
         raise ValueError(
-            f"Unknown index: {index}. Use 'sp500', 'nasdaq_listed', or 'us_active'"
+            f"Unknown index: {index!r}. Valid codes: "
+            f"{sorted(_INDEX_FETCHERS)}"
         )
+    return fetcher(logger)
