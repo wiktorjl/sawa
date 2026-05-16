@@ -1247,7 +1247,7 @@ Environment Variables:
     )
     ta_screen_parser.add_argument(
         "--index",
-        choices=["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+        choices=["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
         help="Filter by index membership",
     )
     ta_screen_parser.add_argument(

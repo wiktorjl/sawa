@@ -173,6 +173,22 @@ def fetch_dow30_symbols(logger: logging.Logger) -> list[str]:
     )
 
 
+def fetch_russell1000_symbols(logger: logging.Logger) -> list[str]:
+    """Fetch current Russell 1000 symbols from Wikipedia.
+
+    Wikipedia maintains a full ~1,003-row constituent table (the
+    Russell 1000 is the 1,000 largest US stocks; the row count is
+    slightly over 1,000 due to dual-class share entries). Russell
+    only reconstitutes annually in late June, so this list is stable
+    enough to live on Wikipedia.
+    """
+    return _fetch_wikipedia_constituents(
+        "https://en.wikipedia.org/wiki/Russell_1000_Index",
+        "Russell 1000",
+        logger,
+    )
+
+
 # The Magnificent Seven is an informal cohort, not an official index, so
 # constituents live in code. GOOGL and GOOG are both included because
 # both Alphabet share classes trade and most index providers count them
@@ -186,13 +202,14 @@ def fetch_mag7_symbols(logger: logging.Logger) -> list[str]:
     return list(_MAG7)
 
 
-# Russell 1000 / 2000 fetchers were planned for this PR using the
-# iShares IWB/IWM holdings CSV, but iShares actively gates those
-# endpoints behind a JS-based consent page and serves HTML (with a
-# misleading text/csv Content-Type) to programmatic clients. Russell
-# coverage is deferred to a follow-up PR pending a workable source
-# (Vanguard VONE/VTWO holdings, a bundled snapshot, or an authenticated
-# iShares session).
+# Russell 2000 is still deferred. Both iShares (IWM holdings CSV) and
+# Vanguard (VTWO holdings) gate programmatic access — iShares with a
+# JS consent page, Vanguard with React-SPA fetches behind a session.
+# Wikipedia has only a 12-row "notable constituents" snippet for
+# Russell 2000 (vs. the full 1,003-row table for Russell 1000), so we
+# can't reuse the _fetch_wikipedia_constituents helper. Realistic
+# future sources: bundled snapshot CSV in data/, SEC EDGAR N-PORT
+# filings from IWM, or a third-party feed.
 
 
 def fetch_nasdaq_active_from_polygon(
@@ -410,6 +427,7 @@ _INDEX_FETCHERS: dict[str, "callable[[logging.Logger], list[str]]"] = {
     "us_active": fetch_us_active_from_polygon,
     "nasdaq100": fetch_nasdaq100_symbols,
     "dow30": fetch_dow30_symbols,
+    "russell1000": fetch_russell1000_symbols,
     "mag7": fetch_mag7_symbols,
 }
 
@@ -443,6 +461,8 @@ def fetch_index_symbols(index: str, logger: logging.Logger) -> list[str]:
         "dow_jones": "dow30",
         "dow_jones_industrial_average": "dow30",
         "djia": "dow30",
+        "russell_1000": "russell1000",
+        "russell1000_index": "russell1000",
         "mag_7": "mag7",
         "magnificent_7": "mag7",
         "magnificent_seven": "mag7",
