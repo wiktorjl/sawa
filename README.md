@@ -107,6 +107,45 @@ Add to your AI client's MCP configuration (e.g. Claude Desktop, Claude Code):
 
 Then just start asking questions.
 
+### MCP Tool Contract
+
+Successful tool calls return one JSON object in the MCP text payload:
+
+```json
+{
+  "data": {},
+  "chart": null,
+  "warnings": [],
+  "metadata": {
+    "tool": "get_latest_price",
+    "schema_version": "sawa.mcp.tool_response.v1",
+    "duration_ms": 12.34
+  }
+}
+```
+
+Clients and agents should parse `data` for machine-readable results.
+`chart` is optional display text, and `warnings` carries non-fatal
+messages such as missing data or market-hours hints.
+
+Index inputs are database-backed codes, not a frozen enum. Use
+`list_indices` to discover the current set. Current examples include
+`sp500`, `nasdaq_listed`, `us_active`, `nasdaq100`, `dow30`,
+`russell1000`, and `mag7`; the legacy `nasdaq5000` code is rejected and
+should be replaced with `nasdaq_listed`.
+
+The `execute_query` tool accepts optional named SQL parameters via
+`params`, for example:
+
+```json
+{
+  "sql": "SELECT * FROM companies WHERE ticker = %(ticker)s",
+  "params": {
+    "ticker": "AAPL"
+  }
+}
+```
+
 ### 3. Keep Data Fresh
 
 ```bash
@@ -200,7 +239,7 @@ Schema files in `sqlschema/` are applied in numeric order. Core tables:
 - **technical_indicators** -- SMA, RSI, MACD, Bollinger Bands, ATR
 - **treasury_yields, inflation, labor_market** -- Economic indicators
 - **market_internals** -- VIX, VIX3M, HY credit spread (FRED)
-- **indices, index_constituents** -- S&P 500 and NASDAQ index membership
+- **indices, index_constituents** -- Database-backed index membership
 - **stock_splits, dividends, earnings** -- Corporate actions
 - **news_articles, news_sentiment** -- News with per-ticker sentiment
 

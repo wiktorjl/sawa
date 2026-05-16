@@ -169,18 +169,27 @@ Net effect: there are now **zero** SICs in `companies` that don't have
 a GICS mapping. The function's fallback to SIC description should
 almost never fire.
 
-### MCP tool enums expanded
+### MCP tool index parameters
 
 Every tool that takes an `index` parameter (`list_companies`,
 `search_companies`, `get_top_movers`, `screen_stocks`,
-`detect_crossovers`, `get_dividend_yield_leaders`, etc.) now accepts:
+`detect_crossovers`, `get_dividend_yield_leaders`, etc.) now accepts
+database-backed index codes instead of a hard-coded enum. Use the MCP
+`list_indices` tool, or the CLI `sawa index-list`, to discover the
+current set. Current examples are:
 
 ```
 sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7
 ```
 
+The validator accepts future lowercase identifier-style codes added to
+the `indices` table without requiring a server release. Some tools also
+accept sentinel values: `all` for market-wide calendar/breadth tools and
+`both` for `scan_ytd_performance`.
+
 The previous accepted values were just `sp500` and `nasdaq5000`. Old
-clients passing `nasdaq5000` will get an enum-validation error.
+clients passing `nasdaq5000` now get a validation error that tells them
+to use `nasdaq_listed`.
 
 ---
 

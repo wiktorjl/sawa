@@ -233,6 +233,22 @@ Connecting an AI client: add the MCP entry as shown in the
 root via `_project_root / ".env"` so MCP clients only need to pass
 `DATABASE_URL` if they don't share that file.
 
+Successful tool calls return a single JSON object in the MCP text
+payload with `data`, optional `chart`, `warnings`, and `metadata`.
+Clients should treat `data` as the machine-readable contract and `chart`
+as display-only text. The response schema version is currently
+`sawa.mcp.tool_response.v1`.
+
+Index filters are database-backed. Operators should use `list_indices`
+or `sawa index-list` to verify the active codes after index migrations;
+the MCP input schemas advertise a conservative code pattern rather than
+a frozen enum. The legacy `nasdaq5000` code is intentionally rejected in
+favor of `nasdaq_listed`.
+
+`execute_query` remains read-only and audited. It also supports optional
+named `params` for psycopg placeholders, and the audit log records both
+the SQL text and parameters.
+
 ## 6. Data on disk
 
 ```
