@@ -324,7 +324,7 @@ def get_volume_leaders(
 
 def get_market_breadth(
     date: str | None = None,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
 ) -> dict[str, Any]:
     """
     Get market breadth statistics (advancers vs decliners, MA breadth).

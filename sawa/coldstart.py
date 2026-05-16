@@ -41,6 +41,7 @@ from sawa.utils.symbols import (
     fetch_mag7_symbols,
     fetch_nasdaq100_symbols,
     fetch_nasdaq_listed_symbols,
+    fetch_russell1000_symbols,
     fetch_sp500_symbols,
 )
 
@@ -408,6 +409,7 @@ def populate_index_constituents(
         ("us_active", fetch_us_active_from_polygon),
         ("nasdaq100", fetch_nasdaq100_symbols),
         ("dow30", fetch_dow30_symbols),
+        ("russell1000", fetch_russell1000_symbols),
         ("mag7", fetch_mag7_symbols),
     ]
 

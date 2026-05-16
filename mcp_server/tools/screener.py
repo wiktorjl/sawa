@@ -687,7 +687,7 @@ def detect_crossovers(
 def get_52week_extremes(
     extreme: Literal["highs", "lows", "both"] = "both",
     threshold_pct: float = 2.0,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
     min_volume: int | None = None,
     since_date: str | None = None,
     include_fundamentals: bool = False,

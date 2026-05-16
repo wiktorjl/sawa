@@ -49,6 +49,8 @@ def test_dispatcher_accepts_mag7_aliases(alias, logger):
         ("dow 30", "dow30"),
         ("DJIA", "dow30"),
         ("Dow Jones Industrial Average", "dow30"),
+        ("Russell 1000", "russell1000"),
+        ("russell-1000", "russell1000"),
     ],
 )
 def test_dispatcher_normalises_aliases(alias, expected_code, logger, monkeypatch):

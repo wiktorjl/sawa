@@ -170,8 +170,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                 },
             },
@@ -209,8 +209,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                 },
                 "required": ["query"],
@@ -492,8 +492,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "limit": {
                         "type": "integer",
@@ -622,8 +622,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Index to scan: any single code (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or both (sp500 union nasdaq_listed). Default: sp500",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "both"],
+                        "description": "Index to scan: any single code (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or both (sp500 union nasdaq_listed). Default: sp500",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "both"],
                         "default": "sp500",
                     },
                 },
@@ -731,8 +731,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "limit": {
                         "type": "integer",
@@ -758,8 +758,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "limit": {
                         "type": "integer",
@@ -803,8 +803,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "min_price": {
                         "type": "number",
@@ -842,8 +842,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "min_price": {
                         "type": "number",
@@ -864,8 +864,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"],
+                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
                         "default": "all",
                     },
                 },
@@ -1040,8 +1040,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "taxonomy": {
                         "type": "string",
@@ -1100,8 +1100,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"],
+                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
                         "default": "all",
                     },
                     "min_volume": {
@@ -1149,8 +1149,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "min_price": {
                         "type": "number",
@@ -1222,8 +1222,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
                     },
                     "limit": {
                         "type": "integer",
@@ -1367,8 +1367,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"],
+                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
                         "default": "all",
                     },
                     "limit": {
@@ -1393,8 +1393,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"],
+                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
                         "default": "all",
                     },
                 },
@@ -1408,8 +1408,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "index": {
                         "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"],
+                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
                         "default": "all",
                     },
                     "min_yield": {
@@ -1441,8 +1441,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"],
+                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
+                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
                         "default": "all",
                     },
                     "timing": {

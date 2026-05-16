@@ -143,7 +143,7 @@ def get_dividends(
 def get_ex_dividend_calendar(
     start_date: str,
     end_date: str,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """
@@ -185,7 +185,7 @@ def get_ex_dividend_calendar(
 
 def get_recent_splits(
     days: int = 30,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
 ) -> list[dict[str, Any]]:
     """
     Get recent stock splits.
@@ -219,7 +219,7 @@ def get_recent_splits(
 
 
 def get_dividend_yield_leaders(
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
     min_yield: float = 2.0,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
@@ -283,7 +283,7 @@ def get_dividend_yield_leaders(
 def get_earnings_calendar(
     start_date: str,
     end_date: str,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "mag7", "all"] = "all",
+    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
     timing: Literal["BMO", "AMC", "all"] = "all",
     upcoming_only: bool = False,
     limit: int = 200,
