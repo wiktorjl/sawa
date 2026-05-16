@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg
@@ -62,7 +62,7 @@ class PolygonWebSocketClient:
         self.websocket: ClientConnection | None = None
         self.running = False
         self.buffer: list[dict[str, Any]] = []
-        self.last_flush = datetime.now()
+        self.last_flush = datetime.now(timezone.utc)
 
         # For aggregating 1-min bars into 5-min bars
         self.bar_aggregator: dict[tuple[str, datetime], dict[str, Any]] = {}
@@ -154,7 +154,7 @@ class PolygonWebSocketClient:
             return
 
         # Convert to datetime and round down to bar_size boundary
-        bar_time = datetime.fromtimestamp(start_ms / 1000)
+        bar_time = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
         rounded_minute = (bar_time.minute // self.bar_size) * self.bar_size
         bar_start = bar_time.replace(minute=rounded_minute, second=0, microsecond=0)
 
@@ -183,7 +183,7 @@ class PolygonWebSocketClient:
 
     def _flush_completed_bars(self) -> None:
         """Move completed bars from aggregator to buffer."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         cutoff = now - timedelta(minutes=self.bar_size + 1)  # Keep current bar in aggregator
 
         completed_keys = [
@@ -253,7 +253,7 @@ class PolygonWebSocketClient:
                 f"{time_range[0].strftime('%H:%M')} - {time_range[1].strftime('%H:%M')}"
             )
             self.buffer.clear()
-            self.last_flush = datetime.now()
+            self.last_flush = datetime.now(timezone.utc)
 
         except Exception as e:
             self.logger.error(f"Database write failed: {e}")
@@ -270,7 +270,9 @@ class PolygonWebSocketClient:
             # Flush buffer if needed
             should_flush = (
                 len(self.buffer) >= self.batch_size
-                or (datetime.now() - self.last_flush).total_seconds() >= self.batch_timeout
+                or (
+                    datetime.now(timezone.utc) - self.last_flush
+                ).total_seconds() >= self.batch_timeout
             )
 
             if should_flush:

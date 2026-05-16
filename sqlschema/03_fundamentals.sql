@@ -3,7 +3,7 @@
 -- ============================================
 
 -- Balance sheets
-CREATE TABLE balance_sheets (
+CREATE TABLE IF NOT EXISTS balance_sheets (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     period_end DATE NOT NULL,
     filing_date DATE,
@@ -52,7 +52,7 @@ CREATE TABLE balance_sheets (
 );
 
 -- Cash flow statements
-CREATE TABLE cash_flows (
+CREATE TABLE IF NOT EXISTS cash_flows (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     period_end DATE NOT NULL,
     filing_date DATE,
@@ -92,7 +92,7 @@ CREATE TABLE cash_flows (
 );
 
 -- Income statements
-CREATE TABLE income_statements (
+CREATE TABLE IF NOT EXISTS income_statements (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     period_end DATE NOT NULL,
     filing_date DATE,

@@ -2,7 +2,7 @@
 -- Stores daily calculated indicators for all stocks using ta-lib
 -- Single wide table design optimized for screening queries (cross-indicator filters)
 
-CREATE TABLE technical_indicators (
+CREATE TABLE IF NOT EXISTS technical_indicators (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     date DATE NOT NULL,
     
@@ -42,20 +42,20 @@ CREATE TABLE technical_indicators (
 );
 
 -- Basic indexes for lookup
-CREATE INDEX idx_ta_date ON technical_indicators(date);
-CREATE INDEX idx_ta_ticker_date_desc ON technical_indicators(ticker, date DESC);
+CREATE INDEX IF NOT EXISTS idx_ta_date ON technical_indicators(date);
+CREATE INDEX IF NOT EXISTS idx_ta_ticker_date_desc ON technical_indicators(ticker, date DESC);
 
 -- BRIN indexes for screening queries (optimal for time-series range scans)
 -- BRIN is smaller and faster than B-tree for sequential date-ordered data
-CREATE INDEX idx_ta_rsi_14 ON technical_indicators USING BRIN (rsi_14);
-CREATE INDEX idx_ta_rsi_21 ON technical_indicators USING BRIN (rsi_21);
-CREATE INDEX idx_ta_atr_14 ON technical_indicators USING BRIN (atr_14);
-CREATE INDEX idx_ta_macd_line ON technical_indicators USING BRIN (macd_line);
-CREATE INDEX idx_ta_volume_ratio ON technical_indicators USING BRIN (volume_ratio);
+CREATE INDEX IF NOT EXISTS idx_ta_rsi_14 ON technical_indicators USING BRIN (rsi_14);
+CREATE INDEX IF NOT EXISTS idx_ta_rsi_21 ON technical_indicators USING BRIN (rsi_21);
+CREATE INDEX IF NOT EXISTS idx_ta_atr_14 ON technical_indicators USING BRIN (atr_14);
+CREATE INDEX IF NOT EXISTS idx_ta_macd_line ON technical_indicators USING BRIN (macd_line);
+CREATE INDEX IF NOT EXISTS idx_ta_volume_ratio ON technical_indicators USING BRIN (volume_ratio);
 
 
 -- Metadata registry for dynamic query building and API responses
-CREATE TABLE technical_indicator_metadata (
+CREATE TABLE IF NOT EXISTS technical_indicator_metadata (
     indicator_name VARCHAR(50) PRIMARY KEY,
     column_name VARCHAR(50) NOT NULL,
     category VARCHAR(30) NOT NULL,  -- 'trend', 'momentum', 'volatility', 'volume'
@@ -142,6 +142,19 @@ VALUES
     ('volume_sma_20', 'volume_sma_20', 'volume', '20-day Volume Simple Moving Average', 
      'SMA', '{"timeperiod": 20}', 0, NULL, FALSE, 20, 
      '20-Day Volume SMA', 'count', 19),
-    ('volume_ratio', 'volume_ratio', 'volume', 'Volume Ratio (today volume / 20-day avg)', 
-     'custom', '{}', 0, NULL, FALSE, 20, 
-     'Volume Ratio', 'ratio', 20);
+    ('volume_ratio', 'volume_ratio', 'volume', 'Volume Ratio (today volume / 20-day avg)',
+     'custom', '{}', 0, NULL, FALSE, 20,
+     'Volume Ratio', 'ratio', 20)
+ON CONFLICT (indicator_name) DO UPDATE SET
+    column_name = EXCLUDED.column_name,
+    category = EXCLUDED.category,
+    description = EXCLUDED.description,
+    ta_lib_function = EXCLUDED.ta_lib_function,
+    params = EXCLUDED.params,
+    validation_min = EXCLUDED.validation_min,
+    validation_max = EXCLUDED.validation_max,
+    is_bounded = EXCLUDED.is_bounded,
+    min_periods_required = EXCLUDED.min_periods_required,
+    display_name = EXCLUDED.display_name,
+    unit = EXCLUDED.unit,
+    sort_order = EXCLUDED.sort_order;

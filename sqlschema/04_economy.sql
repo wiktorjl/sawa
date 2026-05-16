@@ -3,7 +3,7 @@
 -- ============================================
 
 -- Treasury yields
-CREATE TABLE treasury_yields (
+CREATE TABLE IF NOT EXISTS treasury_yields (
     date DATE PRIMARY KEY,
     yield_1_month NUMERIC(8, 4),
     yield_3_month NUMERIC(8, 4),
@@ -20,7 +20,7 @@ CREATE TABLE treasury_yields (
 );
 
 -- Inflation metrics
-CREATE TABLE inflation (
+CREATE TABLE IF NOT EXISTS inflation (
     date DATE PRIMARY KEY,
     cpi NUMERIC(12, 3),
     cpi_core NUMERIC(12, 3),
@@ -32,7 +32,7 @@ CREATE TABLE inflation (
 );
 
 -- Inflation expectations
-CREATE TABLE inflation_expectations (
+CREATE TABLE IF NOT EXISTS inflation_expectations (
     date DATE PRIMARY KEY,
     market_5_year NUMERIC(8, 4),
     market_10_year NUMERIC(8, 4),
@@ -45,7 +45,7 @@ CREATE TABLE inflation_expectations (
 );
 
 -- Labor market indicators
-CREATE TABLE labor_market (
+CREATE TABLE IF NOT EXISTS labor_market (
     date DATE PRIMARY KEY,
     unemployment_rate NUMERIC(6, 4),
     labor_force_participation_rate NUMERIC(6, 4),

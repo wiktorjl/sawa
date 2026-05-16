@@ -53,6 +53,7 @@ TA-Lib needs the C library: `brew install ta-lib` (macOS) or
 | `sawa weekly` | Economy, overviews, news, corporate actions, character | Weekly |
 | `sawa quarterly` | Fundamentals + financial ratios | Quarterly |
 | `sawa intraday` | WebSocket 5-min bars (15-min delayed) | During market hours |
+| `sawa doctor` | Database sanity/completeness checks after jobs | After scheduled jobs |
 | `sawa add-symbol` | Add new ticker(s) ad-hoc | As needed |
 | `sawa adjust-splits` | Re-fetch adjusted prices after splits | After known split |
 | `sawa ta-backfill` | Recompute technical indicators from history | After schema/code change |
@@ -98,6 +99,13 @@ sawa daily --skip-market-internals         # Skip FRED step
 sawa daily --news-only                     # Only update news
 ```
 
+After a successful scheduled daily run, `sawa doctor --job daily` checks the
+database before the scheduler marks the day complete. It verifies required
+tables/views, active-company counts, latest `stock_prices` recency, latest-day
+ticker coverage against recent populated price dates, OHLCV sanity, technical
+indicator coverage, news/market internals freshness, and 52-week
+materialized-view freshness.
+
 ## Weekly Update
 
 ```bash
@@ -115,6 +123,11 @@ Updates:
 - News articles
 - Corporate actions (splits, dividends)
 - Stock character classification (Hurst-based regime classification)
+
+After a successful scheduled weekly run, `sawa doctor --job weekly` checks the
+database before the scheduler marks the ISO week complete. It validates core
+price coverage plus economy table freshness, stock-character coverage, and
+corporate-action table readability.
 
 ## Quarterly Update
 
@@ -138,7 +151,9 @@ A single cron entry handles intraday streaming during market hours, runs
 ```
 
 State lives under `~/.sawa/scheduler/`. Sends ntfy notifications if
-`NTFY_TOPIC` is set.
+`NTFY_TOPIC` is set. The scheduler runs `sawa doctor --job daily` and
+`sawa doctor --job weekly` after successful jobs; if doctor exits non-zero,
+the job is not marked done and an error notification is sent.
 
 ### Alternative: discrete cron entries
 
@@ -148,6 +163,22 @@ State lives under `~/.sawa/scheduler/`. Sends ntfy notifications if
 ```
 
 Quarterly is small — run by hand or once a quarter.
+
+## Database Doctor
+
+Use `doctor` when you want a database-only health check without contacting
+external APIs:
+
+```bash
+sawa doctor                                # broad database check
+sawa doctor --job daily                    # checks relevant after daily
+sawa doctor --job weekly                   # checks relevant after weekly
+sawa doctor --min-coverage 0.95            # stricter coverage vs recent baseline
+sawa doctor --max-staleness-days 3         # stricter stock_prices recency
+```
+
+Exit code is `0` only when there are no failed checks. Warnings are printed and
+included in notifications, but do not make the command fail.
 
 ## Re-entrancy
 

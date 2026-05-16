@@ -842,6 +842,33 @@ def cmd_data_status(args) -> int:
         return 1
 
 
+def cmd_doctor(args) -> int:
+    """Run database doctor checks."""
+    from sawa.doctor import run_doctor
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="doctor")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        logger.error("DATABASE_URL required (env var or --database-url)")
+        return 1
+
+    try:
+        with monitored_run("doctor", logger=logger) as ctx:
+            ctx["stats"] = run_doctor(
+                database_url=db_url,
+                job=args.job,
+                min_coverage=args.min_coverage,
+                max_staleness_days=args.max_staleness_days,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
+        if args.verbose:
+            raise
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -864,6 +891,7 @@ Commands:
   corporate-actions   Download stock splits and dividends
   adjust-splits       Re-fetch adjusted prices after stock splits
   character           Classify stocks by behavioral character (Hurst, regime, scorecard)
+  doctor              Check whether database contents look healthy after a job
   data-status         Show latest stock price data in the database
   logs                Inspect sawa log files (list, tail, grep, path)
   notify              Send a notification through the configured backend
@@ -883,6 +911,7 @@ Examples:
   sawa index-list
   sawa index-show sp500
   sawa index-check AAPL
+  sawa doctor --job daily
 
 Environment Variables:
   POLYGON_API_KEY         Polygon/Massive API key
@@ -1388,6 +1417,35 @@ Environment Variables:
     status_parser.add_argument("--log-dir", help="Directory for log files")
     status_parser.add_argument("-v", "--verbose", action="store_true")
     status_parser.set_defaults(func=cmd_data_status)
+
+    # Doctor subcommand
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check whether database contents look healthy after a job",
+        description="Run database-only sanity and completeness checks after scheduled jobs.",
+    )
+    doctor_parser.add_argument(
+        "--job",
+        choices=["all", "daily", "weekly", "quarterly", "coldstart"],
+        default="all",
+        help="Job scope to validate (default: all)",
+    )
+    doctor_parser.add_argument("--database-url", help="PostgreSQL URL")
+    doctor_parser.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.85,
+        help="Minimum ticker coverage ratio for completeness checks (default: 0.85)",
+    )
+    doctor_parser.add_argument(
+        "--max-staleness-days",
+        type=int,
+        default=5,
+        help="Maximum allowed age for latest stock_prices data (default: 5)",
+    )
+    doctor_parser.add_argument("--log-dir", help="Directory for log files")
+    doctor_parser.add_argument("-v", "--verbose", action="store_true")
+    doctor_parser.set_defaults(func=cmd_doctor)
 
     args = parser.parse_args()
 

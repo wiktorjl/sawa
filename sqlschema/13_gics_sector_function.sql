@@ -6,8 +6,8 @@
 -- Handles ticker-specific overrides for foreign ADRs without
 -- proper SIC codes, then falls back to the sic_gics_mapping table.
 --
--- Marked IMMUTABLE for query plan caching since the mapping data
--- and ticker overrides are effectively static.
+-- Marked STABLE because the function reads sic_gics_mapping. The mapping is
+-- seed data, but it can still be updated by migrations.
 
 CREATE OR REPLACE FUNCTION get_gics_sector(
     p_ticker TEXT,
@@ -15,7 +15,7 @@ CREATE OR REPLACE FUNCTION get_gics_sector(
     p_sic_desc TEXT DEFAULT 'Unclassified'
 ) RETURNS TEXT
 LANGUAGE plpgsql
-IMMUTABLE
+STABLE
 AS $$
 DECLARE
     v_sector TEXT;

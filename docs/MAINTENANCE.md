@@ -150,7 +150,8 @@ On each tick it:
 4. Market closed → stop `sawa intraday`, then:
    - If `>= 17:00 ET` and daily hasn't run today, run `sawa daily`
    - If Saturday and weekly hasn't run this ISO week, run `sawa weekly`
-5. Sends start/stop/failure push notifications to `NTFY_TOPIC`
+5. After successful daily/weekly jobs, run `sawa doctor --job daily|weekly`
+6. Sends start/stop/failure push notifications to `NTFY_TOPIC`
 
 State lives in `~/.sawa/scheduler/`:
 - `intraday.pid`, `intraday.log`, `intraday_{start,stop}_time`
@@ -159,8 +160,29 @@ State lives in `~/.sawa/scheduler/`:
 - `scheduler.log` (trimmed to 5000 lines when it exceeds 10000)
 
 The `scripts/{daily,weekly,coldstart}.sh` wrappers are simpler — they just
-activate the venv and run one `sawa` command. Use those if you want
-separate cron entries instead of the unified scheduler.
+activate the venv and run one `sawa` command. The daily and weekly wrappers
+also run the matching `doctor` check after a successful job. Use those if you
+want separate cron entries instead of the unified scheduler.
+
+### `sawa doctor` → `sawa/doctor.py`
+
+Read-only database health checks for unattended jobs. `doctor` validates that
+the schema exists and the loaded data looks plausible: active-company counts,
+latest `stock_prices` recency, latest-day ticker coverage compared with recent
+populated price dates, total price row counts, malformed OHLCV rows, technical
+indicator/news/market-internals freshness, 52-week view freshness, weekly
+economy freshness, and stock-character coverage.
+
+Typical usage:
+
+```bash
+sawa doctor --job daily
+sawa doctor --job weekly --min-coverage 0.95
+```
+
+The command exits non-zero when a required check fails. Warnings are reported
+but do not fail the run, which lets optional feeds such as news or FRED surface
+staleness without blocking all operations.
 
 ## 4. The database
 

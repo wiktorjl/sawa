@@ -3,8 +3,8 @@
 from datetime import date
 from decimal import Decimal
 
-from mcp_server.validation import validate_tool_arguments
 from mcp_server.tools import market_data
+from mcp_server.validation import validate_tool_arguments
 from sawa.repositories.database import (
     DatabaseRatiosRepository,
     DatabaseTechnicalIndicatorsRepository,
@@ -47,6 +47,9 @@ def test_intraday_multi_ticker_limit_is_applied_per_ticker(monkeypatch) -> None:
     assert "ROW_NUMBER() OVER" in query
     assert "PARTITION BY ticker" in query
     assert "WHERE rn <= %(limit)s" in query
+    assert "timestamp AT TIME ZONE 'America/New_York'" in query
+    assert "TIME '09:30:00'" in query
+    assert "TIME '16:00:00'" in query
     assert captured["params"] == {
         "tickers": ["AAPL", "MSFT"],
         "date": "2026-05-15",

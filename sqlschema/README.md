@@ -35,6 +35,10 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 | `26_market_internals.sql` | `market_internals` (VIX, VIX3M, HY spread) | FRED (`VIXCLS`, `VXVCLS`, `BAMLH0A0HYM2`) — sole source since commit `2d4e350` |
 | `27_stock_character.sql` | Tables for stock character classification (`stock_character_classification`, `stock_character_baseline`, `stock_character_flags`, `stock_character_scorecard`) | **computed locally** from `stock_prices` + `technical_indicators` + fundamentals (`sawa/calculation/stock_character*.py`, `sawa/stock_character_batch.py`) |
 | `29_consolidate_vix.sql` | Migration: drop legacy VIX rows from `stock_prices` / `companies` (see [`docs/VIX_MIGRATION.md`](../docs/VIX_MIGRATION.md)) | — |
+| `30_add_adx_and_extended_indicators.sql` | Adds ADX, Bollinger width %, and dollar-volume SMA to `technical_indicators` | computed (TA-Lib/custom) |
+| `31_widen_indicator_precision.sql` | Widens price-shaped technical-indicator columns | — |
+| `32_us_active_index.sql` | Seeds the `us_active` index definition | Polygon ticker reference |
+| `33_schema_integrity_and_time_semantics.sql` | Migration: intraday timestamp/timezone semantics, stock-character FKs/precision, trailing VIX ranks, GICS volatility | — |
 
 For the canonical mapping of external data source → table → loader →
 pipeline command, see [`docs/DATA_SOURCES.md`](../docs/DATA_SOURCES.md).
@@ -77,6 +81,10 @@ companies (ticker PK)
   ├─< dividends                 (ticker, ex_date)
   ├─< earnings                  (ticker, period_end)
   ├─< index_constituents        (ticker, index_id) ──> indices
+  ├─< stock_character_classification (ticker, run_date)
+  ├─< stock_character_baseline       (ticker, run_date)
+  ├─< stock_character_flags          (ticker, run_date, flag)
+  ├─< stock_character_scorecard      (ticker, run_date)
   └─< news_article_tickers      (article_id, ticker) ──> news_articles ──< news_sentiment
 
 economy tables (independent)
