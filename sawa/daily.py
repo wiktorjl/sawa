@@ -9,6 +9,7 @@ Uses REST API for near real-time data availability.
 import logging
 import os
 from datetime import date, timedelta
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,52 @@ from sawa.utils.notify import NotificationLevel
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 from sawa.utils.market_hours import get_market_date, is_after_market_close
+
+# Must match doctor's stock_prices.latest_coverage threshold so the daily backfill
+# doesn't leave a date that the post-run doctor check will then flag.
+MIN_LATEST_COVERAGE = 0.85
+
+
+def _last_date_coverage(conn: Any, last_date: date) -> tuple[int, int]:
+    """Return (tickers_on_last_date, baseline) for the daily backfill gate.
+
+    Baseline is the max distinct active-ticker count across the 10 trading days
+    immediately preceding ``last_date`` — same construction doctor uses.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH prior_dates AS (
+                SELECT date
+                FROM stock_prices
+                WHERE date < %s
+                GROUP BY date
+                ORDER BY date DESC
+                LIMIT 10
+            ),
+            daily_counts AS (
+                SELECT COUNT(DISTINCT sp.ticker) AS n
+                FROM stock_prices sp
+                JOIN companies c ON c.ticker = sp.ticker
+                WHERE c.active = true
+                  AND sp.date IN (SELECT date FROM prior_dates)
+                GROUP BY sp.date
+            ),
+            latest AS (
+                SELECT COUNT(DISTINCT sp.ticker) AS n
+                FROM stock_prices sp
+                JOIN companies c ON c.ticker = sp.ticker
+                WHERE c.active = true
+                  AND sp.date = %s
+            )
+            SELECT
+                (SELECT COALESCE(n, 0) FROM latest),
+                COALESCE((SELECT MAX(n) FROM daily_counts), 0)
+            """,
+            (last_date, last_date),
+        )
+        row = cur.fetchone()
+    return int(row[0] or 0), int(row[1] or 0)
 
 
 def fetch_prices_via_api(
@@ -229,9 +276,21 @@ def run_daily(
                 start_date = force_from_date
                 logger.info(f"  Forcing update from: {start_date}")
             elif last_price_date:
-                start_date = last_price_date + timedelta(days=1)
                 logger.info(f"  Last price date: {last_price_date}")
-                logger.info(f"  Starting from: {start_date}")
+                latest_count, baseline = _last_date_coverage(conn, last_price_date)
+                required = ceil(baseline * MIN_LATEST_COVERAGE) if baseline else 0
+                if baseline and latest_count < required:
+                    # Last date was only partially populated (e.g. add-symbol wrote a
+                    # subset before the daily ran). Refetch it instead of skipping past.
+                    start_date = last_price_date
+                    logger.info(
+                        f"  Last date coverage {latest_count}/{baseline} "
+                        f"< {MIN_LATEST_COVERAGE:.0%} ({required}); "
+                        f"refetching from {start_date}"
+                    )
+                else:
+                    start_date = last_price_date + timedelta(days=1)
+                    logger.info(f"  Starting from: {start_date}")
             else:
                 logger.error("No existing price data found. Run coldstart first.")
                 return stats
