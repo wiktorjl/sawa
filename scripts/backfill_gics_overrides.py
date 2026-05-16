@@ -131,6 +131,16 @@ def _save_state(ticker: str, filled: int, skipped: int, errors: int) -> None:
     )
 
 
+def _to_yahoo_ticker(polygon_ticker: str) -> str:
+    """Translate a Polygon-format ticker to the Yahoo Finance equivalent.
+
+    Polygon uses dot for dual-class shares (e.g. AKO.A, PBR.A);
+    Yahoo uses dash (AKO-A, PBR-A). Without this translation the
+    yfinance ``.info`` call 404s on every dotted ticker.
+    """
+    return polygon_ticker.replace(".", "-")
+
+
 def _fetch_yfinance_sector(ticker: str) -> tuple[str | None, str | None]:
     """Return (yahoo_sector, yahoo_industry) or (None, None) on any failure.
 
@@ -140,7 +150,7 @@ def _fetch_yfinance_sector(ticker: str) -> tuple[str | None, str | None]:
     multi-hour backfill.
     """
     try:
-        info = yf.Ticker(ticker).info or {}
+        info = yf.Ticker(_to_yahoo_ticker(ticker)).info or {}
     except Exception:
         return None, None
     return info.get("sector"), info.get("industry")
