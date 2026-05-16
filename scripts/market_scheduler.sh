@@ -77,6 +77,23 @@ notify() {
     fi
 }
 
+run_doctor() {
+    local job="$1"
+    local output exit_code=0
+
+    log "Starting sawa doctor --job $job..."
+    output=$(sawa doctor --job "$job" --log-dir "$PROJECT_DIR/logs" 2>&1) || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        log "ERROR: sawa doctor --job $job failed (exit $exit_code)"
+        log "$output"
+        notify "Sawa Doctor FAILED" "doctor --job $job exited with code $exit_code" error
+        return 1
+    fi
+
+    log "Doctor passed for $job"
+}
+
 # ── Environment setup ────────────────────────────────────────────────────────
 
 setup_env() {
@@ -249,6 +266,10 @@ run_weekly() {
         return 1
     fi
 
+    if ! run_doctor weekly; then
+        return 1
+    fi
+
     # Mark weekly as done
     touch "$STATE_DIR/weekly_done_$week"
 
@@ -285,6 +306,10 @@ run_daily() {
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa daily failed (exit $exit_code)"
         notify "Sawa Daily FAILED" "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")" error
+        return 1
+    fi
+
+    if ! run_doctor daily; then
         return 1
     fi
 

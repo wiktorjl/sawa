@@ -20,7 +20,7 @@
 -- determine the character; regime-specific evidence stored alongside.
 
 CREATE TABLE IF NOT EXISTS stock_character_classification (
-    ticker TEXT NOT NULL,
+    ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     run_date DATE NOT NULL,
     character TEXT NOT NULL,
     confidence TEXT NOT NULL,
@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_scc_character
 -- plus columns that are NULL when not applicable to the stock's character.
 
 CREATE TABLE IF NOT EXISTS stock_character_baseline (
-    ticker TEXT NOT NULL,
+    ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     run_date DATE NOT NULL,
     character TEXT NOT NULL,
 
@@ -112,11 +112,11 @@ CREATE INDEX IF NOT EXISTS idx_scb_ticker_run_date_desc
 -- value and the threshold it was compared against.
 
 CREATE TABLE IF NOT EXISTS stock_character_flags (
-    ticker TEXT NOT NULL,
+    ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     run_date DATE NOT NULL,
     flag TEXT NOT NULL,            -- e.g. 'EXTREMUM_HIGH', 'COMPRESSION', etc.
-    value NUMERIC(12, 6),         -- the computed value that triggered the flag
-    threshold NUMERIC(12, 6),     -- the threshold it was compared against
+    value NUMERIC(20, 6),         -- the computed value that triggered the flag
+    threshold NUMERIC(20, 6),     -- the threshold it was compared against
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
     PRIMARY KEY (ticker, run_date, flag)
@@ -138,11 +138,11 @@ CREATE INDEX IF NOT EXISTS idx_scf_flag
 -- into a single row for screening and prioritisation.
 
 CREATE TABLE IF NOT EXISTS stock_character_scorecard (
-    ticker TEXT NOT NULL,
+    ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     run_date DATE NOT NULL,
     character TEXT NOT NULL,
     confidence TEXT NOT NULL,
-    current_price NUMERIC(10, 4),
+    current_price NUMERIC(16, 4),
     price_percentile NUMERIC(6, 2),   -- NULL for non-range stocks
     sigma_distance NUMERIC(6, 2),     -- NULL for non-trending stocks
     flag_count INTEGER NOT NULL DEFAULT 0,

@@ -3,9 +3,9 @@
 -- ============================================
 
 -- 5-minute intraday bars from WebSocket stream
-CREATE TABLE stock_prices_intraday (
+CREATE TABLE IF NOT EXISTS stock_prices_intraday (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
-    timestamp TIMESTAMP NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
     open NUMERIC(12, 4),
     high NUMERIC(12, 4),
     low NUMERIC(12, 4),
@@ -17,9 +17,10 @@ CREATE TABLE stock_prices_intraday (
 );
 
 -- Indexes for performance
-CREATE INDEX idx_intraday_timestamp ON stock_prices_intraday(timestamp DESC);
-CREATE INDEX idx_intraday_ticker_timestamp ON stock_prices_intraday(ticker, timestamp DESC);
-CREATE INDEX idx_intraday_date ON stock_prices_intraday((timestamp::date));
+CREATE INDEX IF NOT EXISTS idx_intraday_timestamp ON stock_prices_intraday(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_intraday_ticker_timestamp ON stock_prices_intraday(ticker, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_intraday_date
+    ON stock_prices_intraday(((timestamp AT TIME ZONE 'America/New_York')::date));
 
 COMMENT ON TABLE stock_prices_intraday IS 'Real-time 5-minute bars from WebSocket (15-min delayed)';
 COMMENT ON COLUMN stock_prices_intraday.timestamp IS 'Bar timestamp in UTC';

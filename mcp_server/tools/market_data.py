@@ -3,6 +3,7 @@
 import logging
 from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from psycopg import sql
 
@@ -612,7 +613,7 @@ def get_intraday_bars(
     from datetime import datetime as dt_module
 
     if date is None:
-        date = dt_module.now().date().isoformat()
+        date = dt_module.now(ZoneInfo("America/New_York")).date().isoformat()
 
     limit = min(limit, 500)
 
@@ -645,9 +646,9 @@ def get_intraday_bars(
                 COUNT(*) as bar_count
             FROM stock_prices_intraday
             WHERE ticker = ANY(%(tickers)s)
-              AND timestamp::date = %(date)s
-              AND timestamp::time >= '14:30:00'
-              AND timestamp::time < '21:00:00'
+              AND (timestamp AT TIME ZONE 'America/New_York')::date = %(date)s
+              AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
+              AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
             GROUP BY ticker
             ORDER BY ticker
         """
@@ -670,9 +671,9 @@ def get_intraday_bars(
                     ) AS rn
                 FROM stock_prices_intraday
                 WHERE ticker = ANY(%(tickers)s)
-                  AND timestamp::date = %(date)s
-                  AND timestamp::time >= '14:30:00'
-                  AND timestamp::time < '21:00:00'
+                  AND (timestamp AT TIME ZONE 'America/New_York')::date = %(date)s
+                  AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
+                  AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
             )
             SELECT
                 ticker,

@@ -80,7 +80,7 @@ def cleanup_old_intraday_data(
     """
     query = sql.SQL("""
         DELETE FROM stock_prices_intraday
-        WHERE timestamp < CURRENT_TIMESTAMP - INTERVAL '%s days'
+        WHERE timestamp < CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
     """)
 
     with conn.cursor() as cur:
@@ -108,7 +108,8 @@ def cleanup_today_intraday_data(
     """
     query = sql.SQL("""
         DELETE FROM stock_prices_intraday
-        WHERE timestamp::date = CURRENT_DATE
+        WHERE (timestamp AT TIME ZONE 'America/New_York')::date =
+            (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
     """)
 
     with conn.cursor() as cur:

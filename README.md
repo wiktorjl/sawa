@@ -113,11 +113,13 @@ Then just start asking questions.
 sawa daily          # Run after market close -- prices, news, technical indicators, market internals
 sawa weekly         # Economy, overviews, news, corporate actions, stock character classification
 sawa quarterly      # Fundamentals (balance sheets, income, cash flow, ratios)
+sawa doctor         # Check whether database contents look healthy
 ```
 
 For unattended operation see `scripts/market_scheduler.sh` — a single
 cron-driven script that manages intraday streaming during market hours and
-runs `daily` / `weekly` after close. See [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
+runs `daily` / `weekly` after close, then runs scoped doctor checks before
+marking those jobs complete. See [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
 for the full operational playbook.
 
 ## Prerequisites
@@ -163,6 +165,7 @@ sawa daily --from-date 2024-01-01          # Force update from specific date
 sawa weekly                                # Economy, overviews, news, corporate actions, character
 sawa weekly --skip-character               # Skip stock character classification
 sawa quarterly                             # Fundamentals + financial ratios
+sawa doctor --job daily                    # Database checks after daily/weekly jobs
 
 # Intraday streaming (WebSocket, 15-min delayed)
 sawa intraday                              # Stream 5-min bars
@@ -181,6 +184,7 @@ sawa ta-screen --rsi-max 30 --index sp500  # Run a TA screener
 sawa character                             # Stock character classification (also runs in weekly)
 sawa adjust-splits                         # Re-fetch adjusted prices after recent splits
 sawa data-status                           # Show data freshness across price tables
+sawa doctor                                # Validate database completeness/sanity
 ```
 
 Full subcommand help: `sawa <command> --help`.

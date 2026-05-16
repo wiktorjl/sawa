@@ -15,5 +15,6 @@ fi
 # Create logs directory
 mkdir -p logs
 
-# Run daily update with file logging
-exec sawa daily --log-dir logs "$@"
+# Run daily update, then inspect the database before reporting scheduler success.
+sawa daily --log-dir logs "$@"
+sawa doctor --job daily --log-dir logs

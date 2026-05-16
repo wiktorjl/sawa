@@ -41,45 +41,51 @@ FROM companies c;
 -- ============================================
 
 CREATE OR REPLACE VIEW stock_prices_live AS
+WITH market_clock AS (
+  SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AS market_date
+)
   -- Historical EOD (all days before today)
   SELECT
-    ticker, date, open, high, low, close, volume,
+    sp.ticker, sp.date, sp.open, sp.high, sp.low, sp.close, sp.volume,
     'historical'::text as data_source
-  FROM stock_prices
-  WHERE date < CURRENT_DATE
+  FROM stock_prices sp
+  CROSS JOIN market_clock mc
+  WHERE sp.date < mc.market_date
 
   UNION ALL
 
   -- Today's EOD (preferred when available)
   SELECT
-    ticker, date, open, high, low, close, volume,
+    sp.ticker, sp.date, sp.open, sp.high, sp.low, sp.close, sp.volume,
     'eod'::text as data_source
-  FROM stock_prices
-  WHERE date = CURRENT_DATE
+  FROM stock_prices sp
+  CROSS JOIN market_clock mc
+  WHERE sp.date = mc.market_date
 
   UNION ALL
 
   -- Today's intraday aggregated (only when EOD not available)
-  -- Filter to regular market hours: 14:30-21:00 UTC (9:30 AM - 4:00 PM ET)
-  SELECT DISTINCT ON (ticker)
-    ticker,
-    timestamp::date as date,
-    (array_agg(open ORDER BY timestamp))[1] as open,
-    MAX(high) as high,
-    MIN(low) as low,
-    (array_agg(close ORDER BY timestamp DESC))[1] as close,
-    SUM(volume) as volume,
+  -- Filter to regular market hours in America/New_York to handle DST.
+  SELECT
+    spi.ticker,
+    (spi.timestamp AT TIME ZONE 'America/New_York')::date as date,
+    (array_agg(spi.open ORDER BY spi.timestamp))[1] as open,
+    MAX(spi.high) as high,
+    MIN(spi.low) as low,
+    (array_agg(spi.close ORDER BY spi.timestamp DESC))[1] as close,
+    SUM(spi.volume) as volume,
     'intraday'::text as data_source
-  FROM stock_prices_intraday
-  WHERE timestamp::date = CURRENT_DATE
-    AND timestamp::time >= '14:30:00'
-    AND timestamp::time < '21:00:00'
+  FROM stock_prices_intraday spi
+  CROSS JOIN market_clock mc
+  WHERE (spi.timestamp AT TIME ZONE 'America/New_York')::date = mc.market_date
+    AND (spi.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
+    AND (spi.timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
     AND NOT EXISTS (
       SELECT 1 FROM stock_prices sp
-      WHERE sp.ticker = stock_prices_intraday.ticker
-        AND sp.date = CURRENT_DATE
+      WHERE sp.ticker = spi.ticker
+        AND sp.date = mc.market_date
     )
-  GROUP BY ticker, timestamp::date;
+  GROUP BY spi.ticker, (spi.timestamp AT TIME ZONE 'America/New_York')::date;
 
 COMMENT ON VIEW stock_prices_live IS
   'Live prices: historical EOD + today intraday (switches to EOD when available)';

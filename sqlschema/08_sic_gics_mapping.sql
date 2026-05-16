@@ -15,10 +15,20 @@ CREATE TABLE IF NOT EXISTS sic_gics_mapping (
 );
 
 -- Trigger to auto-update updated_at timestamp
-CREATE TRIGGER update_sic_gics_mapping_updated_at 
-    BEFORE UPDATE ON sic_gics_mapping 
-    FOR EACH ROW 
-    EXECUTE FUNCTION update_updated_at_column();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgname = 'update_sic_gics_mapping_updated_at'
+          AND tgrelid = 'sic_gics_mapping'::regclass
+    ) THEN
+        CREATE TRIGGER update_sic_gics_mapping_updated_at
+            BEFORE UPDATE ON sic_gics_mapping
+            FOR EACH ROW
+            EXECUTE FUNCTION update_updated_at_column();
+    END IF;
+END $$;
 
 -- Index for fast sector lookups
 CREATE INDEX IF NOT EXISTS idx_sic_gics_sector ON sic_gics_mapping(gics_sector);

@@ -1,6 +1,6 @@
 -- trader_cards: stores parsed analysis output from chart-analysis card.md files
 
-CREATE TABLE trader_cards (
+CREATE TABLE IF NOT EXISTS trader_cards (
     -- Keys
     ticker          VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     analysis_date   DATE NOT NULL,
@@ -61,6 +61,6 @@ CREATE TABLE trader_cards (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_trader_cards_date ON trader_cards (analysis_date DESC);
-CREATE INDEX idx_trader_cards_grade ON trader_cards (grade);
-CREATE INDEX idx_trader_cards_bias ON trader_cards (bias);
+CREATE INDEX IF NOT EXISTS idx_trader_cards_date ON trader_cards (analysis_date DESC);
+CREATE INDEX IF NOT EXISTS idx_trader_cards_grade ON trader_cards (grade);
+CREATE INDEX IF NOT EXISTS idx_trader_cards_bias ON trader_cards (bias);

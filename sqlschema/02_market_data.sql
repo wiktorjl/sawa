@@ -3,7 +3,7 @@
 -- ============================================
 
 -- Daily stock prices
-CREATE TABLE stock_prices (
+CREATE TABLE IF NOT EXISTS stock_prices (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     date DATE NOT NULL,
     open NUMERIC(12, 4),
@@ -16,7 +16,7 @@ CREATE TABLE stock_prices (
 );
 
 -- Financial ratios (time-series)
-CREATE TABLE financial_ratios (
+CREATE TABLE IF NOT EXISTS financial_ratios (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     date DATE NOT NULL,
     average_volume BIGINT,

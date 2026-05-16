@@ -3,7 +3,7 @@
 -- ============================================
 
 -- Companies/Overviews (central reference table)
-CREATE TABLE companies (
+CREATE TABLE IF NOT EXISTS companies (
     ticker VARCHAR(10) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     description TEXT,
@@ -48,7 +48,17 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
-CREATE TRIGGER update_companies_updated_at 
-    BEFORE UPDATE ON companies 
-    FOR EACH ROW 
-    EXECUTE FUNCTION update_updated_at_column();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgname = 'update_companies_updated_at'
+          AND tgrelid = 'companies'::regclass
+    ) THEN
+        CREATE TRIGGER update_companies_updated_at
+            BEFORE UPDATE ON companies
+            FOR EACH ROW
+            EXECUTE FUNCTION update_updated_at_column();
+    END IF;
+END $$;
