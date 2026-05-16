@@ -136,9 +136,112 @@ app = Server(
         "- Quick latest closing price -> get_latest_price\n"
         "- Real-time quote from API -> get_live_price\n"
         "During market hours (Mon-Fri 9:30AM-4PM ET), prefer get_intraday_bars "
-        "for any question about today's prices."
+        "for any question about today's prices.\n\n"
+        "TOOL RESPONSE FORMAT:\n"
+        "Successful tools return one JSON object with data, chart, warnings, and metadata. "
+        "Read data for machine processing; chart is optional display text."
     ),
 )
+
+
+_RESPONSE_SCHEMA_VERSION = "sawa.mcp.tool_response.v1"
+_INDEX_CODE_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
+_INDEX_CODE_EXAMPLES = "sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7"
+
+
+def _index_schema_description(description: str, suffix: str = "") -> str:
+    return (
+        f"{description} ({_INDEX_CODE_EXAMPLES}{suffix}). "
+        "Use list_indices for the current database-backed codes."
+    )
+
+
+def _index_filter_schema(
+    *,
+    description: str = "Filter by index membership",
+    allow_all: bool = False,
+    allow_both: bool = False,
+    default: str | None = None,
+) -> dict[str, Any]:
+    """Schema for database-backed index filters without freezing valid codes."""
+    suffix = ""
+    if allow_all:
+        suffix = ", or all"
+    elif allow_both:
+        suffix = ", or both"
+
+    schema: dict[str, Any] = {
+        "type": "string",
+        "description": _index_schema_description(description, suffix),
+        "pattern": _INDEX_CODE_PATTERN,
+    }
+    if default is not None:
+        schema["default"] = default
+    return schema
+
+
+def _index_code_schema() -> dict[str, Any]:
+    """Schema for a single database-backed index code."""
+    return {
+        "type": "string",
+        "description": _index_schema_description("Index code"),
+        "pattern": _INDEX_CODE_PATTERN,
+    }
+
+
+def _tool_response(
+    name: str,
+    result: Any,
+    *,
+    chart: str | None = None,
+    warnings: list[str] | None = None,
+    duration_ms: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> list[TextContent]:
+    """Build the stable JSON response envelope returned by every successful tool."""
+    response_metadata: dict[str, Any] = {
+        "tool": name,
+        "schema_version": _RESPONSE_SCHEMA_VERSION,
+    }
+    if duration_ms is not None:
+        response_metadata["duration_ms"] = round(duration_ms, 2)
+    if metadata:
+        response_metadata.update(metadata)
+
+    payload = {
+        "data": result,
+        "chart": chart,
+        "warnings": warnings or [],
+        "metadata": response_metadata,
+    }
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(payload, indent=2, default=str, ensure_ascii=False),
+        )
+    ]
+
+
+def _success_response(
+    name: str,
+    result: Any,
+    started: float,
+    *,
+    chart: str | None = None,
+    warnings: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> list[TextContent]:
+    """Record a successful tool call and return a JSON envelope."""
+    duration_ms = (time.monotonic() - started) * 1000
+    record_call_outcome(name, success=True, duration_ms=duration_ms, logger=logger)
+    return _tool_response(
+        name,
+        result,
+        chart=chart,
+        warnings=warnings,
+        duration_ms=duration_ms,
+        metadata=metadata,
+    )
 
 
 @app.list_tools()
@@ -168,11 +271,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Filter by sector/SIC description (partial match)",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                 },
             },
         ),
@@ -207,11 +306,7 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 100,
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                 },
                 "required": ["query"],
             },
@@ -458,6 +553,10 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                     },
                 },
+                "oneOf": [
+                    {"required": ["ticker"], "not": {"required": ["tickers"]}},
+                    {"required": ["tickers"], "not": {"required": ["ticker"]}},
+                ],
             },
         ),
         Tool(
@@ -490,11 +589,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Date to screen (defaults to most recent)",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (default: 100, max: 500)",
@@ -600,7 +695,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="scan_ytd_performance",
-            description="Scan market indices (S&P 500, NASDAQ-100, or both) for YTD performance analysis with sector grouping",  # noqa: E501
+            description="Scan a market index for YTD performance analysis with sector grouping",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -620,12 +715,11 @@ async def list_tools() -> list[Tool]:
                         "minimum": 5,
                         "maximum": 50,
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Index to scan: any single code (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or both (sp500 union nasdaq_listed). Default: sp500",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "both"],
-                        "default": "sp500",
-                    },
+                    "index": _index_filter_schema(
+                        description="Index to scan",
+                        allow_both=True,
+                        default="sp500",
+                    ),
                 },
             },
         ),
@@ -648,7 +742,7 @@ async def list_tools() -> list[Tool]:
                 "diluted_earnings_per_share, ...)\n"
                 "  technical_indicators(ticker, date PK, sma_50, sma_150, sma_200, rsi_14, "
                 "macd_line, macd_histogram, bb_upper, bb_lower, atr_14, volume_ratio, ...)\n"
-                "  indices(id PK, code, name) - codes: 'sp500', 'nasdaq_listed'\n"
+                "  indices(id PK, code, name) - use list_indices for current codes\n"
                 "  index_constituents(index_id, ticker PK) - JOIN with indices on id\n"
                 "  sic_gics_mapping(sic_code PK, gics_sector, gics_industry) - "
                 "JOIN with companies on sic_code\n"
@@ -688,6 +782,14 @@ async def list_tools() -> list[Tool]:
                     "sql": {
                         "type": "string",
                         "description": "SQL SELECT statement to execute",
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": (
+                            "Optional named SQL parameters for psycopg placeholders, "
+                            "for example {'ticker': 'AAPL'} with %(ticker)s"
+                        ),
+                        "additionalProperties": True,
                     },
                 },
                 "required": ["sql"],
@@ -729,11 +831,7 @@ async def list_tools() -> list[Tool]:
                         "enum": ["sic", "gics"],
                         "default": "gics",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (default: 100)",
@@ -756,11 +854,7 @@ async def list_tools() -> list[Tool]:
                         "enum": ["sic", "gics"],
                         "default": "gics",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum sectors (default: 50)",
@@ -801,11 +895,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector filter (partial match)",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "min_price": {
                         "type": "number",
                         "description": "Minimum stock price filter",
@@ -840,11 +930,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector filter",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "min_price": {
                         "type": "number",
                         "description": "Minimum stock price filter",
@@ -862,12 +948,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Date YYYY-MM-DD (default: latest trading day)",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
-                        "default": "all",
-                    },
+                    "index": _index_filter_schema(allow_all=True, default="all"),
                 },
             },
         ),
@@ -1038,11 +1119,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector to exclude (partial match)",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "taxonomy": {
                         "type": "string",
                         "description": "Sector taxonomy: 'sic' or 'gics'",
@@ -1098,12 +1175,7 @@ async def list_tools() -> list[Tool]:
                         "description": "% threshold from extreme (default: 2 = within 2%)",
                         "default": 2.0,
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
-                        "default": "all",
-                    },
+                    "index": _index_filter_schema(allow_all=True, default="all"),
                     "min_volume": {
                         "type": "integer",
                         "description": "Minimum volume filter",
@@ -1147,11 +1219,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional sector filter",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "min_price": {
                         "type": "number",
                         "description": "Minimum stock price filter",
@@ -1220,11 +1288,7 @@ async def list_tools() -> list[Tool]:
                         "type": "number",
                         "description": "Min volume ratio on crossover day (e.g., 1.5)",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7)",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
-                    },
+                    "index": _index_filter_schema(),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (default: 50, max: 200)",
@@ -1238,7 +1302,7 @@ async def list_tools() -> list[Tool]:
         # Index tools
         Tool(
             name="list_indices",
-            description="List all market indices (S&P 500, NASDAQ-100) with constituent counts",
+            description="List all market indices with constituent counts",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1250,10 +1314,7 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Index code (e.g., 'sp500', 'nasdaq_listed')",
-                    },
+                    "code": _index_code_schema(),
                 },
                 "required": ["code"],
             },
@@ -1278,10 +1339,7 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Index code (e.g., 'sp500', 'nasdaq_listed')",
-                    },
+                    "code": _index_code_schema(),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum constituents to return (default: 50, max: 500)",
@@ -1365,12 +1423,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "End date YYYY-MM-DD",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
-                        "default": "all",
-                    },
+                    "index": _index_filter_schema(allow_all=True, default="all"),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (default: 200)",
@@ -1391,12 +1444,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Days to look back (default: 30)",
                         "default": 30,
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
-                        "default": "all",
-                    },
+                    "index": _index_filter_schema(allow_all=True, default="all"),
                 },
             },
         ),
@@ -1406,12 +1454,7 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
-                        "default": "all",
-                    },
+                    "index": _index_filter_schema(allow_all=True, default="all"),
                     "min_yield": {
                         "type": "number",
                         "description": "Minimum dividend yield % (default: 2.0)",
@@ -1439,12 +1482,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "End date YYYY-MM-DD",
                     },
-                    "index": {
-                        "type": "string",
-                        "description": "Filter by index (sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7) or all",
-                        "enum": ["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"],
-                        "default": "all",
-                    },
+                    "index": _index_filter_schema(allow_all=True, default="all"),
                     "timing": {
                         "type": "string",
                         "description": "Filter by timing: BMO, AMC, or all",
@@ -1866,6 +1904,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         )
 
         chart: str | None = None
+        warnings: list[str] = []
         result: Any = None
 
         if name == "list_companies":
@@ -1881,7 +1920,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             logger.info("  Executing: get_company_details")
             result = await _run_sync(get_company_details, arguments["ticker"])
             if result is None:
-                return [TextContent(type="text", text=f"Company {arguments['ticker']} not found")]
+                warnings.append(f"Company {arguments['ticker']} not found")
+                return _success_response(name, None, started, warnings=warnings)
         elif name == "search_companies":
             logger.info("  Executing: search_companies")
             result = await _run_sync(
@@ -1909,9 +1949,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 ticker=arguments["ticker"], use_live=arguments.get("use_live", True),
             )
             if result is None:
-                return [
-                    TextContent(type="text", text=f"No price data found for {arguments['ticker']}")
-                ]
+                warnings.append(f"No price data found for {arguments['ticker']}")
+                return _success_response(name, None, started, warnings=warnings)
         elif name == "get_stock_prices":
             logger.info("  Executing: get_stock_prices")
             result = await _run_sync(
@@ -1955,12 +1994,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             logger.info("  Executing: get_latest_technical_indicators")
             result = await _run_sync(get_latest_technical_indicators, ticker=arguments["ticker"])
             if result is None:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"No technical indicators found for {arguments['ticker']}",
-                    )
-                ]
+                warnings.append(f"No technical indicators found for {arguments['ticker']}")
+                return _success_response(name, None, started, warnings=warnings)
         elif name == "get_intraday_bars":
             logger.info("  Executing: get_intraday_bars")
             result = await _run_sync(
@@ -1973,12 +2008,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
             if not result:
                 ticker_desc = arguments.get("ticker") or arguments.get("tickers", "")
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"No intraday data found for {ticker_desc}",
-                    )
-                ]
+                warnings.append(f"No intraday data found for {ticker_desc}")
+                return _success_response(name, [], started, warnings=warnings)
         elif name == "screen_technical_indicators":
             logger.info("  Executing: screen_technical_indicators")
             # Build filters dict from individual arguments
@@ -2032,19 +2063,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 top_n=arguments.get("top_n", 10),
                 index=arguments.get("index", "sp500"),
             )
-            return [
-                TextContent(
-                    type="text",
-                    text=f"{result['summary']}\n\n{result['table_a']}\n\n{result['table_b']}",
-                )
-            ]
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(str(result["error"]))
+            return _success_response(
+                name,
+                result,
+                started,
+                warnings=warnings,
+                metadata={"source": "sawa.scanner"},
+            )
         elif name == "execute_query":
             logger.info("  Executing: execute_query")
             from .database import log_execute_query
 
             sql_query = arguments["sql"]
-            log_execute_query(sql_query, arguments.get("params"))
-            result = await _run_sync(execute_query, sql_query)
+            params = arguments.get("params")
+            log_execute_query(sql_query, params)
+            result = await _run_sync(execute_query, sql_query, params)
         # Schema discovery tools
         elif name == "describe_database":
             logger.info("  Executing: describe_database")
@@ -2343,49 +2378,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         else:
             raise ValueError(f"Unknown tool: {name}")
 
-        # Build response with chart and data
-        parts = []
-
-        # Add width warning if needed
         if width_warning:
-            parts.append(width_warning)
-            parts.append("")
-
-        # Add chart if available
-        if chart:
-            parts.append(chart)
-            parts.append("")
-            parts.append("\u2500" * 40 + " DATA " + "\u2500" * 40)
-            parts.append("")
-
-        # Add JSON data
-        parts.append(json.dumps(result, indent=2, default=str))
+            warnings.append(width_warning)
 
         # Add market-hours hint for EOD tools
         if name in ("get_latest_price", "get_stock_prices"):
             hint = _market_hours_hint()
             if hint:
-                parts.append("")
-                parts.append(hint)
+                warnings.append(hint)
 
-        duration_ms = (time.monotonic() - started) * 1000
-        record_call_outcome(name, success=True, duration_ms=duration_ms, logger=logger)
-        return [TextContent(type="text", text="\n".join(parts))]
+        return _success_response(name, result, started, chart=chart, warnings=warnings)
 
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         duration_ms = (time.monotonic() - started) * 1000
         logger.error(f"Error executing tool {name}: {e}", exc_info=True)
         record_call_outcome(
             name, success=False, duration_ms=duration_ms, logger=logger, error=e
         )
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
-    except BaseException as e:
-        duration_ms = (time.monotonic() - started) * 1000
-        logger.error(f"Unexpected error in tool {name}: {e}", exc_info=True)
-        record_call_outcome(
-            name, success=False, duration_ms=duration_ms, logger=logger, error=e
-        )
-        return [TextContent(type="text", text=f"Server error: {str(e)}")]
+        raise
 
 
 def _market_hours_hint() -> str | None:

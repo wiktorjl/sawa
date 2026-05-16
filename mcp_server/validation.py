@@ -11,6 +11,11 @@ from typing import Any
 # Ticker: 1-10 uppercase alphanumeric chars, dots, hyphens (e.g., BRK.B, BF-B)
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
+# Index codes are database-backed and intentionally not hard-coded here. Keep
+# validation to a conservative identifier shape so future rows in `indices`
+# can be used without an MCP server release.
+_INDEX_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
 # Date: strict YYYY-MM-DD format
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -19,6 +24,59 @@ _MAX_DATE_RANGE_DAYS = 3650
 
 # Max future date offset (1 year)
 _MAX_FUTURE_DAYS = 365
+
+_LEGACY_INDEX_CODES = {"nasdaq5000": "nasdaq_listed"}
+
+_TOOLS_ALLOW_INDEX_ALL = {
+    "get_market_breadth",
+    "get_52week_extremes",
+    "get_ex_dividend_calendar",
+    "get_recent_splits",
+    "get_dividend_yield_leaders",
+    "get_earnings_calendar",
+}
+
+_TOOLS_ALLOW_INDEX_BOTH = {"scan_ytd_performance"}
+
+_FIELD_ENUMS: dict[str, set[Any]] = {
+    "chart_detail": {"compact", "normal", "detailed"},
+    "taxonomy": {"sic", "gics"},
+    "sort_order": {"asc", "desc"},
+    "metric": {"volume", "dollar_volume", "volume_ratio"},
+    "category": {"trend", "momentum", "volatility", "volume"},
+    "extreme": {"highs", "lows", "both"},
+    "timing": {"BMO", "AMC", "all"},
+    "method": {"pivot", "cluster", "volume"},
+    "indicator_type": {
+        "treasury_yields",
+        "inflation",
+        "inflation_expectations",
+        "labor_market",
+        "market_internals",
+    },
+}
+
+_TOOL_FIELD_ENUMS: dict[tuple[str, str], set[Any]] = {
+    ("get_fundamentals", "timeframe"): {"quarterly", "annual"},
+    ("get_weekly_monthly_candles", "timeframe"): {"weekly", "monthly"},
+    ("get_top_movers", "direction"): {"gainers", "losers", "both"},
+    ("detect_crossovers", "direction"): {"above", "below"},
+    ("get_top_movers", "period"): {"1d", "1w", "1m", "ytd"},
+    ("detect_crossovers", "sma_period"): {50, 100, 150, 200},
+    ("screen_stocks", "sort_by"): {
+        "market_cap",
+        "price",
+        "volume",
+        "change_1d",
+        "change_1w",
+        "rsi_14",
+        "pe_ratio",
+        "dividend_yield",
+    },
+}
+
+_VALID_TIMEFRAMES = {"daily", "weekly", "monthly"}
+_VALID_ALIGNMENT_INDICATORS = {"sma", "sma_trend", "rsi", "macd"}
 
 
 def validate_ticker(ticker: str) -> str:
@@ -138,7 +196,7 @@ def validate_positive_number(
     Returns the validated value as float.
     Raises ValueError if invalid.
     """
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field_name} must be a number, got {type(value).__name__}")
 
     if allow_zero and value < 0:
@@ -147,6 +205,69 @@ def validate_positive_number(
         raise ValueError(f"{field_name} must be positive, got {value}")
 
     return float(value)
+
+
+def validate_index_code(index: Any, tool_name: str) -> str:
+    """Validate and normalize an index code or an allowed sentinel."""
+    if not isinstance(index, str) or not index.strip():
+        raise ValueError("index must be a non-empty string")
+
+    normalized = index.strip().lower()
+    if normalized in _LEGACY_INDEX_CODES:
+        replacement = _LEGACY_INDEX_CODES[normalized]
+        raise ValueError(f"index '{normalized}' was renamed; use '{replacement}'")
+
+    if normalized == "all":
+        if tool_name not in _TOOLS_ALLOW_INDEX_ALL:
+            raise ValueError(f"index 'all' is not valid for {tool_name}")
+        return normalized
+
+    if normalized == "both":
+        if tool_name not in _TOOLS_ALLOW_INDEX_BOTH:
+            raise ValueError(f"index 'both' is not valid for {tool_name}")
+        return normalized
+
+    if not _INDEX_CODE_RE.match(normalized):
+        raise ValueError(
+            f"Invalid index code: '{index}'. Use lowercase letters, digits, or underscores"
+        )
+
+    return normalized
+
+
+def validate_enum(value: Any, field_name: str, allowed: set[Any]) -> Any:
+    """Validate a field against an explicit set of accepted values."""
+    if value not in allowed:
+        allowed_display = ", ".join(str(v) for v in sorted(allowed, key=str))
+        raise ValueError(f"Invalid {field_name}: {value!r}. Must be one of: {allowed_display}")
+    return value
+
+
+def validate_string_list(
+    values: Any,
+    field_name: str,
+    allowed: set[str] | None = None,
+    max_count: int = 10,
+) -> list[str]:
+    """Validate a short list of strings, optionally constrained to known values."""
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{field_name} must be a non-empty list")
+    if len(values) > max_count:
+        raise ValueError(f"Too many {field_name}: {len(values)} (max {max_count})")
+
+    normalized = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} values must be non-empty strings")
+        item = value.strip().lower()
+        if allowed is not None and item not in allowed:
+            allowed_display = ", ".join(sorted(allowed))
+            raise ValueError(
+                f"Invalid {field_name} value: {value!r}. Must be one of: {allowed_display}"
+            )
+        normalized.append(item)
+
+    return normalized
 
 
 def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +284,42 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, A
     # Validate tickers (batch)
     if "tickers" in arguments and arguments["tickers"] is not None:
         arguments["tickers"] = validate_tickers(arguments["tickers"])
+
+    if name == "get_intraday_bars":
+        has_ticker = arguments.get("ticker") is not None
+        has_tickers = arguments.get("tickers") is not None
+        if has_ticker == has_tickers:
+            raise ValueError("get_intraday_bars requires exactly one of ticker or tickers")
+
+    if "index" in arguments and arguments["index"] is not None:
+        arguments["index"] = validate_index_code(arguments["index"], name)
+
+    if "code" in arguments and arguments["code"] is not None:
+        arguments["code"] = validate_index_code(arguments["code"], name)
+
+    for field_name, allowed in _FIELD_ENUMS.items():
+        if field_name in arguments and arguments[field_name] is not None:
+            arguments[field_name] = validate_enum(arguments[field_name], field_name, allowed)
+
+    for (tool_name, field_name), allowed in _TOOL_FIELD_ENUMS.items():
+        if name == tool_name and field_name in arguments and arguments[field_name] is not None:
+            arguments[field_name] = validate_enum(arguments[field_name], field_name, allowed)
+            if field_name == "sma_period":
+                arguments[field_name] = int(arguments[field_name])
+
+    if "timeframes" in arguments and arguments["timeframes"] is not None:
+        arguments["timeframes"] = validate_string_list(
+            arguments["timeframes"], "timeframes", _VALID_TIMEFRAMES
+        )
+
+    if "indicators" in arguments and arguments["indicators"] is not None:
+        arguments["indicators"] = validate_string_list(
+            arguments["indicators"], "indicators", _VALID_ALIGNMENT_INDICATORS
+        )
+
+    if name == "execute_query" and arguments.get("params") is not None:
+        if not isinstance(arguments["params"], dict):
+            raise ValueError("params must be an object mapping SQL parameter names to values")
 
     # Validate dates
     start_date = arguments.get("start_date")

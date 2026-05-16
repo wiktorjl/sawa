@@ -1,7 +1,10 @@
 """Regression tests for review-driven bug fixes."""
 
+import json
 from datetime import date
 from decimal import Decimal
+
+import pytest
 
 from mcp_server.tools import market_data
 from mcp_server.validation import validate_tool_arguments
@@ -30,6 +33,33 @@ def test_generic_days_validation_still_caps_live_price() -> None:
         raise AssertionError("expected get_live_price days validation to fail")
 
 
+def test_intraday_requires_exactly_one_ticker_input() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        validate_tool_arguments("get_intraday_bars", {})
+
+    with pytest.raises(ValueError, match="exactly one"):
+        validate_tool_arguments(
+            "get_intraday_bars",
+            {"ticker": "AAPL", "tickers": ["MSFT"]},
+        )
+
+    args = validate_tool_arguments("get_intraday_bars", {"ticker": "aapl"})
+    assert args["ticker"] == "AAPL"
+
+
+def test_index_validation_allows_future_codes_and_rejects_legacy_code() -> None:
+    args = validate_tool_arguments("screen_stocks", {"index": "Future_Index_1"})
+    assert args["index"] == "future_index_1"
+
+    with pytest.raises(ValueError, match="nasdaq_listed"):
+        validate_tool_arguments("screen_stocks", {"index": "nasdaq5000"})
+
+
+def test_enum_validation_rejects_silent_defaulting() -> None:
+    with pytest.raises(ValueError, match="Invalid direction"):
+        validate_tool_arguments("get_top_movers", {"direction": "winnerz"})
+
+
 def test_intraday_multi_ticker_limit_is_applied_per_ticker(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -55,6 +85,45 @@ def test_intraday_multi_ticker_limit_is_applied_per_ticker(monkeypatch) -> None:
         "date": "2026-05-15",
         "limit": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_execute_query_tool_passes_params_and_returns_envelope(monkeypatch) -> None:
+    pytest.importorskip("dotenv")
+    pytest.importorskip("mcp")
+
+    import mcp_server.database as mcp_database
+    import mcp_server.server as mcp_server
+
+    captured: dict[str, object] = {}
+
+    def fake_execute_query(query: str, params: dict[str, object] | None = None):
+        captured["query"] = query
+        captured["params"] = params
+        return [{"ticker": params["ticker"] if params else None}]
+
+    monkeypatch.setattr(mcp_server, "execute_query", fake_execute_query)
+    monkeypatch.setattr(mcp_database, "log_execute_query", lambda query, params=None: None)
+
+    response = await mcp_server.call_tool(
+        "execute_query",
+        {
+            "sql": "SELECT %(ticker)s AS ticker",
+            "params": {"ticker": "AAPL"},
+        },
+    )
+
+    assert captured == {
+        "query": "SELECT %(ticker)s AS ticker",
+        "params": {"ticker": "AAPL"},
+    }
+
+    payload = json.loads(response[0].text)
+    assert payload["data"] == [{"ticker": "AAPL"}]
+    assert payload["chart"] is None
+    assert payload["warnings"] == []
+    assert payload["metadata"]["tool"] == "execute_query"
+    assert payload["metadata"]["schema_version"] == "sawa.mcp.tool_response.v1"
 
 
 def test_database_ratio_mapping_uses_schema_column_names() -> None:
