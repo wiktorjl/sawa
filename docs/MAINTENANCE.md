@@ -76,7 +76,9 @@ Full bootstrap. Does these things in order:
 Flags worth remembering:
 - `--no-drop` — re-apply schema without losing data (safe upgrade path
   when only the SQL changed)
-- `--schema-only` — DDL only, no downloads
+- `--schema-only` — destructive schema rebuild: drops/recreates all tables
+  in the target database; use only on a throwaway DB or when intentionally
+  wiping data
 - `--load-only` / `--skip-downloads` — use existing CSVs in `data/`
 - `--drop-only --confirm-drop` — purely destructive
 

@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -28,6 +29,43 @@ def get_log_dir(args) -> Path | None:
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir
     return None
+
+
+def _redact_database_url(db_url: str) -> str:
+    """Return DATABASE_URL with password removed for logs."""
+    try:
+        parts = urlsplit(db_url)
+    except ValueError:
+        return "<unparseable DATABASE_URL>"
+
+    if not parts.scheme or not parts.netloc:
+        return db_url
+
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    auth = f"{parts.username}:***@" if parts.username else ""
+
+    return urlunsplit(
+        (parts.scheme, f"{auth}{host}{port}", parts.path, parts.query, parts.fragment)
+    )
+
+
+def _log_schema_only_warning(logger, db_url: str) -> None:
+    """Warn loudly that schema-only coldstart is destructive."""
+    target = _redact_database_url(db_url)
+    border = "!" * 78
+    logger.warning("")
+    logger.warning(border)
+    logger.warning("!!! DESTRUCTIVE COMMAND: sawa coldstart --schema-only")
+    logger.warning("!!! This will DROP AND RECREATE every table in the target public schema.")
+    logger.warning("!!! Existing data in that database will be permanently removed.")
+    logger.warning("!!! Target DATABASE_URL: %s", target)
+    logger.warning("!!! Do not run this against production.")
+    logger.warning("!!! For non-destructive schema upgrades, use: sawa coldstart --no-drop")
+    logger.warning(border)
+    logger.warning("")
 
 
 def cmd_coldstart(args) -> int:
@@ -69,6 +107,9 @@ def cmd_coldstart(args) -> int:
     if not db_url:
         logger.error("DATABASE_URL required (env var or --database-url)")
         return 1
+
+    if schema_only:
+        _log_schema_only_warning(logger, db_url)
 
     try:
         with monitored_run("coldstart", logger=logger) as ctx:
@@ -961,7 +1002,7 @@ Environment Variables:
     cold_parser.add_argument(
         "--schema-only",
         action="store_true",
-        help="Only set up schema (no download/load). Drops and recreates all tables.",
+        help="DANGER: drop and recreate every table in the target database; no download/load.",
     )
     cold_parser.add_argument(
         "--load-only", action="store_true", help="Only load existing CSV data (no schema changes)"
