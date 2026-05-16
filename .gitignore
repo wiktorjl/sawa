@@ -78,3 +78,8 @@ docs/CODE_REVIEW.md
 plot_cat_sma.py
 .opencode/
 opencode.json
+
+# Backfill resumption state files (written by scripts/backfill_*.py)
+scripts/.earnings_state
+scripts/.sic_backfill_state
+scripts/.gics_overrides_backfill_state
