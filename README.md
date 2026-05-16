@@ -155,7 +155,7 @@ MCP server options (optional):
 ```bash
 # Initial setup
 sawa coldstart --years 5                   # Full setup with 5 years of data
-sawa coldstart --schema-only               # Apply schema without downloading data
+sawa coldstart --schema-only               # DANGER: drops/recreates all tables; use throwaway DB
 sawa coldstart --skip-downloads            # Load existing CSV files only
 sawa coldstart --no-drop                   # Re-apply schema without destroying data (safe upgrade)
 

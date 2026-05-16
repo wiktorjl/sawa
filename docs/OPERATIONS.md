@@ -72,7 +72,7 @@ Use when:
 ```bash
 sawa coldstart --years 5                   # Full bootstrap (5y of data)
 sawa coldstart --years 5 --log-dir logs
-sawa coldstart --schema-only               # Schema only, drops tables
+sawa coldstart --schema-only               # DANGER: drops/recreates all tables; use throwaway DB
 sawa coldstart --no-drop                   # Re-apply schema without dropping (safe upgrade)
 sawa coldstart --load-only                 # Load already-downloaded CSVs only
 sawa coldstart --skip-downloads            # Schema + load existing CSVs
