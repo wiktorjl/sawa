@@ -39,6 +39,7 @@ class GICSMapping(TypedDict):
 
 # In-memory cache for database mappings
 _db_mappings_cache: dict[str, GICSMapping] | None = None
+_db_overrides_cache: dict[str, GICSMapping] | None = None
 
 
 def _get_database_url() -> str | None:
@@ -118,9 +119,120 @@ def load_mappings_from_db(database_url: str | None = None) -> dict[str, GICSMapp
 
 
 def clear_cache() -> None:
-    """Clear the in-memory mappings cache."""
-    global _db_mappings_cache
+    """Clear the in-memory mappings + overrides caches."""
+    global _db_mappings_cache, _db_overrides_cache
     _db_mappings_cache = None
+    _db_overrides_cache = None
+    _get_override_from_db.cache_clear()
+
+
+def load_overrides_from_db(database_url: str | None = None) -> dict[str, GICSMapping]:
+    """Load all ticker-level GICS overrides from the gics_overrides table.
+
+    Mirrors :func:`load_mappings_from_db` but for the ticker-keyed overrides
+    that previously lived only as the hard-coded ``TICKER_GICS_OVERRIDES``
+    dict at the bottom of this module. The DB-backed table (migration
+    37_gics_overrides.sql) is now the source of truth; the dict is kept
+    as a fallback when the DB is unreachable.
+
+    Args:
+        database_url: Database connection URL (optional, uses env vars if
+            not provided)
+
+    Returns:
+        Dictionary of ticker (uppercase) → GICSMapping
+    """
+    global _db_overrides_cache
+
+    if _db_overrides_cache is not None:
+        return _db_overrides_cache
+
+    url = database_url or _get_database_url()
+    if not url:
+        logger.debug("No database URL available for gics_overrides; using fallback dict")
+        return {}
+
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(url, row_factory=dict_row) as conn:  # type: ignore[arg-type]
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, gics_sector, gics_industry, confidence, notes
+                    FROM gics_overrides
+                    """
+                )
+                rows = cur.fetchall()
+
+        overrides: dict[str, GICSMapping] = {}
+        for row in rows:
+            overrides[row["ticker"].upper()] = GICSMapping(
+                gics_sector=row["gics_sector"],
+                gics_industry=row["gics_industry"] or "",
+                confidence=row["confidence"],
+                notes=row["notes"] or "",
+            )
+
+        _db_overrides_cache = overrides
+        logger.info(f"Loaded {len(overrides)} ticker GICS overrides from database")
+        return overrides
+
+    except Exception as e:
+        logger.warning(f"Failed to load gics_overrides from database: {e}")
+        return {}
+
+
+@lru_cache(maxsize=512)
+def _get_override_from_db(ticker: str) -> GICSMapping | None:
+    """Single-ticker lookup against gics_overrides (with LRU cache)."""
+    url = _get_database_url()
+    if not url:
+        return None
+
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(url, row_factory=dict_row) as conn:  # type: ignore[arg-type]
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT gics_sector, gics_industry, confidence, notes
+                    FROM gics_overrides
+                    WHERE ticker = %s
+                    """,
+                    (ticker.upper(),),
+                )
+                row = cur.fetchone()
+
+        if row:
+            return GICSMapping(
+                gics_sector=row["gics_sector"],
+                gics_industry=row["gics_industry"] or "",
+                confidence=row["confidence"],
+                notes=row["notes"] or "",
+            )
+
+    except Exception as e:
+        logger.debug(f"Database lookup failed for ticker override {ticker}: {e}")
+
+    return None
+
+
+def _get_ticker_override(ticker: str) -> GICSMapping | None:
+    """Resolve a ticker override: cache → DB → fallback dict."""
+    key = ticker.upper()
+
+    if _db_overrides_cache is not None and key in _db_overrides_cache:
+        return _db_overrides_cache[key]
+
+    override = _get_override_from_db(key)
+    if override:
+        return override
+
+    return TICKER_GICS_OVERRIDES.get(key)
 
 
 @lru_cache(maxsize=512)
@@ -1443,8 +1555,13 @@ SIC_TO_GICS_FALLBACK: dict[str, GICSMapping] = {
 }
 
 
-# Ticker-specific GICS overrides for foreign ADRs and stocks without SIC codes
-# Used before SIC code lookup
+# Ticker-specific GICS overrides for foreign ADRs and stocks without SIC codes.
+#
+# Since migration 37_gics_overrides.sql the source of truth is the
+# gics_overrides table (loaded via load_overrides_from_db()). This dict
+# is kept as a fallback for environments without a database connection
+# (offline tests, CLI usage with --no-db, etc.). Keep it in sync with
+# the seed INSERTs in 37_gics_overrides.sql.
 TICKER_GICS_OVERRIDES: dict[str, GICSMapping] = {
     "ASML": {
         "gics_sector": "Information Technology",
@@ -1593,9 +1710,11 @@ def map_sic_to_gics(
     Returns:
         GICS sector name, or "Other" if no mapping found
     """
-    # Try ticker-specific override first (for foreign ADRs, etc.)
-    if ticker and ticker.upper() in TICKER_GICS_OVERRIDES:
-        return TICKER_GICS_OVERRIDES[ticker.upper()]["gics_sector"]
+    # Try ticker-specific override first (DB-backed, falls back to dict)
+    if ticker:
+        override = _get_ticker_override(ticker)
+        if override:
+            return override["gics_sector"]
 
     # Try exact SIC code match
     if sic_code:
@@ -1640,9 +1759,11 @@ def get_sic_industry(
     Returns:
         GICS industry name, or "Unclassified" if no mapping found
     """
-    # Try ticker-specific override first
-    if ticker and ticker.upper() in TICKER_GICS_OVERRIDES:
-        return TICKER_GICS_OVERRIDES[ticker.upper()]["gics_industry"]
+    # Try ticker-specific override first (DB-backed, falls back to dict)
+    if ticker:
+        override = _get_ticker_override(ticker)
+        if override:
+            return override["gics_industry"]
 
     if sic_code:
         mapping = _get_mapping(sic_code)
