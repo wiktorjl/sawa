@@ -388,8 +388,8 @@ class MarketIndex:
 
     Attributes:
         id: Database ID
-        code: Short code (e.g., 'sp500', 'nasdaq5000')
-        name: Full name (e.g., 'S&P 500', 'NASDAQ-100')
+        code: Short code (e.g., 'sp500', 'nasdaq_listed')
+        name: Full name (e.g., 'S&P 500', 'NASDAQ Listed')
         description: Index description
         source_url: URL for constituent data source
         last_updated: When constituents were last updated

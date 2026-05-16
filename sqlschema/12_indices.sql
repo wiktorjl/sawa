@@ -6,8 +6,8 @@
 -- Market indices table
 CREATE TABLE IF NOT EXISTS indices (
     id SERIAL PRIMARY KEY,
-    code VARCHAR(20) UNIQUE NOT NULL,       -- 'sp500', 'nasdaq5000'
-    name VARCHAR(100) NOT NULL,             -- 'S&P 500', 'NASDAQ-100'
+    code VARCHAR(20) UNIQUE NOT NULL,       -- 'sp500', 'nasdaq_listed'
+    name VARCHAR(100) NOT NULL,             -- 'S&P 500', 'NASDAQ Listed'
     description TEXT,
     source_url VARCHAR(255),                -- Data source URL (e.g., Wikipedia)
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -28,8 +28,8 @@ CREATE INDEX IF NOT EXISTS idx_index_constituents_index_id ON index_constituents
 
 -- Seed initial indices
 INSERT INTO indices (code, name, description, source_url) VALUES
-('sp500', 'S&P 500', 'Standard & Poor''s 500 Index - 500 large-cap US stocks', 
+('sp500', 'S&P 500', 'Standard & Poor''s 500 Index - 500 large-cap US stocks',
  'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'),
-('nasdaq5000', 'NASDAQ-5000', 'NASDAQ listed stocks',
+('nasdaq_listed', 'NASDAQ Listed', 'All currently-active NASDAQ-listed tickers (CS + ETF + ADRC)',
  NULL)
 ON CONFLICT (code) DO NOTHING;

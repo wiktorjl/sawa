@@ -162,21 +162,23 @@ via `pandas.read_html`).
 No auth, no rate limit. If Wikipedia changes its table layout, the
 scrape may break — `sawa index-update` is the recovery path.
 
-### 2.6 Bundled file — NASDAQ-5000 universe
+### 2.6 Bundled file — NASDAQ-listed universe (fallback)
 
 Path: `data/nasdaq1000_symbols.txt` (also force-included into the built
 wheel; see `pyproject.toml`'s
 `[tool.hatch.build.targets.wheel.force-include]`).
-Function: `sawa/utils/symbols.py::fetch_nasdaq5000_symbols`.
+Function: `sawa/utils/symbols.py::fetch_nasdaq_listed_symbols`.
 
 | Source | Populates | Pipeline command(s) |
 |--------|-----------|---------------------|
-| `data/nasdaq1000_symbols.txt` (~5000 tickers) | `index_constituents` (rows where `index_id` = `nasdaq5000`); contributes to the union that becomes `companies` | `coldstart`, `index-update` |
+| Polygon `/v3/reference/tickers?exchange=XNAS&active=true` (primary) | `index_constituents` (rows where `index_id` = `nasdaq_listed`); contributes to the union that becomes `companies` | `coldstart`, `index-update` |
+| `data/nasdaq1000_symbols.txt` (~5000 tickers, fallback only) | same | only when the Polygon path is unreachable |
 
 The filename says "1000" for historical reasons; the file actually
-contains ~5000 NASDAQ-listed tickers. **This file is the source of
-truth** — to add/remove tickers from the NASDAQ universe, edit it and
-run `python scripts/populate_nasdaq5000.py data/nasdaq1000_symbols.txt`.
+contains ~5000 NASDAQ-listed tickers. The bundled file is a 2021-era
+snapshot kept as a recovery fallback — the live Polygon path is the
+source of truth. To refresh `nasdaq_listed` membership, run
+`sawa index-update`.
 
 ### 2.7 yfinance — optional earnings backfill
 
@@ -218,7 +220,7 @@ Reverse index of §2 and §3.
 
 | Table | Source |
 |-------|--------|
-| `companies` | Polygon REST `/v3/reference/tickers/{t}` (overviews); ticker membership union of Wikipedia (S&P 500) + bundled NASDAQ-5000 file |
+| `companies` | Polygon REST `/v3/reference/tickers/{t}` (overviews); ticker membership union of Wikipedia (S&P 500) + Polygon NASDAQ-listed fetch |
 | `stock_prices` | Polygon S3 (bulk historical) + Polygon REST `/v2/aggs/.../day/...` (incremental) |
 | `stock_prices_intraday` | Polygon WebSocket (live 5-min bars); REST `/v2/aggs/.../{m}/{ts}/...` for backfill |
 | `financial_ratios` | Polygon REST `/stocks/financials/v1/ratios` |
@@ -231,7 +233,7 @@ Reverse index of §2 and §3.
 | `labor_market` | Polygon REST `/fed/v1/labor-market` |
 | `market_internals` | FRED (`VIXCLS`, `VXVCLS`, `BAMLH0A0HYM2`) — sole source since commit `2d4e350` |
 | `indices` | seed data in `sqlschema/12_indices.sql` |
-| `index_constituents` | Wikipedia (`sp500`) + bundled file (`nasdaq5000`) |
+| `index_constituents` | Wikipedia (`sp500`) + Polygon (`nasdaq_listed`, `us_active`) |
 | `stock_splits` | Polygon REST `/v3/reference/splits` |
 | `dividends` | Polygon REST `/v3/reference/dividends` |
 | `earnings` | yfinance via `scripts/populate_earnings.py` (manual). Polygon `ticker-events` is wired up but currently returns no earnings data. |

@@ -8,7 +8,7 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 | File | Purpose | Data source for the tables it creates |
 |------|---------|---------------------------------------|
 | `00_setup.sql` | Documentation + verification queries (does not create anything) | — |
-| `01_companies.sql` | `companies` (ticker is PK; central reference) | Polygon REST `/v3/reference/tickers/{t}`; ticker universe from Wikipedia (sp500) + bundled `data/nasdaq1000_symbols.txt` (nasdaq5000) |
+| `01_companies.sql` | `companies` (ticker is PK; central reference) | Polygon REST `/v3/reference/tickers/{t}`; ticker universe from Wikipedia (sp500) + bundled `data/nasdaq1000_symbols.txt` (nasdaq_listed) |
 | `02_market_data.sql` | `stock_prices`, `financial_ratios` | Polygon S3 (bulk) + Polygon REST `/v2/aggs/...` (incremental); `/stocks/financials/v1/ratios` |
 | `03_fundamentals.sql` | `balance_sheets`, `income_statements`, `cash_flows` | Polygon REST `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements}` |
 | `04_economy.sql` | `treasury_yields`, `inflation`, `inflation_expectations`, `labor_market` | Polygon REST `/fed/v1/{treasury-yields,inflation,inflation-expectations,labor-market}` |
@@ -19,7 +19,7 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 | `09_sic_gics_data.sql` | Seed data for `sic_gics_mapping` | bundled SQL seed |
 | `10_news.sql` | `news_articles`, `news_article_tickers`, `news_sentiment` | Polygon REST `/v2/reference/news` (sentiment is supplied by Polygon in the `insights` field, not computed locally) |
 | `11_technical_indicators.sql` | `technical_indicators`, `technical_indicator_metadata` | **computed locally** from `stock_prices` via TA-Lib (`sawa/calculation/`, `sawa/ta_backfill.py`) |
-| `12_indices.sql` | `indices`, `index_constituents`, seeds (`sp500`, `nasdaq5000`) | seed data + Wikipedia (sp500) + bundled file (nasdaq5000) |
+| `12_indices.sql` | `indices`, `index_constituents`, seeds (`sp500`, `nasdaq_listed`) | seed data + Wikipedia (sp500) + bundled file (nasdaq_listed) |
 | `13_gics_sector_function.sql` | `get_gics_sector(sic_code)` helper | — |
 | `14_52week_extremes.sql` | `mv_52week_extremes` materialized view | computed from `stock_prices` |
 | `16_cleanup.sql` | Migration: drop old TUI/Web tables (no-op on fresh installs) | — |

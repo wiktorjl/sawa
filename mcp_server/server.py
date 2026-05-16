@@ -170,8 +170,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                 },
             },
@@ -209,8 +209,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                 },
                 "required": ["query"],
@@ -492,8 +492,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "limit": {
                         "type": "integer",
@@ -622,8 +622,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Index to scan: sp500, nasdaq5000, or both (default: sp500)",
-                        "enum": ["sp500", "nasdaq5000", "both"],
+                        "description": "Index to scan: sp500, nasdaq_listed, or both (default: sp500)",
+                        "enum": ["sp500", "nasdaq_listed", "both"],
                         "default": "sp500",
                     },
                 },
@@ -648,7 +648,7 @@ async def list_tools() -> list[Tool]:
                 "diluted_earnings_per_share, ...)\n"
                 "  technical_indicators(ticker, date PK, sma_50, sma_150, sma_200, rsi_14, "
                 "macd_line, macd_histogram, bb_upper, bb_lower, atr_14, volume_ratio, ...)\n"
-                "  indices(id PK, code, name) - codes: 'sp500', 'nasdaq5000'\n"
+                "  indices(id PK, code, name) - codes: 'sp500', 'nasdaq_listed'\n"
                 "  index_constituents(index_id, ticker PK) - JOIN with indices on id\n"
                 "  sic_gics_mapping(sic_code PK, gics_sector, gics_industry) - "
                 "JOIN with companies on sic_code\n"
@@ -669,7 +669,7 @@ async def list_tools() -> list[Tool]:
                 "  stock_prices_live - union of historical EOD + today's intraday data\n"
                 "  v_company_summary - companies with latest price and ratios\n"
                 "  v_company_with_indices - companies with index membership "
-                "(in_sp500, in_nasdaq5000)\n"
+                "(in_sp500, in_nasdaq_listed)\n"
                 "  v_latest_fundamentals - latest quarterly fundamentals per company\n"
                 "  v_economy_dashboard - combined economy indicators\n"
                 "  v_sector_summary - sector aggregates by SIC code\n\n"
@@ -731,8 +731,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "limit": {
                         "type": "integer",
@@ -758,8 +758,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "limit": {
                         "type": "integer",
@@ -803,8 +803,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "min_price": {
                         "type": "number",
@@ -842,8 +842,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "min_price": {
                         "type": "number",
@@ -864,8 +864,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq5000, or all",
-                        "enum": ["sp500", "nasdaq5000", "all"],
+                        "description": "Filter by index: sp500, nasdaq_listed, or all",
+                        "enum": ["sp500", "nasdaq_listed", "all"],
                         "default": "all",
                     },
                 },
@@ -1040,8 +1040,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "taxonomy": {
                         "type": "string",
@@ -1100,8 +1100,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq5000, or all",
-                        "enum": ["sp500", "nasdaq5000", "all"],
+                        "description": "Filter by index: sp500, nasdaq_listed, or all",
+                        "enum": ["sp500", "nasdaq_listed", "all"],
                         "default": "all",
                     },
                     "min_volume": {
@@ -1149,8 +1149,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "min_price": {
                         "type": "number",
@@ -1222,8 +1222,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index membership (sp500, nasdaq5000)",
-                        "enum": ["sp500", "nasdaq5000"],
+                        "description": "Filter by index membership (sp500, nasdaq_listed)",
+                        "enum": ["sp500", "nasdaq_listed"],
                     },
                     "limit": {
                         "type": "integer",
@@ -1252,7 +1252,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Index code (e.g., 'sp500', 'nasdaq5000')",
+                        "description": "Index code (e.g., 'sp500', 'nasdaq_listed')",
                     },
                 },
                 "required": ["code"],
@@ -1280,7 +1280,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Index code (e.g., 'sp500', 'nasdaq5000')",
+                        "description": "Index code (e.g., 'sp500', 'nasdaq_listed')",
                     },
                     "limit": {
                         "type": "integer",
@@ -1367,8 +1367,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq5000, or all",
-                        "enum": ["sp500", "nasdaq5000", "all"],
+                        "description": "Filter by index: sp500, nasdaq_listed, or all",
+                        "enum": ["sp500", "nasdaq_listed", "all"],
                         "default": "all",
                     },
                     "limit": {
@@ -1393,8 +1393,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq5000, or all",
-                        "enum": ["sp500", "nasdaq5000", "all"],
+                        "description": "Filter by index: sp500, nasdaq_listed, or all",
+                        "enum": ["sp500", "nasdaq_listed", "all"],
                         "default": "all",
                     },
                 },
@@ -1408,8 +1408,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq5000, or all",
-                        "enum": ["sp500", "nasdaq5000", "all"],
+                        "description": "Filter by index: sp500, nasdaq_listed, or all",
+                        "enum": ["sp500", "nasdaq_listed", "all"],
                         "default": "all",
                     },
                     "min_yield": {
@@ -1441,8 +1441,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "index": {
                         "type": "string",
-                        "description": "Filter by index: sp500, nasdaq5000, or all",
-                        "enum": ["sp500", "nasdaq5000", "all"],
+                        "description": "Filter by index: sp500, nasdaq_listed, or all",
+                        "enum": ["sp500", "nasdaq_listed", "all"],
                         "default": "all",
                     },
                     "timing": {
