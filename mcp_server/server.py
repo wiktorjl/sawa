@@ -2074,12 +2074,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         elif name == "execute_query":
             logger.info("  Executing: execute_query")
-            from .database import log_execute_query
+            from .database import log_execute_query, log_execute_query_result
 
             sql_query = arguments["sql"]
             params = arguments.get("params")
             log_execute_query(sql_query, params)
-            result = await _run_sync(execute_query, sql_query, params)
+            query_started = time.monotonic()
+            try:
+                result = await _run_sync(execute_query, sql_query, params)
+            except Exception as e:
+                log_execute_query_result(
+                    sql_query,
+                    params,
+                    duration_ms=(time.monotonic() - query_started) * 1000,
+                    row_count=None,
+                    success=False,
+                    error=str(e),
+                )
+                raise
+            log_execute_query_result(
+                sql_query,
+                params,
+                duration_ms=(time.monotonic() - query_started) * 1000,
+                row_count=len(result) if isinstance(result, list) else None,
+                success=True,
+            )
         # Schema discovery tools
         elif name == "describe_database":
             logger.info("  Executing: describe_database")
@@ -2420,6 +2439,13 @@ async def main():
     logger.info("Starting Stock Data MCP Server")
     if _mcp_log_file:
         logger.info("File log: %s", _mcp_log_file)
+    try:
+        from sawa.mcp_query_insights import load_cached_query_warning
+
+        if warning := load_cached_query_warning():
+            logger.warning(warning)
+    except Exception as e:
+        logger.debug("Could not load cached MCP query insights: %s", e)
     logger.info("Press Ctrl-C to exit gracefully")
 
     # Verify database connection

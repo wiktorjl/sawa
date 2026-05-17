@@ -1,11 +1,12 @@
 """Database connection and query execution for the MCP server."""
 
 import atexit
+import json
 import logging
 import os
 import re
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,7 @@ def close_pool() -> None:
 _DEFAULT_QUERY_LOG_DIR = Path.home() / ".sawa" / "logs"
 QUERY_LOG_DIR = Path(os.environ.get("MCP_QUERY_LOG_DIR") or _DEFAULT_QUERY_LOG_DIR)
 QUERY_LOG_FILE = QUERY_LOG_DIR / "execute_query.log"
+QUERY_LOG_JSONL_FILE = QUERY_LOG_DIR / "execute_query.jsonl"
 
 
 def _ensure_log_dir() -> None:
@@ -102,6 +104,34 @@ def log_execute_query(query: str, params: dict[str, Any] | None = None) -> None:
     logger.info(f"[QUERY] {query}")
     if params:
         logger.info(f"[QUERY PARAMS] {params}")
+
+
+def log_execute_query_result(
+    query: str,
+    params: dict[str, Any] | None,
+    *,
+    duration_ms: float,
+    row_count: int | None,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    """Log structured execute_query outcome data for tool-gap analysis."""
+    _ensure_log_dir()
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "execute_query",
+        "sql": query,
+        "params": params or {},
+        "duration_ms": round(duration_ms, 2),
+        "row_count": row_count,
+        "success": success,
+        "error": error,
+    }
+    try:
+        with open(QUERY_LOG_JSONL_FILE, "a") as f:
+            f.write(json.dumps(record, default=str, sort_keys=True) + "\n")
+    except OSError as e:
+        logger.warning("Failed to write structured execute_query log: %s", e)
 
 
 @contextmanager
