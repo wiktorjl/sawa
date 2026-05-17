@@ -146,6 +146,13 @@ The `execute_query` tool accepts optional named SQL parameters via
 }
 ```
 
+`execute_query` usage is audited to `~/.sawa/logs/execute_query.log`
+and structured records are written to `execute_query.jsonl`. Run
+`sawa mcp-query-insights` to summarize repeated custom SQL patterns,
+tables, and filters that may deserve first-class MCP tools. The MCP
+server reads only the cached summary on startup and logs a warning when
+custom SQL volume is high.
+
 ### 3. Keep Data Fresh
 
 ```bash
@@ -224,6 +231,7 @@ sawa character                             # Stock character classification (als
 sawa adjust-splits                         # Re-fetch adjusted prices after recent splits
 sawa data-status                           # Show data freshness across price tables
 sawa doctor                                # Validate database completeness/sanity
+sawa mcp-query-insights                    # Summarize execute_query usage patterns
 ```
 
 Full subcommand help: `sawa <command> --help`.

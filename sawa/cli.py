@@ -910,6 +910,32 @@ def cmd_doctor(args) -> int:
         return 1
 
 
+def cmd_mcp_query_insights(args) -> int:
+    """Analyze execute_query audit logs for missing-tool signals."""
+    from sawa.mcp_query_insights import analyze_query_log, format_query_insights
+
+    try:
+        cache = analyze_query_log(
+            log_dir=get_log_dir(args),
+            reset=args.reset,
+            window_days=args.window_days,
+            warning_threshold=args.warning_threshold,
+            top_n=args.limit,
+        )
+        if args.json:
+            import json
+
+            print(json.dumps(cache, indent=2, sort_keys=True, default=str))
+        else:
+            print(format_query_insights(cache, top_n=args.limit))
+        return 0
+    except Exception as e:
+        if args.verbose:
+            raise
+        print(f"Failed to analyze MCP query logs: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -934,6 +960,7 @@ Commands:
   character           Classify stocks by behavioral character (Hurst, regime, scorecard)
   doctor              Check whether database contents look healthy after a job
   data-status         Show latest stock price data in the database
+  mcp-query-insights  Analyze execute_query usage for missing MCP tools
   logs                Inspect sawa log files (list, tail, grep, path)
   notify              Send a notification through the configured backend
 
@@ -953,6 +980,7 @@ Examples:
   sawa index-show sp500
   sawa index-check AAPL
   sawa doctor --job daily
+  sawa mcp-query-insights
 
 Environment Variables:
   POLYGON_API_KEY         Polygon/Massive API key
@@ -1487,6 +1515,43 @@ Environment Variables:
     doctor_parser.add_argument("--log-dir", help="Directory for log files")
     doctor_parser.add_argument("-v", "--verbose", action="store_true")
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    # MCP query insights subcommand
+    insights_parser = subparsers.add_parser(
+        "mcp-query-insights",
+        help="Analyze execute_query usage for missing MCP tools",
+        description=(
+            "Analyze structured MCP execute_query audit logs and cache a summary. "
+            "The MCP server reads only the cached summary on startup."
+        ),
+    )
+    insights_parser.add_argument(
+        "--window-days",
+        type=int,
+        default=7,
+        help="Recent usage window for warning threshold (default: 7)",
+    )
+    insights_parser.add_argument(
+        "--warning-threshold",
+        type=int,
+        default=25,
+        help="Warn when recent custom query count reaches this value (default: 25)",
+    )
+    insights_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Number of top tables/patterns to show (default: 10)",
+    )
+    insights_parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Ignore cached offsets and rebuild insights from the structured log",
+    )
+    insights_parser.add_argument("--json", action="store_true", help="Print raw JSON summary")
+    insights_parser.add_argument("--log-dir", help="Directory for MCP query logs")
+    insights_parser.add_argument("-v", "--verbose", action="store_true")
+    insights_parser.set_defaults(func=cmd_mcp_query_insights)
 
     args = parser.parse_args()
 

@@ -247,7 +247,21 @@ favor of `nasdaq_listed`.
 
 `execute_query` remains read-only and audited. It also supports optional
 named `params` for psycopg placeholders, and the audit log records both
-the SQL text and parameters.
+the SQL text and parameters. Structured outcome records are written to
+`execute_query.jsonl` with duration, row count, and success/error state.
+
+Run this periodically to turn custom SQL usage into a missing-tool
+backlog:
+
+```bash
+sawa mcp-query-insights
+```
+
+The analyzer reads only new structured log records since the last cached
+offset and writes `execute_query_insights.json` next to the query logs.
+On startup, the MCP server only reads that cached summary. If recent
+custom SQL usage crosses the configured threshold, startup logs a
+warning instead of scanning query history.
 
 ## 6. Data on disk
 
