@@ -16,7 +16,7 @@ from sawa.api import PolygonClient
 from sawa.daily import fetch_prices_via_api, insert_prices
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
-from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
+from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, SPLIT_ADJUST_BLACKLIST
 from sawa.utils.dates import DATE_FORMAT
 
 
@@ -84,6 +84,16 @@ def refresh_split_adjusted_prices(
         # Determine which tickers need adjustment
         if tickers is None:
             tickers = get_tickers_with_recent_splits(conn, since)
+
+        # Drop tickers whose Polygon-adjusted history overflows our NUMERIC(16,4)
+        # price columns. See SPLIT_ADJUST_BLACKLIST for the why.
+        skipped = [t for t in tickers if t in SPLIT_ADJUST_BLACKLIST]
+        if skipped:
+            tickers = [t for t in tickers if t not in SPLIT_ADJUST_BLACKLIST]
+            logger.warning(
+                f"Skipping {len(skipped)} blacklisted ticker(s): {', '.join(sorted(set(skipped)))}"
+            )
+            stats["skipped_tickers"] = sorted(set(skipped))
 
         if not tickers:
             logger.info("No tickers with recent splits found - nothing to adjust")
