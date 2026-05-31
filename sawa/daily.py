@@ -13,12 +13,14 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psycopg
 from psycopg import sql
 
 from sawa.api import FredClient, PolygonClient
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import fetch_and_load_news
+from sawa.domain.exceptions import ProviderError
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
 from sawa.utils.notify import NotificationLevel
@@ -404,14 +406,31 @@ def run_daily(
                     tags=["warning", "daily", "mv_refresh"],
                 )
 
-        # Fetch and load news (always, unless skipped)
+        # Fetch and load news (always, unless skipped). Non-fatal: an outage on
+        # /v2/reference/news must not block downstream steps (TA, market internals).
         if not skip_news:
             logger.info(f"\nFetching news (last {DEFAULT_NEWS_DAYS} days)...")
-            with psycopg.connect(database_url) as conn:
-                news_count = fetch_and_load_news(
-                    conn, client, days=DEFAULT_NEWS_DAYS, limit=1000, log=logger
+            try:
+                with psycopg.connect(database_url) as conn:
+                    news_count = fetch_and_load_news(
+                        conn, client, days=DEFAULT_NEWS_DAYS, limit=1000, log=logger
+                    )
+                stats["news"] = news_count
+            except (httpx.RequestError, ProviderError, psycopg.Error) as e:
+                logger.warning(f"News fetch failed: {type(e).__name__}: {e}")
+                stats["news_error"] = f"{type(e).__name__}: {e}"
+                get_notifier(logger).send(
+                    title="Sawa: news fetch failed",
+                    body=(
+                        f"fetch_and_load_news failed during daily run.\n"
+                        f"{type(e).__name__}: {e}\n\n"
+                        "Daily continued with TA + market internals. News will "
+                        "catch up on the next successful run (last 30 days are "
+                        "re-pulled each time)."
+                    ),
+                    level=NotificationLevel.WARNING,
+                    tags=["warning", "daily", "news"],
                 )
-            stats["news"] = news_count
         else:
             logger.info("\nSkipping news (--skip-news)")
 
