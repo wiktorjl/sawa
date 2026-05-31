@@ -115,14 +115,20 @@ class PolygonClient:
         endpoint: str,
         params: dict[str, Any] | None = None,
         timeout: int = DEFAULT_HTTP_TIMEOUT,
+        max_retries: int = 3,
     ) -> list[dict[str, Any]]:
         """
         Fetch all pages from paginated endpoint.
 
+        Retries each page independently on transient httpx.RequestError
+        (timeouts, connection drops) and on HTTP 429 rate-limit responses,
+        matching get_single's behavior.
+
         Args:
             endpoint: Endpoint key or path
             params: Query parameters
-            timeout: Request timeout
+            timeout: Request timeout per page
+            max_retries: Retry attempts per page for transient failures
 
         Returns:
             List of all results across pages
@@ -139,12 +145,41 @@ class PolygonClient:
             page += 1
             self.logger.debug(f"Fetching page {page}")
 
-            if page > 1:
-                response = self.client.get(url, timeout=timeout)
-            else:
-                response = self.client.get(url, params=params, timeout=timeout)
+            response: httpx.Response | None = None
+            for attempt in range(max_retries):
+                try:
+                    if page > 1:
+                        response = self.client.get(url, timeout=timeout)
+                    else:
+                        response = self.client.get(url, params=params, timeout=timeout)
 
-            response.raise_for_status()
+                    if response.status_code == 429:
+                        wait = (attempt + 1) * 2
+                        self.logger.warning(
+                            f"Rate limited on page {page}. Waiting {wait}s..."
+                        )
+                        time.sleep(wait)
+                        continue
+
+                    response.raise_for_status()
+                    break
+                except httpx.RequestError as e:
+                    if attempt < max_retries - 1:
+                        wait = attempt + 1
+                        self.logger.warning(
+                            f"Request failed on page {page}: {e}. Retrying in {wait}s..."
+                        )
+                        time.sleep(wait)
+                    else:
+                        raise
+            else:
+                # All attempts exhausted on 429s without ever breaking out.
+                raise ProviderError(
+                    f"Rate limited on page {page} after {max_retries} attempts",
+                    provider="polygon",
+                )
+
+            assert response is not None  # for type checker; loop must have set it
             data = response.json()
 
             if data.get("status") not in ("OK", "DELAYED"):
