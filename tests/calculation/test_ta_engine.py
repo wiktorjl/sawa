@@ -83,6 +83,38 @@ class TestValidateIndicator:
         with pytest.raises(ValueError, match="Invalid volume_ratio"):
             validate_indicator("volume_ratio", -1.0)
 
+    def test_fp_noise_clamped_silently(self, caplog):
+        """Tiny fp cancellation below noise floor must clamp without warning.
+
+        Mirrors the talib SMA-of-products case where close*volume sums on
+        a sliding window can leave dollar_volume_sma_20 at e.g. -1.4e-7.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = validate_indicator("dollar_volume_sma_20", -1e-7)
+        assert result == 0.0
+        assert not any("Clamping" in r.message for r in caplog.records)
+
+    def test_clamp_above_noise_floor_still_warns(self, caplog):
+        """Deviations above the noise floor but within 1% tolerance still warn."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = validate_indicator("dollar_volume_sma_20", -1e-3)
+        assert result == 0.0
+        assert any("Clamping" in r.message for r in caplog.records)
+
+    def test_fp_noise_silent_at_max_bound(self, caplog):
+        """Symmetric: tiny excess above a max bound also clamps silently."""
+        import logging
+
+        # rsi_14 max is 100; 100 + 1e-7 is pure fp noise
+        with caplog.at_level(logging.WARNING):
+            result = validate_indicator("rsi_14", 100.0 + 1e-7)
+        assert result == 100.0
+        assert not any("Clamping" in r.message for r in caplog.records)
+
 
 class TestIndicatorBounds:
     """Tests for indicator bounds configuration."""
