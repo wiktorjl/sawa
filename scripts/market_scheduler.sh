@@ -189,7 +189,10 @@ start_intraday() {
     log "Starting sawa intraday..."
     mkdir -p "$STATE_DIR"
 
-    sawa intraday --log-dir "$PROJECT_DIR/logs" >> "$STATE_DIR/intraday.log" 2>&1 9>&- &
+    # sawa intraday already writes rotating logs to $PROJECT_DIR/logs (see
+    # --log-dir). Capturing stdout/stderr separately here just produces an
+    # unrotated duplicate that fills the disk (incident 2026-06-04).
+    sawa intraday --log-dir "$PROJECT_DIR/logs" >/dev/null 2>&1 9>&- &
     local pid=$!
     echo "$pid" > "$STATE_DIR/intraday.pid"
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/intraday_start_time"
