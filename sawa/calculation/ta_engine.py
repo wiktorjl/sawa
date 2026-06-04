@@ -66,6 +66,13 @@ MIN_PERIODS: dict[str, int] = {
 }
 
 
+# Below this absolute deviation, out-of-bound values are silently clamped:
+# they come from irreducible float64 cancellation (e.g. talib's sliding-sum
+# SMA-of-products on close*volume drifting to -1e-7 when the window crosses
+# zero-volume bars). Anything larger is still warned about.
+FP_CLAMP_NOISE_FLOOR = 1e-6
+
+
 def validate_indicator(
     name: str,
     value: float,
@@ -75,7 +82,9 @@ def validate_indicator(
 
     - NaN values return None (insufficient data)
     - Values >1% outside bounds raise ValueError (calculation bug)
-    - Values <1% outside bounds are clamped with warning (floating-point error)
+    - Values within 1% but above FP_CLAMP_NOISE_FLOOR get a warning + clamp
+    - Values within FP_CLAMP_NOISE_FLOOR of the bound are clamped silently
+      (irreducible floating-point cancellation noise)
 
     Args:
         name: Indicator name for logging
@@ -116,7 +125,8 @@ def validate_indicator(
             log.error(f"{name} value {value} far below min {min_val}")
             raise ValueError(f"Invalid {name}: {value} (min: {min_val})")
 
-        log.warning(f"Clamping {name} from {value:.6f} to {min_val}")
+        if deviation > FP_CLAMP_NOISE_FLOOR:
+            log.warning(f"Clamping {name} from {value:.6f} to {min_val}")
         return min_val
 
     # Check maximum bound
@@ -128,7 +138,8 @@ def validate_indicator(
             log.error(f"{name} value {value} far above max {max_val}")
             raise ValueError(f"Invalid {name}: {value} (max: {max_val})")
 
-        log.warning(f"Clamping {name} from {value:.6f} to {max_val}")
+        if deviation > FP_CLAMP_NOISE_FLOOR:
+            log.warning(f"Clamping {name} from {value:.6f} to {max_val}")
         return max_val
 
     return value
