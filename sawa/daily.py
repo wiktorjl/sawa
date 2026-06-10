@@ -17,7 +17,7 @@ import httpx
 import psycopg
 from psycopg import sql
 
-from sawa.api import FredClient, PolygonClient
+from sawa.api import CboeClient, FredClient, PolygonClient
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import fetch_and_load_news
 from sawa.domain.exceptions import ProviderError
@@ -226,6 +226,31 @@ def fetch_market_internals(
     """Fetch market internals from FRED."""
     logger.info(f"Fetching market internals from FRED ({start_date} to {end_date})...")
     return fred_client.get_market_internals(start_date, end_date)
+
+
+def merge_cboe_internals(
+    fred_rows: list[dict[str, Any]],
+    cboe_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge same-day CBOE VIX/VIX3M values into FRED market-internals rows.
+
+    FRED stays authoritative: CBOE values only add dates FRED doesn't have
+    yet (today's settlement) or fill vix/vix3m holes in existing rows.
+    Appended CBOE rows carry no hy_spread; the next FRED run upserts it.
+    """
+    by_date = {row["date"]: row for row in fred_rows}
+    for cboe_row in cboe_rows:
+        existing = by_date.get(cboe_row["date"])
+        if existing is None:
+            row = {"date": cboe_row["date"], "vix": None, "vix3m": None, "hy_spread": None}
+            row.update(cboe_row)
+            fred_rows.append(row)
+            by_date[cboe_row["date"]] = row
+        else:
+            for field in ("vix", "vix3m"):
+                if existing.get(field) in (None, "") and cboe_row.get(field) is not None:
+                    existing[field] = cboe_row[field]
+    return fred_rows
 
 
 def run_daily(
@@ -520,6 +545,18 @@ def run_daily(
                     mi_start = (date.today() - timedelta(days=30)).strftime(DATE_FORMAT)
                     mi_end = date.today().strftime(DATE_FORMAT)
                     mi_rows = fetch_market_internals(fred_client, mi_start, mi_end, logger)
+
+                    # FRED publishes VIX/VIX3M T+1; CBOE has today's settlement
+                    # (4:15 PM ET) by the time this runs, so today's row lands
+                    # same-day instead of tomorrow.
+                    logger.info("Fetching same-day VIX/VIX3M from CBOE...")
+                    try:
+                        with CboeClient(logger) as cboe_client:
+                            cboe_rows = cboe_client.get_market_internals()
+                        mi_rows = merge_cboe_internals(mi_rows, cboe_rows)
+                    except Exception as e:
+                        logger.warning(f"  CBOE same-day supplement failed: {e}")
+
                     if mi_rows:
                         from sawa.database.load import load_market_internals
 
