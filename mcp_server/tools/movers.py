@@ -9,6 +9,7 @@ from typing import Any, Literal
 from psycopg import sql
 
 from ..database import execute_query
+from ._dates import get_eod_date_refs, get_price_date_refs
 from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
@@ -48,18 +49,27 @@ def get_top_movers(
     """
     limit = min(limit, 100)
 
-    # Build period comparison (controlled SQL expressions)
+    # Reference dates are computed up front and passed as bind parameters so
+    # the planner can push them into stock_prices_live's UNION ALL arms.
+    date_refs = get_price_date_refs()
+    if date_refs["latest"] is None:
+        return []
+
     period_map = {
-        "1d": sql.SQL("MAX(date) FILTER (WHERE date < (SELECT MAX(date) FROM stock_prices_live))"),
-        "1w": sql.SQL("MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '7 days')"),
-        "1m": sql.SQL("MAX(date) FILTER (WHERE date <= CURRENT_DATE - INTERVAL '30 days')"),
-        "ytd": sql.SQL("MIN(date) FILTER (WHERE date >= DATE_TRUNC('year', CURRENT_DATE))"),
+        "1d": "prev_day",
+        "1w": "week_ago",
+        "1m": "month_ago",
+        "ytd": "ytd_start",
     }
-    period_expr = period_map.get(period, period_map["1d"])
+    compare_date = date_refs[period_map.get(period, "prev_day")]
 
     # Build sector filter
     sector_filter = sql.SQL("")
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {
+        "limit": limit,
+        "latest": date_refs["latest"],
+        "compare_date": compare_date,
+    }
     if sector:
         sector_filter = sql.SQL("""
             AND get_gics_sector(c.ticker, c.sic_code, c.sic_description) ILIKE %(sector)s
@@ -96,13 +106,7 @@ def get_top_movers(
 
     if direction == "both":
         query = sql.SQL("""
-            WITH date_refs AS (
-                SELECT
-                    MAX(date) as latest,
-                    {period_expr} as compare_date
-                FROM stock_prices_live
-            ),
-            changes AS (
+            WITH changes AS (
                 SELECT
                     c.ticker,
                     c.name,
@@ -120,11 +124,10 @@ def get_top_movers(
                         ORDER BY i.code
                     ) as indices
                 FROM companies c
-                CROSS JOIN date_refs dr
                 JOIN stock_prices_live p_now
-                    ON c.ticker = p_now.ticker AND p_now.date = dr.latest
+                    ON c.ticker = p_now.ticker AND p_now.date = %(latest)s
                 LEFT JOIN stock_prices_live p_prev
-                    ON c.ticker = p_prev.ticker AND p_prev.date = dr.compare_date
+                    ON c.ticker = p_prev.ticker AND p_prev.date = %(compare_date)s
                 WHERE c.active = true
                 {sector_filter}
                 {index_filter}
@@ -153,19 +156,12 @@ def get_top_movers(
             ORDER BY direction,
                      CASE WHEN direction = 'gainer' THEN -change_pct ELSE change_pct END
         """).format(
-            period_expr=period_expr,
             sector_filter=sector_filter,
             index_filter=index_filter,
             price_filter=price_filter,
         )
     else:
         query = sql.SQL("""
-            WITH date_refs AS (
-                SELECT
-                    MAX(date) as latest,
-                    {period_expr} as compare_date
-                FROM stock_prices_live
-            )
             SELECT
                 c.ticker,
                 c.name,
@@ -183,11 +179,10 @@ def get_top_movers(
                     ORDER BY i.code
                 ) as indices
             FROM companies c
-            CROSS JOIN date_refs dr
-            JOIN stock_prices p_now
-                ON c.ticker = p_now.ticker AND p_now.date = dr.latest
-            LEFT JOIN stock_prices p_prev
-                ON c.ticker = p_prev.ticker AND p_prev.date = dr.compare_date
+            JOIN stock_prices_live p_now
+                ON c.ticker = p_now.ticker AND p_now.date = %(latest)s
+            LEFT JOIN stock_prices_live p_prev
+                ON c.ticker = p_prev.ticker AND p_prev.date = %(compare_date)s
             WHERE c.active = true
               AND p_prev.close IS NOT NULL
             {sector_filter}
@@ -196,7 +191,6 @@ def get_top_movers(
             ORDER BY {order_clause}
             LIMIT %(limit)s
         """).format(
-            period_expr=period_expr,
             sector_filter=sector_filter,
             index_filter=index_filter,
             price_filter=price_filter,
@@ -240,9 +234,20 @@ def get_volume_leaders(
     """
     limit = min(limit, 100)
 
+    # Completed-session dates, passed as bind parameters (see _dates module).
+    # Volume metrics compare against technical_indicators, which only exists
+    # for completed sessions, so this tool stays on EOD dates.
+    eod_refs = get_eod_date_refs()
+    if eod_refs["latest"] is None:
+        return []
+
     # Build sector filter
     sector_filter = sql.SQL("")
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {
+        "limit": limit,
+        "latest": eod_refs["latest"],
+        "prev_day": eod_refs["prev_day"],
+    }
     if sector:
         sector_filter = sql.SQL("""
             AND get_gics_sector(c.ticker, c.sic_code, c.sic_description) ILIKE %(sector)s
@@ -273,14 +278,6 @@ def get_volume_leaders(
     sort_expr = sort_map.get(metric, sort_map["dollar_volume"])
 
     query = sql.SQL("""
-        WITH latest_date AS (
-            SELECT MAX(date) as dt FROM stock_prices
-        ),
-        prev_date AS (
-            SELECT MAX(date) as dt
-            FROM stock_prices
-            WHERE date < (SELECT dt FROM latest_date)
-        )
         SELECT
             c.ticker,
             c.name,
@@ -300,11 +297,10 @@ def get_volume_leaders(
                 ORDER BY i.code
             ) as indices
         FROM companies c
-        CROSS JOIN latest_date ld
-        CROSS JOIN prev_date pd
-        JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
-        LEFT JOIN stock_prices_live p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
-        LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = ld.dt
+        JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = %(latest)s
+        LEFT JOIN stock_prices_live p_prev
+            ON c.ticker = p_prev.ticker AND p_prev.date = %(prev_day)s
+        LEFT JOIN technical_indicators ti ON c.ticker = ti.ticker AND ti.date = %(latest)s
         WHERE c.active = true
           AND p.volume > 0
         {sector_filter}
@@ -353,13 +349,16 @@ def get_market_breadth(
             )""")
         params["target_date"] = date
     else:
+        # Breadth joins stock_prices (advance/decline needs completed
+        # sessions), so reference the latest EOD dates rather than the
+        # live view, whose latest date has no EOD rows during market hours.
+        eod_refs = get_eod_date_refs()
         date_cte = sql.SQL("""
-            WITH latest_dates AS (
-                SELECT DISTINCT date FROM stock_prices_live ORDER BY date DESC LIMIT 2
-            ),
-            date_refs AS (
-                SELECT MAX(date) as latest, MIN(date) as previous FROM latest_dates
+            WITH date_refs AS (
+                SELECT %(latest)s::date as latest, %(previous)s::date as previous
             )""")
+        params["latest"] = eod_refs["latest"]
+        params["previous"] = eod_refs["prev_day"]
 
     query = sql.SQL("""
         {date_cte},

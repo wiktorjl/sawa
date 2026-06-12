@@ -1,22 +1,29 @@
 -- ============================================
--- Schema integrity and time semantics cleanup
+-- Repair schema drift: re-apply 33's intent in a safe order
 -- ============================================
--- Non-destructive migration:
---   - treat existing intraday naive timestamps as UTC and store as TIMESTAMPTZ
---   - rebuild live/intraday views around America/New_York market dates
---   - add stock-character company FKs as NOT VALID for existing rows
---   - widen price-shaped stock-character fields
---   - correct volatility percentile ranks to use trailing 252-row windows
---   - mark get_gics_sector STABLE because it reads sic_gics_mapping
+-- Migration 33 could never apply to a database where stock_prices_live
+-- already existed: its ALTER COLUMN ... TYPE runs while the view still
+-- references stock_prices_intraday.timestamp, which PostgreSQL rejects,
+-- and schema.py executes each file as a single transaction, so the whole
+-- file rolled back every run. Deployed databases were left with a stale
+-- pre-22 view whose DISTINCT ON arm blocks qual pushdown into the UNION
+-- ALL branches — every date-keyed query against the view materializes all
+-- ~9.5M rows, and the market-wide MCP tools exceed the 30s statement
+-- timeout. The stale view also filters intraday bars to a fixed
+-- 14:30–21:00 UTC window (EST market hours), which is shifted by an hour
+-- during EDT.
+--
+-- This file restates 33 idempotently with the view dropped FIRST so the
+-- column conversion can proceed.
 
--- The view must be dropped before the column it references can change type,
--- and the old (timestamp::date) index must go before the conversion because
--- rebuilding it against TIMESTAMPTZ would use the non-immutable
--- timestamptz->date cast. Both are recreated below. Without this, the whole
--- file rolls back on every run (schema.py runs each file as one transaction).
 DROP VIEW IF EXISTS stock_prices_live;
+
+-- The old expression index (timestamp::date) must go before the column
+-- conversion: rebuilding it against TIMESTAMPTZ would use the session-
+-- timezone-dependent (non-immutable) timestamptz->date cast and fail.
 DROP INDEX IF EXISTS idx_intraday_date;
 
+-- Treat existing naive intraday timestamps as UTC and store as TIMESTAMPTZ
 DO $$
 BEGIN
     IF EXISTS (
@@ -33,10 +40,11 @@ BEGIN
     END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS idx_intraday_date
+-- Index the America/New_York market date used by the view's intraday arm
+CREATE INDEX idx_intraday_date
     ON stock_prices_intraday(((timestamp AT TIME ZONE 'America/New_York')::date));
 
-CREATE OR REPLACE VIEW stock_prices_live AS
+CREATE VIEW stock_prices_live AS
 WITH market_clock AS (
   SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AS market_date
 )
@@ -82,6 +90,7 @@ WITH market_clock AS (
 COMMENT ON VIEW stock_prices_live IS
   'Live prices: historical EOD + today intraday by America/New_York market date (switches to EOD when available)';
 
+-- Widen stock-character price-shaped fields (from 33)
 ALTER TABLE stock_character_flags
     ALTER COLUMN value TYPE NUMERIC(20, 6),
     ALTER COLUMN threshold TYPE NUMERIC(20, 6);
@@ -89,6 +98,7 @@ ALTER TABLE stock_character_flags
 ALTER TABLE stock_character_scorecard
     ALTER COLUMN current_price TYPE NUMERIC(16, 4);
 
+-- Stock-character company FKs as NOT VALID for existing rows (from 33)
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -132,6 +142,7 @@ BEGIN
     END IF;
 END $$;
 
+-- Volatility percentile ranks over trailing 252-row windows (from 33).
 -- Drop first: 29's PERCENT_RANK() columns are double precision and CREATE
 -- OR REPLACE cannot change a view column's type to numeric.
 DROP VIEW IF EXISTS v_market_internals_enriched;
@@ -195,5 +206,3 @@ LEFT JOIN LATERAL (
     ) w
 ) hr ON true
 ORDER BY b.date DESC;
-
-ALTER FUNCTION get_gics_sector(TEXT, TEXT, TEXT) STABLE;
