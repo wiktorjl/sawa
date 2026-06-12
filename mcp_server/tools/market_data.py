@@ -14,7 +14,23 @@ logger = logging.getLogger(__name__)
 
 def get_data_status() -> dict[str, Any]:
     """Check latest stock price data across daily, intraday, and live tables."""
+    # The live_* fields are derived from the view's source tables instead of
+    # aggregating over stock_prices_live directly: whole-view aggregates
+    # materialize all of its UNION ALL arms (~10M rows) on every call.
     query = """
+        WITH market_clock AS (
+            SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AS today
+        ),
+        live_session AS (
+            SELECT mc.today
+            FROM market_clock mc
+            WHERE EXISTS (
+                SELECT 1 FROM stock_prices_intraday spi
+                WHERE (spi.timestamp AT TIME ZONE 'America/New_York')::date = mc.today
+                  AND (spi.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
+                  AND (spi.timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
+            )
+        )
         SELECT
             (SELECT MAX(date) FROM stock_prices) AS prices_latest_date,
             (SELECT COUNT(DISTINCT ticker) FROM stock_prices) AS prices_ticker_count,
@@ -22,8 +38,20 @@ def get_data_status() -> dict[str, Any]:
             (SELECT MAX(timestamp) FROM stock_prices_intraday) AS intraday_latest_timestamp,
             (SELECT COUNT(DISTINCT ticker) FROM stock_prices_intraday) AS intraday_ticker_count,
             (SELECT COUNT(*) FROM stock_prices_intraday) AS intraday_row_count,
-            (SELECT MAX(date) FROM stock_prices_live) AS live_latest_date,
-            (SELECT COUNT(DISTINCT ticker) FROM stock_prices_live) AS live_ticker_count
+            GREATEST(
+                (SELECT MAX(date) FROM stock_prices),
+                (SELECT today FROM live_session)
+            ) AS live_latest_date,
+            (SELECT COUNT(*) FROM (
+                SELECT ticker FROM stock_prices
+                UNION
+                SELECT spi.ticker
+                FROM stock_prices_intraday spi
+                JOIN live_session ls
+                  ON (spi.timestamp AT TIME ZONE 'America/New_York')::date = ls.today
+                WHERE (spi.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
+                  AND (spi.timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
+            ) AS live_tickers) AS live_ticker_count
     """
     rows = execute_query(query, validate=False)
     row = rows[0] if rows else {}

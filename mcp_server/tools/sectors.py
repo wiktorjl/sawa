@@ -10,6 +10,7 @@ from typing import Any, Literal
 from psycopg import sql
 
 from ..database import execute_query
+from ._dates import get_price_date_refs
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +118,15 @@ def get_sector_performance(
         sector_expr = sql.SQL("c.sic_description")
         join_clause = sql.SQL("")
 
+    # Reference dates are computed up front and passed as bind parameters so
+    # the planner can push them into stock_prices_live's UNION ALL arms;
+    # join keys sourced from a date_refs CTE force full view materializations.
+    date_refs = get_price_date_refs()
+    if date_refs["latest"] is None:
+        return []
+
     # Build index filter
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit, **date_refs}
     index_filter = sql.SQL("")
     if index:
         index_filter = sql.SQL("""AND c.ticker IN (
@@ -129,24 +137,7 @@ def get_sector_performance(
         params["index"] = index.lower()
 
     query = sql.SQL("""
-        WITH date_refs AS (
-            SELECT
-                MAX(date) as latest,
-                MAX(date) FILTER (
-                    WHERE date < (SELECT MAX(date) FROM stock_prices_live)
-                ) as prev_day,
-                MAX(date) FILTER (
-                    WHERE date <= CURRENT_DATE - INTERVAL '7 days'
-                ) as week_ago,
-                MAX(date) FILTER (
-                    WHERE date <= CURRENT_DATE - INTERVAL '30 days'
-                ) as month_ago,
-                MIN(date) FILTER (
-                    WHERE date >= DATE_TRUNC('year', CURRENT_DATE)
-                ) as ytd_start
-                FROM stock_prices_live
-        ),
-        stock_returns AS (
+        WITH stock_returns AS (
             SELECT
                 c.ticker,
                 c.name,
@@ -166,16 +157,15 @@ def get_sector_performance(
                      ELSE NULL END as return_ytd
             FROM companies c
             {join_clause}
-            CROSS JOIN date_refs dr
-            JOIN stock_prices_live p_now ON c.ticker = p_now.ticker AND p_now.date = dr.latest
+            JOIN stock_prices_live p_now ON c.ticker = p_now.ticker AND p_now.date = %(latest)s
             LEFT JOIN stock_prices_live p_prev
-                ON c.ticker = p_prev.ticker AND p_prev.date = dr.prev_day
+                ON c.ticker = p_prev.ticker AND p_prev.date = %(prev_day)s
             LEFT JOIN stock_prices_live p_week
-                ON c.ticker = p_week.ticker AND p_week.date = dr.week_ago
+                ON c.ticker = p_week.ticker AND p_week.date = %(week_ago)s
             LEFT JOIN stock_prices_live p_month
-                ON c.ticker = p_month.ticker AND p_month.date = dr.month_ago
+                ON c.ticker = p_month.ticker AND p_month.date = %(month_ago)s
             LEFT JOIN stock_prices_live p_ytd
-                ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
+                ON c.ticker = p_ytd.ticker AND p_ytd.date = %(ytd_start)s
             WHERE c.active = true
               AND {sector_expr_null} IS NOT NULL
             {index_filter}

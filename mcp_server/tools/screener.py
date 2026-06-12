@@ -11,6 +11,7 @@ from typing import Any, Literal
 from psycopg import sql
 
 from ..database import execute_query
+from ._dates import get_eod_date_refs, get_price_date_refs
 from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
@@ -290,8 +291,15 @@ def screen_stocks(
     """
     limit = min(limit, 500)
 
+    # Reference dates are computed up front and passed as bind parameters so
+    # the planner can push them into stock_prices_live's UNION ALL arms;
+    # join keys sourced from a date_refs CTE force full view materializations.
+    date_refs = get_price_date_refs()
+    if date_refs["latest"] is None:
+        return []
+
     # Build the base query with CTEs
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit, **date_refs}
 
     # Sector expression based on taxonomy (controlled SQL expressions)
     if taxonomy == "gics":
@@ -411,22 +419,8 @@ def screen_stocks(
     query = sql.SQL("""
         WITH date_refs AS (
             SELECT
-                MAX(date) as latest,
                 (SELECT MAX(date) FROM technical_indicators) as latest_ta,
-                (SELECT MAX(date) FROM mv_52week_extremes) as latest_52w,
-                MAX(date) FILTER (
-                    WHERE date < (SELECT MAX(date) FROM stock_prices_live)
-                ) as prev_day,
-                MAX(date) FILTER (
-                    WHERE date <= CURRENT_DATE - INTERVAL '7 days'
-                ) as week_ago,
-                MAX(date) FILTER (
-                    WHERE date <= CURRENT_DATE - INTERVAL '30 days'
-                ) as month_ago,
-                MIN(date) FILTER (
-                    WHERE date >= DATE_TRUNC('year', CURRENT_DATE)
-                ) as ytd_start
-                FROM stock_prices_live
+                (SELECT MAX(date) FROM mv_52week_extremes) as latest_52w
         ),
         {fundamentals_cte}
         base_data AS (
@@ -445,15 +439,15 @@ def screen_stocks(
             FROM companies c
             {sector_join}
             CROSS JOIN date_refs dr
-            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = dr.latest
+            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = %(latest)s
             LEFT JOIN stock_prices_live p_prev
-                ON c.ticker = p_prev.ticker AND p_prev.date = dr.prev_day
+                ON c.ticker = p_prev.ticker AND p_prev.date = %(prev_day)s
             LEFT JOIN stock_prices_live p_week
-                ON c.ticker = p_week.ticker AND p_week.date = dr.week_ago
+                ON c.ticker = p_week.ticker AND p_week.date = %(week_ago)s
             LEFT JOIN stock_prices_live p_month
-                ON c.ticker = p_month.ticker AND p_month.date = dr.month_ago
+                ON c.ticker = p_month.ticker AND p_month.date = %(month_ago)s
             LEFT JOIN stock_prices_live p_ytd
-                ON c.ticker = p_ytd.ticker AND p_ytd.date = dr.ytd_start
+                ON c.ticker = p_ytd.ticker AND p_ytd.date = %(ytd_start)s
             {technical_join}
             {fundamentals_join}
             {extremes_join}
@@ -518,15 +512,25 @@ def get_ytd_returns(
     # Normalize tickers
     tickers = [t.upper() for t in tickers[:100]]  # Cap at 100
 
+    # Reference dates are computed up front and passed as bind parameters so
+    # the planner can push them into stock_prices_live's UNION ALL arms.
+    date_refs = get_price_date_refs()
+    if date_refs["latest"] is None:
+        return []
+
+    start_rows = execute_query(
+        """
+        SELECT MIN(date) as dt
+        FROM stock_prices
+        WHERE date >= COALESCE(%(start_date)s::date, DATE_TRUNC('year', CURRENT_DATE))
+        """,
+        {"start_date": start_date},
+    )
+    start_dt = start_rows[0]["dt"] if start_rows else None
+    if start_dt is None:
+        return []
+
     query = """
-        WITH ytd_start AS (
-            SELECT MIN(date) as dt
-            FROM stock_prices_live
-            WHERE date >= COALESCE(%(start_date)s::date, DATE_TRUNC('year', CURRENT_DATE))
-        ),
-        latest AS (
-            SELECT MAX(date) as dt FROM stock_prices_live
-        )
         SELECT
             c.ticker,
             c.name,
@@ -538,15 +542,16 @@ def get_ytd_returns(
                  THEN ROUND(((p_now.close - p_start.close) / p_start.close * 100)::numeric, 2)
                  ELSE NULL END as ytd_pct
         FROM companies c
-        CROSS JOIN ytd_start ys
-        CROSS JOIN latest lt
-        JOIN stock_prices_live p_start ON c.ticker = p_start.ticker AND p_start.date = ys.dt
-        JOIN stock_prices_live p_now ON c.ticker = p_now.ticker AND p_now.date = lt.dt
+        JOIN stock_prices_live p_start ON c.ticker = p_start.ticker AND p_start.date = %(start_dt)s
+        JOIN stock_prices_live p_now ON c.ticker = p_now.ticker AND p_now.date = %(latest)s
         WHERE c.ticker = ANY(%(tickers)s)
         ORDER BY ytd_pct DESC NULLS LAST
     """
 
-    return execute_query(query, {"tickers": tickers, "start_date": start_date})
+    return execute_query(
+        query,
+        {"tickers": tickers, "start_dt": start_dt, "latest": date_refs["latest"]},
+    )
 
 
 def detect_crossovers(
@@ -582,9 +587,28 @@ def detect_crossovers(
 
     sma_col = f"sma_{sma_period}"
 
+    # Recent trading dates are computed up front and passed as bind
+    # parameters so the planner can push them into stock_prices_live's
+    # UNION ALL arms (see _dates module).
+    date_refs = get_price_date_refs()
+    if date_refs["latest"] is None:
+        return []
+
+    date_rows = execute_query(
+        "SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT %(n)s",
+        {"n": lookback_days + 1},
+    )
+    recent_set = {row["date"] for row in date_rows}
+    recent_set.add(date_refs["latest"])
+    recent_dates = sorted(recent_set, reverse=True)[: lookback_days + 1]
+
     # Build index filter
     index_filter = sql.SQL("")
-    params: dict[str, Any] = {"lookback_days": lookback_days, "limit": limit}
+    params: dict[str, Any] = {
+        "recent_dates": recent_dates,
+        "latest": recent_dates[0],
+        "limit": limit,
+    }
 
     if index:
         index_filter = sql.SQL("""AND c.ticker IN (
@@ -597,28 +621,23 @@ def detect_crossovers(
     # Volume filter
     volume_filter = sql.SQL("")
     if min_volume_ratio is not None:
-        volume_filter = sql.SQL("AND cross.volume_ratio >= %(min_volume_ratio)s")
+        volume_filter = sql.SQL("AND xo.volume_ratio >= %(min_volume_ratio)s")
         params["min_volume_ratio"] = min_volume_ratio
 
-    # Direction condition
+    # Direction condition (evaluated against crossover_data's output columns)
     if direction == "above":
-        cross_condition = sql.SQL(
-            "prev_close < prev_sma AND sp.close >= ti.{sma_col}"
-        ).format(sma_col=sql.Identifier(sma_col))
+        cross_condition = sql.SQL("prev_close < prev_sma AND close >= sma_value")
     else:
-        cross_condition = sql.SQL(
-            "prev_close >= prev_sma AND sp.close < ti.{sma_col}"
-        ).format(sma_col=sql.Identifier(sma_col))
+        cross_condition = sql.SQL("prev_close >= prev_sma AND close < sma_value")
 
     query = sql.SQL("""
-        WITH recent_dates AS (
-            SELECT DISTINCT date
+        WITH latest_prices AS MATERIALIZED (
+            -- Evaluated once: the row estimate after the rn = 1 window filter
+            -- is unreliable, and a nested-loop rescan of the live view would
+            -- re-aggregate today's intraday bars per crossover row.
+            SELECT ticker, close
             FROM stock_prices_live
-            ORDER BY date DESC
-            LIMIT %(lookback_days)s + 1
-        ),
-        latest AS (
-            SELECT MAX(date) as dt FROM recent_dates
+            WHERE date = %(latest)s
         ),
         crossover_data AS (
             SELECT
@@ -631,7 +650,8 @@ def detect_crossovers(
                 ti.volume_ratio
             FROM stock_prices_live sp
             JOIN technical_indicators ti ON sp.ticker = ti.ticker AND sp.date = ti.date
-            WHERE sp.date IN (SELECT date FROM recent_dates)
+            WHERE sp.date = ANY(%(recent_dates)s)
+              AND ti.date = ANY(%(recent_dates)s)
               AND ti.{sma_col} IS NOT NULL
               AND ti.{sma_col} > 0
         ),
@@ -651,28 +671,27 @@ def detect_crossovers(
               AND {cross_condition}
         )
         SELECT
-            cross.ticker,
+            xo.ticker,
             c.name,
             get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
             c.market_cap,
             p_now.close as price,
-            cross.sma_value,
-            cross.crossover_date,
-            cross.crossover_price,
-            cross.volume_ratio,
-            CASE WHEN cross.crossover_price > 0
-                 THEN ROUND(((p_now.close - cross.crossover_price)
-                       / cross.crossover_price * 100)::numeric, 2)
+            xo.sma_value,
+            xo.crossover_date,
+            xo.crossover_price,
+            xo.volume_ratio,
+            CASE WHEN xo.crossover_price > 0
+                 THEN ROUND(((p_now.close - xo.crossover_price)
+                       / xo.crossover_price * 100)::numeric, 2)
                  ELSE NULL END as change_since_crossover
-        FROM crossovers cross
-        JOIN companies c ON cross.ticker = c.ticker
-        CROSS JOIN latest lt
-        JOIN stock_prices_live p_now ON cross.ticker = p_now.ticker AND p_now.date = lt.dt
-        WHERE cross.rn = 1
+        FROM crossovers xo
+        JOIN companies c ON xo.ticker = c.ticker
+        JOIN latest_prices p_now ON xo.ticker = p_now.ticker
+        WHERE xo.rn = 1
           AND c.active = true
           {index_filter}
           {volume_filter}
-        ORDER BY cross.crossover_date DESC, c.market_cap DESC
+        ORDER BY xo.crossover_date DESC, c.market_cap DESC
         LIMIT %(limit)s
     """).format(
         sma_col=sql.Identifier(sma_col),
@@ -714,8 +733,17 @@ def get_52week_extremes(
     """
     limit = min(limit, 200)
 
+    # Reference dates are computed up front and passed as bind parameters so
+    # the planner can push them into stock_prices_live's UNION ALL arms.
+    date_refs = get_price_date_refs()
+    if date_refs["latest"] is None:
+        return []
+
     # Index filter (uses index_constituents junction table)
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {
+        "latest": date_refs["latest"],
+        "prev_day": date_refs["prev_day"],
+    }
     index_filter = build_index_filter(index, "c", params)
 
     # Volume filter (parameterized)
@@ -779,12 +807,7 @@ def get_52week_extremes(
     query = sql.SQL("""
         WITH date_refs AS (
             SELECT
-                (SELECT MAX(date) FROM stock_prices_live) as latest_live,
                 (SELECT MAX(date) FROM mv_52week_extremes) as latest_52w
-        ),
-        prev_date AS (
-            SELECT MAX(date) as dt FROM stock_prices_live
-            WHERE date < (SELECT latest_live FROM date_refs)
         ),
         {fundamentals_cte}
         stock_data AS (
@@ -812,10 +835,9 @@ def get_52week_extremes(
                 {fundamentals_cols}
             FROM companies c
             CROSS JOIN date_refs dr
-            CROSS JOIN prev_date pd
-            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = dr.latest_live
+            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = %(latest)s
             LEFT JOIN stock_prices_live p_prev
-                ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
+                ON c.ticker = p_prev.ticker AND p_prev.date = %(prev_day)s
             JOIN mv_52week_extremes e ON c.ticker = e.ticker AND e.date = dr.latest_52w
             {fundamentals_join}
             WHERE c.active = true
@@ -903,9 +925,19 @@ def get_daily_range_leaders(
     """
     limit = min(limit, 200)
 
+    # Completed-session dates, passed as bind parameters (see _dates module).
+    eod_refs = get_eod_date_refs()
+    if eod_refs["latest"] is None:
+        return []
+
     # Build filters
     filters = []
-    params: dict[str, Any] = {"limit": limit, "min_range": min_range_pct}
+    params: dict[str, Any] = {
+        "limit": limit,
+        "min_range": min_range_pct,
+        "latest": eod_refs["latest"],
+        "prev_day": eod_refs["prev_day"],
+    }
 
     if max_range_pct:
         filters.append("daily_range_pct <= %(max_range)s")
@@ -938,14 +970,7 @@ def get_daily_range_leaders(
         params["index"] = index.lower()
 
     query = sql.SQL("""
-        WITH latest_date AS (
-            SELECT MAX(date) as dt FROM stock_prices
-        ),
-        prev_date AS (
-            SELECT MAX(date) as dt FROM stock_prices
-            WHERE date < (SELECT dt FROM latest_date)
-        ),
-        stock_data AS (
+        WITH stock_data AS (
             SELECT
                 c.ticker,
                 c.name,
@@ -968,10 +993,9 @@ def get_daily_range_leaders(
                     ORDER BY i.code
                 ) as indices
             FROM companies c
-            CROSS JOIN latest_date ld
-            CROSS JOIN prev_date pd
-        JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = ld.dt
-        LEFT JOIN stock_prices_live p_prev ON c.ticker = p_prev.ticker AND p_prev.date = pd.dt
+            JOIN stock_prices_live p ON c.ticker = p.ticker AND p.date = %(latest)s
+            LEFT JOIN stock_prices_live p_prev
+                ON c.ticker = p_prev.ticker AND p_prev.date = %(prev_day)s
             WHERE c.active = true
             {index_filter}
         )

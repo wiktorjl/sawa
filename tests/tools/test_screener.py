@@ -1,10 +1,19 @@
 """Tests for flexible stock screener filter support."""
 
+from datetime import date
 from typing import Any
 
 from psycopg import sql
 
 from mcp_server.tools import screener
+
+FAKE_DATE_REFS = {
+    "latest": date(2026, 6, 12),
+    "prev_day": date(2026, 6, 11),
+    "week_ago": date(2026, 6, 5),
+    "month_ago": date(2026, 5, 13),
+    "ytd_start": date(2026, 1, 2),
+}
 
 
 def test_valid_filters_are_registry_keys() -> None:
@@ -53,6 +62,7 @@ def test_screen_stocks_builds_conditions_for_previously_missing_filters(monkeypa
         return [{"ticker": "AAPL"}]
 
     monkeypatch.setattr(screener, "execute_query", fake_execute_query)
+    monkeypatch.setattr(screener, "get_price_date_refs", lambda: dict(FAKE_DATE_REFS))
 
     result = screener.screen_stocks(
         {
@@ -73,6 +83,7 @@ def test_screen_stocks_builds_conditions_for_previously_missing_filters(monkeypa
     assert result == [{"ticker": "AAPL"}]
     assert captured["params"] == {
         "limit": 5,
+        **FAKE_DATE_REFS,
         "f0_min": 1,
         "f1_min": 1,
         "f2_min": 1,
@@ -92,6 +103,39 @@ def test_screen_stocks_builds_conditions_for_previously_missing_filters(monkeypa
     assert "high_52w_pct" in query_repr
 
 
+def test_detect_crossovers_composes_executable_sql(monkeypatch) -> None:
+    """Regression: the final SELECT once aliased a table as the reserved word
+    CROSS and compared sp/ti columns outside their scope, so every call failed
+    server-side while mocked tests passed."""
+    captured: list[tuple[Any, Any]] = []
+
+    def fake_execute_query(
+        query: str | sql.Composable,
+        params: dict[str, Any] | None = None,
+        validate: bool = True,
+    ) -> list[dict[str, Any]]:
+        captured.append((query, params))
+        if isinstance(query, str) and "SELECT DISTINCT date" in query:
+            return [{"date": date(2026, 6, day)} for day in (11, 10, 9, 8, 5, 4)]
+        return []
+
+    monkeypatch.setattr(screener, "execute_query", fake_execute_query)
+    monkeypatch.setattr(screener, "get_price_date_refs", lambda: dict(FAKE_DATE_REFS))
+
+    result = screener.detect_crossovers(lookback_days=5)
+
+    assert result == []
+    query, params = captured[-1]
+    assert params["latest"] == FAKE_DATE_REFS["latest"]
+    assert params["recent_dates"][0] == FAKE_DATE_REFS["latest"]
+    assert len(params["recent_dates"]) == 6
+
+    query_repr = repr(query)
+    assert "crossovers xo" in query_repr
+    assert "cross.ticker" not in query_repr
+    assert "close >= sma_value" in query_repr
+
+
 def test_get_52week_extremes_uses_latest_available_snapshot(monkeypatch) -> None:
     """52-week lookups should not require the materialized view date to equal price date."""
     captured: dict[str, Any] = {}
@@ -107,11 +151,14 @@ def test_get_52week_extremes_uses_latest_available_snapshot(monkeypatch) -> None
         return []
 
     monkeypatch.setattr(screener, "execute_query", fake_execute_query)
+    monkeypatch.setattr(screener, "get_price_date_refs", lambda: dict(FAKE_DATE_REFS))
 
     result = screener.get_52week_extremes(include_fundamentals=True, limit=3)
 
     assert result == []
     assert captured["params"] == {
+        "latest": FAKE_DATE_REFS["latest"],
+        "prev_day": FAKE_DATE_REFS["prev_day"],
         "threshold": 2.0,
         "neg_threshold": -2.0,
         "limit": 3,
