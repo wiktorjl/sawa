@@ -76,10 +76,30 @@ QUERY_LOG_DIR = Path(os.environ.get("MCP_QUERY_LOG_DIR") or _DEFAULT_QUERY_LOG_D
 QUERY_LOG_FILE = QUERY_LOG_DIR / "execute_query.log"
 QUERY_LOG_JSONL_FILE = QUERY_LOG_DIR / "execute_query.jsonl"
 
+# Append-mode audit logs have no built-in rotation, so cap each sink and roll
+# it to "<name>.1" once it grows past this size. A single ".1" backup keeps
+# disk usage bounded without bringing in a full logging handler.
+QUERY_LOG_MAX_BYTES = int(os.environ.get("MCP_QUERY_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+
 
 def _ensure_log_dir() -> None:
     """Ensure log directory exists."""
     QUERY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _rotate_if_needed(path: Path) -> None:
+    """Rotate ``path`` to ``path.1`` when it exceeds ``QUERY_LOG_MAX_BYTES``.
+
+    Keeps a single backup; the previous ``.1`` is overwritten. Best-effort:
+    any OS error is swallowed so auditing never blocks query execution.
+    """
+    if QUERY_LOG_MAX_BYTES <= 0:
+        return
+    try:
+        if path.exists() and path.stat().st_size >= QUERY_LOG_MAX_BYTES:
+            path.replace(path.with_name(path.name + ".1"))
+    except OSError as e:
+        logger.warning("Failed to rotate audit log %s: %s", path, e)
 
 
 def log_execute_query(query: str, params: dict[str, Any] | None = None) -> None:
@@ -91,6 +111,7 @@ def log_execute_query(query: str, params: dict[str, Any] | None = None) -> None:
         params: Optional query parameters
     """
     _ensure_log_dir()
+    _rotate_if_needed(QUERY_LOG_FILE)
     timestamp = datetime.now().isoformat()
 
     # Log to file
@@ -128,6 +149,7 @@ def log_execute_query_result(
         "error": error,
     }
     try:
+        _rotate_if_needed(QUERY_LOG_JSONL_FILE)
         with open(QUERY_LOG_JSONL_FILE, "a") as f:
             f.write(json.dumps(record, default=str, sort_keys=True) + "\n")
     except OSError as e:
@@ -147,14 +169,42 @@ def get_connection():
         yield conn
 
 
+def _strip_leading_sql_comments(text: str) -> str:
+    """Strip leading whitespace and SQL comments from a query.
+
+    Handles both line comments (``-- ...``) and block comments
+    (``/* ... */``) so a legitimately commented SELECT is not rejected by the
+    startswith check. Only leading comments are removed; the body is left for
+    the SELECT/WITH check and the keyword blocklist below.
+    """
+    prev = None
+    while text != prev:
+        prev = text
+        text = text.lstrip()
+        if text.startswith("--"):
+            # Drop through end of line (or end of string).
+            newline = text.find("\n")
+            text = "" if newline == -1 else text[newline + 1 :]
+        elif text.startswith("/*"):
+            end = text.find("*/")
+            # Unterminated block comment: nothing parseable remains.
+            text = "" if end == -1 else text[end + 2 :]
+    return text
+
+
 def validate_select_query(query: str) -> bool:
     """
     Validate that a SQL query is a safe SELECT statement.
 
     Checks:
-    - Must start with SELECT or WITH (CTE)
+    - Must start with SELECT or WITH (CTE), ignoring leading SQL comments
     - No DDL commands (CREATE, DROP, ALTER, etc.)
     - No DML commands (INSERT, UPDATE, DELETE, etc.)
+
+    The connection runs in a read-only transaction (enforced by the pool's
+    ``configure`` callback), which is the real guard against writes. This
+    function is defense-in-depth: the keyword blocklist is best-effort and the
+    read-only transaction must not be removed in favour of it.
 
     Args:
         query: SQL query string
@@ -165,8 +215,9 @@ def validate_select_query(query: str) -> bool:
     Raises:
         ValueError: If query is not a valid SELECT statement
     """
-    # Normalize the query
-    normalized = query.strip().upper()
+    # Normalize the query, ignoring any leading SQL comments so that a
+    # legitimately commented SELECT (e.g. "-- report\nSELECT ...") still passes.
+    normalized = _strip_leading_sql_comments(query).upper()
 
     # Must start with SELECT or WITH (CTE)
     if not (normalized.startswith("SELECT") or normalized.startswith("WITH")):

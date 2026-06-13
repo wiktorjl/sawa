@@ -35,7 +35,7 @@ def render_fundamentals_chart(
     if layout is None:
         layout = get_layout()
     if theme is None:
-        theme = get_theme()
+        theme = get_theme(colors_enabled=layout.colors_enabled)
 
     balance_sheets = data.get("balance_sheets", [])
     cash_flows = data.get("cash_flows", [])

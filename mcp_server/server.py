@@ -1961,7 +1961,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=arguments.get("limit", 252),
                 use_live=arguments.get("use_live", True),
             )
-            chart = render_price_chart(result, arguments["ticker"], layout, theme)
+            try:
+                chart = render_price_chart(result, arguments["ticker"], layout, theme)
+            except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
+                logger.warning(f"  Chart render failed for {name}: {render_err}")
         elif name == "get_financial_ratios":
             logger.info("  Executing: get_financial_ratios")
             result = await _run_sync(
@@ -1971,7 +1974,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 end_date=arguments.get("end_date"),
                 limit=arguments.get("limit", 100),
             )
-            chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
+            try:
+                chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
+            except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
+                logger.warning(f"  Chart render failed for {name}: {render_err}")
         elif name == "get_fundamentals":
             logger.info("  Executing: get_fundamentals")
             result = await _run_sync(
@@ -1980,7 +1986,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 timeframe=arguments.get("timeframe", "quarterly"),
                 limit=arguments.get("limit", 4),
             )
-            chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
+            try:
+                chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
+            except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
+                logger.warning(f"  Chart render failed for {name}: {render_err}")
         elif name == "get_technical_indicators":
             logger.info("  Executing: get_technical_indicators")
             result = await _run_sync(
@@ -2042,11 +2051,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 end_date=arguments.get("end_date"),
                 limit=arguments.get("limit", 100),
             )
-            chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
+            try:
+                chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
+            except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
+                logger.warning(f"  Chart render failed for {name}: {render_err}")
         elif name == "get_economy_dashboard":
             logger.info("  Executing: get_economy_dashboard")
             result = await _run_sync(get_economy_dashboard, limit=arguments.get("limit", 10))
-            chart = render_economy_dashboard(result, layout, theme)
+            try:
+                chart = render_economy_dashboard(result, layout, theme)
+            except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
+                logger.warning(f"  Chart render failed for {name}: {render_err}")
         elif name == "get_market_internals":
             logger.info("  Executing: get_market_internals")
             result = await _run_sync(

@@ -6,6 +6,7 @@ from typing import Any
 from psycopg import sql
 
 from ..database import execute_query
+from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ def list_companies(
     Args:
         limit: Maximum number of results (default: 100, max: 1000)
         offset: Number of results to skip
-        sector: Filter by SIC description (partial match)
+        sector: Filter by GICS sector (partial match)
         index: Filter by index membership (sp500, nasdaq_listed)
 
     Returns:
@@ -35,18 +36,18 @@ def list_companies(
     params: dict[str, Any] = {"limit": limit, "offset": offset}
 
     if sector:
-        where_clauses.append("c.sic_description ILIKE %(sector)s")
+        # Standardize on get_gics_sector so a GICS sector name filters
+        # consistently here and across the other tools.
+        where_clauses.append(
+            "get_gics_sector(c.ticker, c.sic_code, c.sic_description) ILIKE %(sector)s"
+        )
         params["sector"] = f"%{sector}%"
 
-    if index:
-        where_clauses.append("""
-            c.ticker IN (
-                SELECT ic.ticker FROM index_constituents ic
-                JOIN indices i ON ic.index_id = i.id
-                WHERE i.code = %(index)s
-            )
-        """)
-        params["index"] = index.lower()
+    # Index filter via shared helper (lower-cased to match stored codes); the
+    # fragment carries its own leading AND, so append it after the WHERE list.
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     where_sql = sql.SQL(" AND ").join(sql.SQL(c) for c in where_clauses)
 
@@ -55,7 +56,7 @@ def list_companies(
             c.ticker,
             c.name,
             c.market_cap,
-            c.sic_description as sector,
+            get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
             c.primary_exchange as exchange,
             ARRAY(
                 SELECT i.code FROM index_constituents ic
@@ -65,9 +66,10 @@ def list_companies(
             ) as indices
         FROM companies c
         WHERE {where_sql}
+        {index_filter}
         ORDER BY c.market_cap DESC NULLS LAST
         LIMIT %(limit)s OFFSET %(offset)s
-    """).format(where_sql=where_sql)
+    """).format(where_sql=where_sql, index_filter=index_filter)
 
     return execute_query(query, params)
 
@@ -161,15 +163,11 @@ def search_companies(
         "limit": limit,
     }
 
-    if index:
-        where_clauses.append("""
-            c.ticker IN (
-                SELECT ic.ticker FROM index_constituents ic
-                JOIN indices i ON ic.index_id = i.id
-                WHERE i.code = %(index)s
-            )
-        """)
-        params["index"] = index.lower()
+    # Index filter via shared helper (lower-cased to match stored codes); the
+    # fragment carries its own leading AND, so append it after the WHERE list.
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     where_sql = sql.SQL(" AND ").join(sql.SQL(c) for c in where_clauses)
 
@@ -187,6 +185,7 @@ def search_companies(
             ) as indices
         FROM companies c
         WHERE {where_sql}
+        {index_filter}
         ORDER BY
             CASE
                 WHEN c.ticker ILIKE %(exact)s THEN 1
@@ -196,6 +195,6 @@ def search_companies(
             END,
             c.market_cap DESC NULLS LAST
         LIMIT %(limit)s
-    """).format(where_sql=where_sql)
+    """).format(where_sql=where_sql, index_filter=index_filter)
 
     return execute_query(search_query, params)

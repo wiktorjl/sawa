@@ -170,13 +170,16 @@ class TestGetRequiredLookbackDays:
         max_period = max(MIN_PERIODS.values())
         assert lookback > max_period
 
-    def test_lookback_accounts_for_weekends(self):
-        """Lookback should account for weekends/holidays (~1.5x)."""
+    def test_lookback_provides_deep_ema_warmup(self):
+        """Lookback must give the longest EMA enough warm-up that its talib SMA
+        seed decays to negligible weight (otherwise the daily incremental EMA-200
+        drifts vs a full-history computation). Expect several multiples of the
+        max period, in calendar days."""
         lookback = get_required_lookback_days()
         max_period = max(MIN_PERIODS.values())
-        # Should be roughly 1.4-1.5x the max period
-        assert lookback >= int(max_period * 1.4)
-        assert lookback <= int(max_period * 1.6)
+        # ~4x the longest period in trading days, converted to calendar days,
+        # puts the EMA-200 seed residual below ~0.1%.
+        assert lookback >= int(max_period * 3.0)
 
 
 class TestTechnicalIndicatorsModel:

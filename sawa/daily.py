@@ -82,13 +82,19 @@ def fetch_prices_via_api(
     end_date: str,
     logger: logging.Logger,
     rate_limiter: SyncRateLimiter | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetch prices for all symbols via REST API.
 
+    Per-symbol failures (timeouts, 429s, 5xx) are counted and surfaced as a
+    WARNING summary (and ``stats['fetch_errors']`` when ``stats`` is given) so a
+    partial upstream outage is visible rather than silently dropping symbols.
+
     Returns list of price records ready for database insert.
     """
     all_prices: list[dict[str, Any]] = []
+    failures = 0
 
     for i, symbol in enumerate(symbols, 1):
         if i % 50 == 0:
@@ -121,9 +127,40 @@ def fetch_prices_via_api(
                     )
 
         except Exception as e:
+            failures += 1
             logger.debug(f"  {symbol}: {e}")
 
+    if failures:
+        logger.warning(
+            f"  {failures}/{len(symbols)} symbols failed to fetch "
+            f"({start_date}..{end_date}); they will be retried on the next run"
+        )
+        if stats is not None:
+            stats["fetch_errors"] = failures
+
     return all_prices
+
+
+def _is_valid_price_row(p: dict[str, Any]) -> bool:
+    """Reject price rows that would corrupt downstream data.
+
+    Guards the upsert against NULL/non-positive OHLC (after rounding to the
+    stored NUMERIC(16,4) precision, so sub-penny prices that collapse to 0 are
+    excluded rather than overwriting a good row with 0.0000), inverted
+    high < low bars, and negative volume.
+    """
+    o, h, low_v, c, v = p.get("open"), p.get("high"), p.get("low"), p.get("close"), p.get("volume")
+    if None in (o, h, low_v, c, v):
+        return False
+    try:
+        o, h, low_v, c, v = float(o), float(h), float(low_v), float(c), float(v)
+    except (TypeError, ValueError):
+        return False
+    if any(round(x, 4) <= 0 for x in (o, h, low_v, c)):
+        return False
+    if v < 0 or h < low_v:
+        return False
+    return True
 
 
 def insert_prices(
@@ -131,7 +168,24 @@ def insert_prices(
     prices: list[dict[str, Any]],
     logger: logging.Logger,
 ) -> int:
-    """Insert prices into database with upsert."""
+    """Insert prices into database with upsert.
+
+    Invalid rows (NULL/non-positive OHLC, inverted high/low, negative volume)
+    are dropped before the upsert so malformed API data cannot overwrite a
+    previously-good row. Applies to every caller (daily, split-adjust, forced
+    refetch).
+    """
+    if not prices:
+        return 0
+
+    valid = [p for p in prices if _is_valid_price_row(p)]
+    skipped = len(prices) - len(valid)
+    if skipped:
+        logger.warning(
+            f"  Skipped {skipped} invalid price rows "
+            "(NULL/non-positive OHLC, high<low, or negative volume)"
+        )
+    prices = valid
     if not prices:
         return 0
 
@@ -382,7 +436,9 @@ def run_daily(
         # Fetch and insert prices if there are trading days
         if trading_days:
             logger.info("\nFetching prices via API...")
-            prices = fetch_prices_via_api(client, symbols, start_str, end_str, logger, rate_limiter)
+            prices = fetch_prices_via_api(
+                client, symbols, start_str, end_str, logger, rate_limiter, stats=stats
+            )
             logger.info(f"  Fetched {len(prices)} price records")
             stats["prices_fetched"] = len(prices)
 
@@ -390,14 +446,25 @@ def run_daily(
             with psycopg.connect(database_url) as conn:
                 inserted = insert_prices(conn, prices, logger)
 
-                # If we just inserted today's EOD, cleanup intraday data for today
+                # If we just inserted today's EOD, cleanup intraday data for
+                # today — but only once today's EOD actually landed with
+                # adequate coverage. A partially-failed EOD fetch must not wipe
+                # the intraday fallback for tickers that got no EOD row.
                 if end_date == get_market_date():
-                    try:
-                        from sawa.database.intraday_load import cleanup_today_intraday_data
+                    latest_count, baseline = _last_date_coverage(conn, end_date)
+                    required = ceil(baseline * MIN_LATEST_COVERAGE) if baseline else 0
+                    if baseline and latest_count >= required:
+                        try:
+                            from sawa.database.intraday_load import cleanup_today_intraday_data
 
-                        cleanup_today_intraday_data(conn, logger)
-                    except ImportError:
-                        pass
+                            cleanup_today_intraday_data(conn, logger)
+                        except ImportError:
+                            pass
+                    else:
+                        logger.warning(
+                            f"  Today's EOD coverage {latest_count}/{baseline} below "
+                            f"{MIN_LATEST_COVERAGE:.0%}; keeping intraday data as fallback"
+                        )
 
                 # Cleanup old intraday data (>7 days)
                 try:
@@ -493,38 +560,54 @@ def run_daily(
                         logger.warning("  Run schema migration or coldstart to create it")
                         stats["ta_skipped"] = "table does not exist"
                     else:
+                        ta_failed = 0
                         for i, ticker in enumerate(symbols, 1):
                             if i % 100 == 0:
                                 logger.info(f"  Progress: {i}/{len(symbols)} tickers")
 
-                            # Get last TA date for this ticker
-                            last_ta = get_last_ta_date(conn, ticker)
+                            # Isolate each ticker: a bad row or transient error
+                            # must not abort TA for the remaining tickers (and
+                            # the downstream market-internals step).
+                            try:
+                                # Get last TA date for this ticker
+                                last_ta = get_last_ta_date(conn, ticker)
 
-                            # Calculate start date for price fetch (need lookback for warm-up)
-                            if last_ta:
-                                price_start = last_ta - timedelta(days=lookback_days)
-                            else:
-                                price_start = None  # Fetch all prices
+                                # Start date for price fetch (need warm-up lookback)
+                                if last_ta:
+                                    price_start = last_ta - timedelta(days=lookback_days)
+                                else:
+                                    price_start = None  # Fetch all prices
 
-                            # Fetch prices
-                            prices = get_prices_for_ticker(conn, ticker, start_date=price_start)
-                            if not prices:
+                                # Fetch prices
+                                prices = get_prices_for_ticker(conn, ticker, start_date=price_start)
+                                if not prices:
+                                    continue
+
+                                # Calculate indicators
+                                indicators = calculate_indicators_for_ticker(ticker, prices, logger)
+                                if not indicators:
+                                    continue
+
+                                # Filter to only new dates (after last_ta)
+                                if last_ta:
+                                    indicators = [ind for ind in indicators if ind.date > last_ta]
+
+                                if indicators:
+                                    inserted = load_technical_indicators(conn, indicators, logger)
+                                    ta_count += inserted
+                            except Exception as e:
+                                ta_failed += 1
+                                logger.warning(
+                                    f"  TA failed for {ticker}: {type(e).__name__}: {e}"
+                                )
+                                # Recover the connection in case the txn aborted.
+                                conn.rollback()
                                 continue
-
-                            # Calculate indicators
-                            indicators = calculate_indicators_for_ticker(ticker, prices, logger)
-                            if not indicators:
-                                continue
-
-                            # Filter to only new dates (after last_ta)
-                            if last_ta:
-                                indicators = [ind for ind in indicators if ind.date > last_ta]
-
-                            if indicators:
-                                inserted = load_technical_indicators(conn, indicators, logger)
-                                ta_count += inserted
 
                         stats["ta_calculated"] = ta_count
+                        if ta_failed:
+                            stats["ta_failed"] = ta_failed
+                            logger.warning(f"  TA failed for {ta_failed} tickers")
                         logger.info(f"  Calculated {ta_count} indicator records")
 
             except ImportError as e:
@@ -577,9 +660,28 @@ def run_daily(
         else:
             logger.info("\nSkipping market internals (--skip-market-internals)")
 
+        # The run completed without a fatal exception, but individual steps may
+        # have degraded (caught + recorded above). Surface that explicitly so a
+        # day where news/TA/internals silently failed is not reported as a clean
+        # success — and so the operator/scheduler can react.
+        degraded_reasons: list[str] = []
+        if stats.get("news_error"):
+            degraded_reasons.append("news fetch failed")
+        if stats.get("ta_skipped"):
+            degraded_reasons.append(f"TA skipped ({stats['ta_skipped']})")
+        if stats.get("ta_failed"):
+            degraded_reasons.append(f"TA failed for {stats['ta_failed']} tickers")
+        if stats.get("52week_extremes_refresh_error"):
+            degraded_reasons.append("52-week extremes refresh failed")
+        if stats.get("market_internals_skipped"):
+            degraded_reasons.append(f"market internals skipped ({stats['market_internals_skipped']})")
+        stats["degraded"] = bool(degraded_reasons)
+        if degraded_reasons:
+            stats["degraded_reasons"] = degraded_reasons
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
-        logger.info("DAILY UPDATE COMPLETE")
+        logger.info("DAILY UPDATE COMPLETE" + (" (DEGRADED)" if degraded_reasons else ""))
         logger.info("=" * 60)
         logger.info(f"  Price records: {stats.get('prices_inserted', 0)}")
         if not skip_news:
@@ -588,6 +690,19 @@ def run_daily(
             logger.info(f"  TA indicators: {stats.get('ta_calculated', 0)}")
         if "market_internals" in stats:
             logger.info(f"  Market internals: {stats['market_internals']}")
+        if degraded_reasons:
+            logger.warning("  DEGRADED: " + "; ".join(degraded_reasons))
+            get_notifier(logger).send(
+                title="Sawa: daily completed DEGRADED",
+                body=(
+                    "Daily finished but these steps did not fully succeed:\n- "
+                    + "\n- ".join(degraded_reasons)
+                    + "\n\nMCP consumers may be served stale data for the affected "
+                    "feeds until the next clean run."
+                ),
+                level=NotificationLevel.WARNING,
+                tags=["warning", "daily", "degraded"],
+            )
 
     except Exception as e:
         logger.error(f"Daily update failed: {e}")

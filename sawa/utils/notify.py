@@ -18,10 +18,17 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from enum import Enum
 from typing import Protocol
 
 import httpx
+
+# Delivery attempts for a single notification before giving up. A transient
+# backend blip should not lose an alert; the dead-man's-switch heartbeat in the
+# scheduler covers a fully unreachable backend.
+_SEND_ATTEMPTS = 3
+_SEND_RETRY_BACKOFF = 1.0
 
 
 class NotificationLevel(str, Enum):
@@ -109,18 +116,34 @@ class NtfyNotifier:
         }
         if tags:
             headers["Tags"] = ",".join(tags)
-        try:
-            response = httpx.post(
-                self.url,
-                content=body.encode("utf-8"),
-                headers=headers,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return True
-        except Exception as exc:
-            self.logger.warning("NTFY notification failed (%s): %s", title, exc)
-            return False
+
+        last_exc: Exception | None = None
+        for attempt in range(1, _SEND_ATTEMPTS + 1):
+            try:
+                response = httpx.post(
+                    self.url,
+                    content=body.encode("utf-8"),
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return True
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _SEND_ATTEMPTS:
+                    time.sleep(_SEND_RETRY_BACKOFF * attempt)
+
+        # All attempts failed. Losing an ERROR-level alert is itself serious, so
+        # escalate the log level — the operator's last line of defence is the
+        # scheduler's external heartbeat, not this swallowed failure.
+        log = self.logger.error if level == NotificationLevel.ERROR else self.logger.warning
+        log(
+            "NTFY notification failed after %d attempts (%s): %s",
+            _SEND_ATTEMPTS,
+            title,
+            last_exc,
+        )
+        return False
 
 
 def get_notifier(logger: logging.Logger | None = None) -> Notifier:

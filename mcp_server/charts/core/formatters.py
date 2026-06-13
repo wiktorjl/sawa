@@ -89,8 +89,11 @@ def format_percent(
     """
     Format a number as percentage.
 
+    The input is treated as an already-in-percent number (e.g. 15 -> "15.0%").
+    Callers holding a 0..1 fraction must multiply by 100 before calling.
+
     Args:
-        value: Numeric value (0.15 = 15%)
+        value: Numeric value already in percent units (15 = 15%)
         decimals: Number of decimal places
         include_sign: Include + for positive values
 
@@ -102,9 +105,6 @@ def format_percent(
 
     try:
         num = float(value)
-        # If value looks like it's already a percentage (> 1 or < -1), don't multiply
-        if abs(num) <= 1:
-            num = num * 100
 
         sign = ""
         if include_sign and num > 0:

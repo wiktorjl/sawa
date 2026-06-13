@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from psycopg import sql
 
 from ..database import execute_query
+from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,12 @@ def get_data_status() -> dict[str, Any]:
                 (SELECT today FROM live_session)
             ) AS live_latest_date,
             (SELECT COUNT(*) FROM (
+                -- Live ticker universe = distinct tickers on the latest EOD
+                -- date plus today's intraday tickers. Counting DISTINCT over
+                -- every stock_prices row (~9.5M, all history) cost ~1.6s per
+                -- call; the latest date alone is the current snapshot.
                 SELECT ticker FROM stock_prices
+                WHERE date = (SELECT MAX(date) FROM stock_prices)
                 UNION
                 SELECT spi.ticker
                 FROM stock_prices_intraday spi
@@ -101,20 +107,27 @@ def get_stock_prices(
 
     table_name = "stock_prices_live" if use_live else "stock_prices"
 
+    # Take the most-recent `limit` rows in the range (inner DESC + LIMIT), then
+    # re-order ascending for output. A plain "ORDER BY date ASC LIMIT N" would
+    # return the OLDEST N rows and silently drop the most recent data.
     query = sql.SQL("""
-        SELECT
-            date,
-            open,
-            high,
-            low,
-            close,
-            volume
-        FROM {table}
-        WHERE ticker = %(ticker)s
-            AND date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT date, open, high, low, close, volume
+        FROM (
+            SELECT
+                date,
+                open,
+                high,
+                low,
+                close,
+                volume
+            FROM {table}
+            WHERE ticker = %(ticker)s
+                AND date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """).format(table=sql.Identifier(table_name))
 
     params = {
@@ -150,32 +163,39 @@ def get_financial_ratios(
     if end_date is None:
         end_date = date.today().isoformat()
 
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; a bare "ORDER BY date ASC LIMIT N" would drop the
+    # newest rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            price,
-            price_to_earnings as pe_ratio,
-            price_to_book as pb_ratio,
-            price_to_sales as ps_ratio,
-            price_to_cash_flow as pcf_ratio,
-            price_to_free_cash_flow as pfcf_ratio,
-            debt_to_equity,
-            return_on_equity as roe,
-            return_on_assets as roa,
-            dividend_yield,
-            earnings_per_share as eps,
-            market_cap,
-            enterprise_value as ev,
-            ev_to_ebitda,
-            ev_to_sales,
-            free_cash_flow as fcf,
-            average_volume
-        FROM financial_ratios
-        WHERE ticker = %(ticker)s
-            AND date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                price,
+                price_to_earnings as pe_ratio,
+                price_to_book as pb_ratio,
+                price_to_sales as ps_ratio,
+                price_to_cash_flow as pcf_ratio,
+                price_to_free_cash_flow as pfcf_ratio,
+                debt_to_equity,
+                return_on_equity as roe,
+                return_on_assets as roa,
+                dividend_yield,
+                earnings_per_share as eps,
+                market_cap,
+                enterprise_value as ev,
+                ev_to_ebitda,
+                ev_to_sales,
+                free_cash_flow as fcf,
+                average_volume
+            FROM financial_ratios
+            WHERE ticker = %(ticker)s
+                AND date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -362,25 +382,32 @@ def get_technical_indicators(
     if end_date is None:
         end_date = date.today().isoformat()
 
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; a bare "ORDER BY date ASC LIMIT N" would drop the
+    # newest rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            -- Trend
-            sma_5, sma_10, sma_20, sma_50,
-            ema_12, ema_26, ema_50, vwap,
-            -- Momentum
-            rsi_14, rsi_21,
-            macd_line, macd_signal, macd_histogram,
-            -- Volatility
-            bb_upper, bb_middle, bb_lower, atr_14,
-            -- Volume
-            obv, volume_sma_20, volume_ratio
-        FROM technical_indicators
-        WHERE ticker = %(ticker)s
-            AND date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                -- Trend
+                sma_5, sma_10, sma_20, sma_50,
+                ema_12, ema_26, ema_50, vwap,
+                -- Momentum
+                rsi_14, rsi_21,
+                macd_line, macd_signal, macd_histogram,
+                -- Volatility
+                bb_upper, bb_middle, bb_lower, atr_14,
+                -- Volume
+                obv, volume_sma_20, volume_ratio
+            FROM technical_indicators
+            WHERE ticker = %(ticker)s
+                AND date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -488,14 +515,12 @@ def screen_by_technical_indicators(
         # Use most recent date
         conditions.append("ti.date = (SELECT MAX(date) FROM technical_indicators)")
 
-    # Index filter
-    if index:
-        conditions.append("""ti.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    # Index filter via shared helper (lower-cased to match stored codes); the
+    # fragment carries its own leading AND, so it is appended after the joined
+    # WHERE conditions below rather than into the "AND"-joined condition list.
+    index_filter = build_index_filter(
+        index.lower() if index else index, "ti", params, param_name="index"
+    )
 
     # Add filter conditions using safe sql composition for column names
     composable_conditions: list[sql.Composable] = [sql.SQL(c) for c in conditions]
@@ -549,9 +574,10 @@ def screen_by_technical_indicators(
             ) as indices
         FROM technical_indicators ti
         WHERE {where_clause}
+        {index_filter}
         ORDER BY ti.ticker
         LIMIT %(limit)s
-    """).format(where_clause=where_clause)
+    """).format(where_clause=where_clause, index_filter=index_filter)
 
     return execute_query(query, params)
 

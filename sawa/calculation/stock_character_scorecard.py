@@ -14,7 +14,7 @@ import numpy as np
 from scipy.stats import percentileofscore  # type: ignore[import-untyped]
 
 from sawa.calculation.stock_character import _extract_ohlcv_arrays, _to_decimal, classify_stock
-from sawa.calculation.stock_character_baseline import compute_baseline
+from sawa.calculation.stock_character_baseline import compute_baseline, compute_recent_atr
 from sawa.calculation.stock_character_config import (
     RECENT_WINDOW_DAYS,
 )
@@ -32,30 +32,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _compute_recent_atr(prices: list[dict], window: int) -> float | None:
-    """Compute mean true range over the last *window* trading days.
-
-    Returns None if there are fewer than 2 prices in the window.
-    """
-    recent = prices[-window:] if len(prices) >= window else prices
-    if len(recent) < 2:
-        return None
-
-    high, low, close, _ = _extract_ohlcv_arrays(recent)
-    # True range: max(high-low, |high-prev_close|, |low-prev_close|)
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = np.maximum(
-        high - low,
-        np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)),
-    )
-    # Skip the first element (no valid previous close)
-    tr_valid = tr[1:]
-    if len(tr_valid) == 0 or np.all(np.isnan(tr_valid)):
-        return None
-    return float(np.nanmean(tr_valid))
 
 
 def _compute_spy_corr_recent(
@@ -182,7 +158,10 @@ def build_scorecard(
 
     # --- ATR ratio ---
     atr_ratio: Decimal | None = None
-    recent_atr = _compute_recent_atr(prices, RECENT_WINDOW_DAYS)
+    recent_atr: float | None = None
+    if prices:
+        high_arr, low_arr, close_arr2, _ = _extract_ohlcv_arrays(prices)
+        recent_atr = compute_recent_atr(high_arr, low_arr, close_arr2, RECENT_WINDOW_DAYS)
     if recent_atr is not None and baseline.atr_baseline is not None:
         baseline_atr_f = float(baseline.atr_baseline)
         if baseline_atr_f > 0:
