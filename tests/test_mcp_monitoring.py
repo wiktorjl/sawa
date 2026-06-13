@@ -36,7 +36,10 @@ class _SpyNotifier:
 
 
 @pytest.fixture(autouse=True)
-def _reset_counters() -> None:
+def _reset_counters(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Persist the cross-process failure counter under a temp dir so tests do
+    # not touch the real ~/.sawa/logs store and stay isolated from each other.
+    monkeypatch.setenv("MCP_LOG_DIR", str(tmp_path))
     monitoring.reset_counters()
 
 
@@ -139,6 +142,50 @@ def test_alert_resets_streak(monkeypatch: pytest.MonkeyPatch) -> None:
         "y", success=False, duration_ms=1.0, logger=log, error=ConnectionError("c")
     )
     assert len(spy.calls) == 2
+
+
+def test_single_failure_logs_warning_with_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    log, cap = _logger_with_capture()
+    spy = _SpyNotifier()
+    monkeypatch.setattr(monitoring, "get_notifier", lambda _logger=None: spy)
+
+    monitoring.record_call_outcome(
+        "screen_stocks",
+        success=False,
+        duration_ms=10.0,
+        logger=log,
+        error=RuntimeError("boom"),
+    )
+
+    # Even a single failure is logged at WARNING with actionable context.
+    warnings = [r for r in cap.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a WARNING log on the first failure"
+    msg = warnings[0].getMessage()
+    assert "tool=screen_stocks" in msg
+    assert "consecutive_failures=1" in msg
+    assert "boom" in msg
+    # Below threshold, so no alert yet.
+    assert spy.calls == []
+
+
+def test_counter_persists_across_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulate ephemeral processes: each call only shares state via the
+    # persisted JSON file, never an in-memory dict. Three failures in a row
+    # should still cross the threshold and alert.
+    spy = _SpyNotifier()
+    monkeypatch.setattr(monitoring, "get_notifier", lambda _logger=None: spy)
+
+    for _ in range(3):
+        log, _ = _logger_with_capture()
+        monitoring.record_call_outcome(
+            "screen_stocks",
+            success=False,
+            duration_ms=5.0,
+            logger=log,
+            error=ValueError("bad input"),
+        )
+
+    assert len(spy.calls) == 1
 
 
 def test_separate_tools_track_independently(monkeypatch: pytest.MonkeyPatch) -> None:

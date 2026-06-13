@@ -83,22 +83,29 @@ def _get_market_internals(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Get market internals (VIX, VIX3M, HY spread) plus VIX-native metrics."""
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; "ORDER BY date ASC LIMIT N" would drop the newest
+    # rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            vix,
-            vix3m,
-            hy_spread,
-            term_structure,
-            vix_sma_20,
-            vix_std_20,
-            vix_pct_rank_252d,
-            hy_pct_rank_252d
-        FROM v_market_internals_enriched
-        WHERE date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                vix,
+                vix3m,
+                hy_spread,
+                term_structure,
+                vix_sma_20,
+                vix_std_20,
+                vix_pct_rank_252d,
+                hy_pct_rank_252d
+            FROM v_market_internals_enriched
+            WHERE date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -116,22 +123,29 @@ def _get_treasury_yields(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Get treasury yields data."""
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; "ORDER BY date ASC LIMIT N" would drop the newest
+    # rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            yield_1_month,
-            yield_3_month,
-            yield_6_month,
-            yield_1_year,
-            yield_2_year,
-            yield_5_year,
-            yield_10_year,
-            yield_30_year
-        FROM treasury_yields
-        WHERE date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                yield_1_month,
+                yield_3_month,
+                yield_6_month,
+                yield_1_year,
+                yield_2_year,
+                yield_5_year,
+                yield_10_year,
+                yield_30_year
+            FROM treasury_yields
+            WHERE date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -149,19 +163,26 @@ def _get_inflation(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Get inflation data."""
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; "ORDER BY date ASC LIMIT N" would drop the newest
+    # rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            cpi,
-            cpi_core,
-            cpi_year_over_year as inflation_yoy,
-            pce,
-            pce_core
-        FROM inflation
-        WHERE date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                cpi,
+                cpi_core,
+                cpi_year_over_year as inflation_yoy,
+                pce,
+                pce_core
+            FROM inflation
+            WHERE date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -179,17 +200,24 @@ def _get_inflation_expectations(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Get inflation expectations data."""
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; "ORDER BY date ASC LIMIT N" would drop the newest
+    # rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            market_5_year,
-            market_10_year,
-            forward_years_5_to_10
-        FROM inflation_expectations
-        WHERE date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                market_5_year,
+                market_10_year,
+                forward_years_5_to_10
+            FROM inflation_expectations
+            WHERE date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -207,18 +235,25 @@ def _get_labor_market(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Get labor market data."""
+    # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
+    # ascending for output; "ORDER BY date ASC LIMIT N" would drop the newest
+    # rows when the range holds more than `limit` of them.
     sql = """
-        SELECT
-            date,
-            unemployment_rate,
-            labor_force_participation_rate,
-            avg_hourly_earnings,
-            job_openings
-        FROM labor_market
-        WHERE date >= %(start_date)s
-            AND date <= %(end_date)s
+        SELECT *
+        FROM (
+            SELECT
+                date,
+                unemployment_rate,
+                labor_force_participation_rate,
+                avg_hourly_earnings,
+                job_openings
+            FROM labor_market
+            WHERE date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {

@@ -1,5 +1,6 @@
 """Tests for momentum/squeeze indicator tools."""
 
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -551,6 +552,50 @@ class TestGetMomentumIndicators:
         result = get_momentum_indicators("AAPL")
         dates = [point["date"] for point in result["data"]]
         assert dates == sorted(dates)
+
+    @patch("mcp_server.tools.momentum.execute_query")
+    def test_query_has_no_nested_window(self, mock_query):
+        """%D must not be a window aggregate nested inside another window.
+
+        PostgreSQL rejects ``AVG(... OVER (...)) OVER (...)``, so every call
+        used to fail server-side. The fix computes %K in one window and %D as
+        a separate window over that already-smoothed column.
+        """
+        mock_query.return_value = []
+
+        get_momentum_indicators("AAPL")
+
+        query = mock_query.call_args[0][0]
+        # Windows are still used (sanity check on the rewrite).
+        assert "OVER" in query
+
+        # For every window call ``<agg>( <args> ) OVER (...)`` confirm that the
+        # aggregate's own argument list does not itself contain "OVER" — that
+        # would be a window nested inside a window, which PostgreSQL rejects
+        # with "window function calls cannot be nested".
+        n = len(query)
+        for m in re.finditer(r"\bOVER\b", query):
+            # Walk left from OVER to find the matching aggregate argument list:
+            # the ")" immediately preceding it and its matching "(".
+            j = m.start() - 1
+            while j >= 0 and query[j] in " \t\r\n":
+                j -= 1
+            if j < 0 or query[j] != ")":
+                continue  # this OVER has no preceding arg list (window frame)
+            depth = 0
+            k = j
+            while k >= 0:
+                if query[k] == ")":
+                    depth += 1
+                elif query[k] == "(":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k -= 1
+            arg_list = query[k + 1 : j]
+            assert "OVER" not in arg_list, (
+                "nested window function detected in momentum SQL"
+            )
 
 
 class TestInterpretMomentum:

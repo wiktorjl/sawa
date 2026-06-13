@@ -38,7 +38,7 @@ def render_economy_chart(
     if layout is None:
         layout = get_layout()
     if theme is None:
-        theme = get_theme()
+        theme = get_theme(colors_enabled=layout.colors_enabled)
 
     renderers = {
         "treasury_yields": _render_treasury_yields,
@@ -76,7 +76,7 @@ def render_economy_dashboard(
     if layout is None:
         layout = get_layout()
     if theme is None:
-        theme = get_theme()
+        theme = get_theme(colors_enabled=layout.colors_enabled)
 
     if layout.detail == ChartDetail.COMPACT:
         return _render_dashboard_compact(data, layout, theme)

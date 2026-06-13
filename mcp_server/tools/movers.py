@@ -40,7 +40,8 @@ def get_top_movers(
         List of stock dicts with:
         - ticker: Stock symbol
         - name: Company name
-        - sector: SIC description
+        - sector: GICS sector (same expression used by the sector filter)
+        - direction: "gainer" or "loser"
         - indices: List of index memberships
         - price: Current price
         - change_pct: Percentage change for the period
@@ -76,15 +77,10 @@ def get_top_movers(
         """)
         params["sector"] = f"%{sector}%"
 
-    # Build index filter
-    index_filter = sql.SQL("")
-    if index:
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    # Build index filter (shared helper; lower-cased to match stored codes)
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     # Build price/volume filters
     price_parts: list[sql.Composable] = []
@@ -96,13 +92,18 @@ def get_top_movers(
         params["min_volume"] = min_volume
     price_filter = sql.SQL("").join(price_parts)
 
-    # Determine sort order (controlled SQL literals)
+    # Determine sort order and the single-direction label (controlled SQL
+    # literals). Single-direction results carry the same 'direction' column as
+    # 'both' so every row shape is consistent.
     if direction == "gainers":
         order_clause = sql.SQL("change_pct DESC NULLS LAST")
+        direction_label = sql.SQL("'gainer'")
     elif direction == "losers":
         order_clause = sql.SQL("change_pct ASC NULLS LAST")
+        direction_label = sql.SQL("'loser'")
     else:
         order_clause = sql.SQL("")
+        direction_label = sql.SQL("")
 
     if direction == "both":
         query = sql.SQL("""
@@ -110,7 +111,7 @@ def get_top_movers(
                 SELECT
                     c.ticker,
                     c.name,
-                    c.sic_description as sector,
+                    get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
                     c.market_cap,
                     p_now.close as price,
                     p_now.volume,
@@ -165,13 +166,14 @@ def get_top_movers(
             SELECT
                 c.ticker,
                 c.name,
-                c.sic_description as sector,
+                get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
                 c.market_cap,
                 p_now.close as price,
                 p_now.volume,
                 CASE WHEN p_prev.close > 0
                      THEN ROUND(((p_now.close - p_prev.close) / p_prev.close * 100)::numeric, 2)
                      ELSE NULL END as change_pct,
+                {direction_label} as direction,
                 ARRAY(
                     SELECT i.code FROM index_constituents ic
                     JOIN indices i ON ic.index_id = i.id
@@ -195,6 +197,7 @@ def get_top_movers(
             index_filter=index_filter,
             price_filter=price_filter,
             order_clause=order_clause,
+            direction_label=direction_label,
         )
 
     return execute_query(query, params)
@@ -254,15 +257,10 @@ def get_volume_leaders(
         """)
         params["sector"] = f"%{sector}%"
 
-    # Build index filter
-    index_filter = sql.SQL("")
-    if index:
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    # Build index filter (shared helper; lower-cased to match stored codes)
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     price_filter = sql.SQL("")
     if min_price is not None:

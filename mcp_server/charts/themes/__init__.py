@@ -14,12 +14,14 @@ _THEMES: dict[str, type[Theme]] = {
 DEFAULT_THEME = "osaka-jade"
 
 
-def get_theme(name: str | None = None) -> Theme:
+def get_theme(name: str | None = None, colors_enabled: bool = True) -> Theme:
     """
     Get a theme by name.
 
     Args:
         name: Theme name. If None, returns default theme.
+        colors_enabled: When False, the theme emits no ANSI escape codes
+            (honors NO_COLOR / config flag).
 
     Returns:
         Theme instance
@@ -36,7 +38,7 @@ def get_theme(name: str | None = None) -> Theme:
         available = ", ".join(_THEMES.keys())
         raise ValueError(f"Unknown theme: {name}. Available themes: {available}")
 
-    return _THEMES[name]()
+    return _THEMES[name](colors_enabled=colors_enabled)
 
 
 def list_themes() -> list[str]:

@@ -11,6 +11,7 @@ from psycopg import sql
 
 from ..database import execute_query
 from ._dates import get_price_date_refs
+from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +39,16 @@ def list_sectors(
     """
     limit = min(limit, 500)
 
-    # Build index filter
+    # Build index filter (shared helper; lower-cased to match stored codes)
     params: dict[str, Any] = {"limit": limit}
-    index_filter = sql.SQL("")
-    if index:
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     if taxonomy == "gics":
         query = sql.SQL("""
             SELECT
-                get_gics_sector(c.ticker, c.sic_code) as sector,
+                get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
                 COUNT(DISTINCT c.ticker) as stock_count,
                 STRING_AGG(DISTINCT c.ticker, ', ' ORDER BY c.ticker)
                     FILTER (WHERE c.ticker IS NOT NULL) as sample_tickers
@@ -112,7 +108,7 @@ def get_sector_performance(
 
     # Build sector grouping based on taxonomy (controlled SQL expressions)
     if taxonomy == "gics":
-        sector_expr = sql.SQL("get_gics_sector(c.ticker, c.sic_code)")
+        sector_expr = sql.SQL("get_gics_sector(c.ticker, c.sic_code, c.sic_description)")
         join_clause = sql.SQL("")
     else:
         sector_expr = sql.SQL("c.sic_description")
@@ -125,16 +121,11 @@ def get_sector_performance(
     if date_refs["latest"] is None:
         return []
 
-    # Build index filter
+    # Build index filter (shared helper; lower-cased to match stored codes)
     params: dict[str, Any] = {"limit": limit, **date_refs}
-    index_filter = sql.SQL("")
-    if index:
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     query = sql.SQL("""
         WITH stock_returns AS (

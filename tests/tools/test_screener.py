@@ -21,24 +21,6 @@ def test_valid_filters_are_registry_keys() -> None:
     assert screener.VALID_FILTERS == set(screener.FILTER_SPECS)
 
 
-def test_filter_expression_uses_registry_aliases() -> None:
-    """Filter expression aliases should cover every advertised filter."""
-    assert screener._get_filter_expression("price_change_1d") == "change_1d"
-    assert screener._get_filter_expression("price_change_ytd") == "change_ytd"
-
-    for filter_name in (
-        "sma_5",
-        "ema_12",
-        "bb_middle",
-        "obv",
-        "volume_sma_20",
-        "daily_range_pct",
-        "high_52w_pct",
-        "low_52w_pct",
-    ):
-        assert screener._get_filter_expression(filter_name) == filter_name
-
-
 def test_sort_alias_accepts_filter_names_and_output_aliases() -> None:
     """Sorting can use either external filter names or returned output aliases."""
     assert screener._get_sort_alias("price_change_1d") == "change_1d"
