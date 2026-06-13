@@ -151,13 +151,54 @@ def extract_filter_columns(sql: str) -> list[str]:
     return sorted(set(columns))
 
 
+# A query is "forensic" — DB introspection or data-quality auditing, not an
+# agent answering a market question — when its source says so explicitly, or
+# when the SQL itself is introspective. Forensic queries still get counted, but
+# they are excluded from the missing-tool signal (top tables/patterns + the
+# high-usage warning) so a code review or audit can't masquerade as agents
+# repeatedly hitting a gap.
+FORENSIC_SOURCES = {"review", "forensic", "audit"}
+
+_INTROSPECTION_RE = re.compile(
+    r"\binformation_schema\b|\bpg_catalog\b|\bpg_[a-z_]+\b|\bto_regclass\b|\bversion\s*\(\s*\)",
+    re.I,
+)
+_FORENSIC_SQL_RE = re.compile(
+    r"\bfilter\s*\(\s*where\b|\bexcept\b|\bintersect\b|\bpg_sleep\b",
+    re.I,
+)
+
+
+def classify_query(sql: str, source: str | None = None) -> str:
+    """Bucket a logged query as ``analytical`` or ``forensic``.
+
+    ``analytical`` queries are genuine agent usage and drive the missing-tool
+    signal; ``forensic`` queries are introspection / data-quality audits and are
+    kept out of that signal. An explicit non-agent ``source`` forces forensic;
+    otherwise the SQL is inspected (comments, system catalogs, EXPLAIN, set-diff
+    gap checks, COUNT(...) FILTER audits).
+    """
+    if source and source.strip().lower() in FORENSIC_SOURCES:
+        return "forensic"
+    text = sql or ""
+    if "--" in text or "/*" in text:
+        return "forensic"
+    if text.lstrip().lower().startswith("explain"):
+        return "forensic"
+    if _INTROSPECTION_RE.search(text) or _FORENSIC_SQL_RE.search(text):
+        return "forensic"
+    return "analytical"
+
+
 def _empty_stats() -> dict[str, Any]:
     return {
         "total_queries": 0,
         "successful_queries": 0,
         "failed_queries": 0,
         "unknown_outcome_queries": 0,
+        "category_counts": {"analytical": 0, "forensic": 0},
         "daily_counts": {},
+        "analytical_daily_counts": {},
         "tables": {},
         "selected_columns": {},
         "filter_columns": {},
@@ -217,6 +258,18 @@ def _record_query(stats: dict[str, Any], record: dict[str, Any]) -> None:
     day = _date_key(record.get("timestamp"))
     daily = stats.setdefault("daily_counts", {})
     daily[day] = int(daily.get(day, 0)) + 1
+
+    category = classify_query(sql, record.get("source"))
+    cats = stats.setdefault("category_counts", {"analytical": 0, "forensic": 0})
+    cats[category] = int(cats.get(category, 0)) + 1
+
+    # Forensic queries are counted above but kept out of the missing-tool signal
+    # (top tables/columns/patterns + the recent-usage warning).
+    if category != "analytical":
+        return
+
+    a_daily = stats.setdefault("analytical_daily_counts", {})
+    a_daily[day] = int(a_daily.get(day, 0)) + 1
 
     tables = extract_tables(sql)
     selected = extract_selected_columns(sql)
@@ -322,13 +375,18 @@ def _build_summary(
     top_n: int,
 ) -> dict[str, Any]:
     stats = cache.get("stats", {})
-    recent_queries = _recent_query_count(stats.get("daily_counts", {}), window_days)
+    # The warning and "recent" reflect ANALYTICAL queries only — forensic
+    # introspection/audit traffic must not trip the missing-tool signal.
+    recent_queries = _recent_query_count(stats.get("analytical_daily_counts", {}), window_days)
+    recent_total = _recent_query_count(stats.get("daily_counts", {}), window_days)
+    category_counts = stats.get("category_counts", {"analytical": 0, "forensic": 0})
     warning = None
     if recent_queries >= warning_threshold:
         warning = (
             "High custom SQL usage detected: "
-            f"{recent_queries} execute_query calls in the last {window_days} days. "
-            "Run `sawa mcp-query-insights` to review candidate MCP tools."
+            f"{recent_queries} analytical execute_query calls in the last "
+            f"{window_days} days. Run `sawa mcp-query-insights` to review "
+            "candidate MCP tools."
         )
 
     return {
@@ -338,8 +396,13 @@ def _build_summary(
         "successful_queries": int(stats.get("successful_queries", 0)),
         "failed_queries": int(stats.get("failed_queries", 0)),
         "unknown_outcome_queries": int(stats.get("unknown_outcome_queries", 0)),
+        "category_counts": {
+            "analytical": int(category_counts.get("analytical", 0)),
+            "forensic": int(category_counts.get("forensic", 0)),
+        },
         "window_days": window_days,
         "recent_queries": recent_queries,
+        "recent_total_queries": recent_total,
         "warning_threshold": warning_threshold,
         "warning": warning,
         "top_tables": _top(stats.get("tables", {}), top_n),
@@ -421,8 +484,15 @@ def format_query_insights(cache: dict[str, Any], *, top_n: int = DEFAULT_TOP_N) 
         f"New records processed: {summary.get('new_records', 0)}",
         f"Total custom queries: {summary.get('total_queries', 0)}",
         (
-            f"Recent custom queries: {summary.get('recent_queries', 0)} "
-            f"in the last {summary.get('window_days', DEFAULT_WINDOW_DAYS)} days"
+            "Breakdown: "
+            f"{summary.get('category_counts', {}).get('analytical', 0)} analytical, "
+            f"{summary.get('category_counts', {}).get('forensic', 0)} forensic "
+            "(introspection/audit, excluded from the tool-gap signal)"
+        ),
+        (
+            f"Recent analytical queries: {summary.get('recent_queries', 0)} "
+            f"in the last {summary.get('window_days', DEFAULT_WINDOW_DAYS)} days "
+            f"({summary.get('recent_total_queries', 0)} incl. forensic)"
         ),
         (
             "Outcomes: "
