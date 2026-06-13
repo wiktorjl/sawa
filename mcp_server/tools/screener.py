@@ -155,6 +155,22 @@ FILTER_SPECS = {
 
 VALID_FILTERS = set(FILTER_SPECS)
 
+# Shared CTE selecting the most recent financial_ratios row per ticker. Used by
+# both screen_stocks and get_52week_extremes; kept in one place so the two stay
+# in sync. Callers embed it as the first CTE and join "latest_ratios fr".
+LATEST_RATIOS_CTE = """
+        latest_ratios AS (
+            SELECT DISTINCT ON (ticker)
+                ticker,
+                price_to_earnings,
+                dividend_yield,
+                return_on_equity,
+                debt_to_equity
+            FROM financial_ratios
+            ORDER BY ticker, date DESC
+        ),
+        """
+
 DEFAULT_OUTPUT_FILTERS = (
     "price",
     "market_cap",
@@ -320,15 +336,10 @@ def screen_stocks(
         sector_exclude_filter = "AND " + sector_expr + " NOT ILIKE %(sector_exclude)s"
         params["sector_exclude"] = f"%{sector_exclude}%"
 
-    # Index filter
-    index_filter = ""
-    if index:
-        index_filter = """AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )"""
-        params["index"] = index.lower()
+    # Index filter (shared helper; lower-cased to match stored codes)
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     # Build filter conditions as Composable objects
     where_conditions: list[sql.Composable] = []
@@ -396,18 +407,7 @@ def screen_stocks(
     fundamentals_cte = sql.SQL("")
     fundamentals_join = sql.SQL("")
     if _has_expression_reference(required_specs, "fr."):
-        fundamentals_cte = sql.SQL("""
-        latest_ratios AS (
-            SELECT DISTINCT ON (ticker)
-                ticker,
-                price_to_earnings,
-                dividend_yield,
-                return_on_equity,
-                debt_to_equity
-                FROM financial_ratios
-            ORDER BY ticker, date DESC
-        ),
-        """)
+        fundamentals_cte = sql.SQL(LATEST_RATIOS_CTE)
         fundamentals_join = sql.SQL("LEFT JOIN latest_ratios fr ON fr.ticker = c.ticker")
 
     extremes_join = sql.SQL("")
@@ -471,7 +471,7 @@ def screen_stocks(
         sector_join=sql.SQL(sector_join),
         sector_filter=sql.SQL(sector_filter),
         sector_exclude_filter=sql.SQL(sector_exclude_filter),
-        index_filter=sql.SQL(index_filter),
+        index_filter=index_filter,
         filter_selects=filter_selects,
         output_selects=output_selects,
         technical_join=technical_join,
@@ -484,12 +484,6 @@ def screen_stocks(
     )
 
     return execute_query(query, params)
-
-
-def _get_filter_expression(filter_name: str) -> str:
-    """Map an external filter name to its base_data alias."""
-    spec = FILTER_SPECS.get(filter_name)
-    return spec.alias if spec else filter_name
 
 
 def get_ytd_returns(
@@ -602,21 +596,15 @@ def detect_crossovers(
     recent_set.add(date_refs["latest"])
     recent_dates = sorted(recent_set, reverse=True)[: lookback_days + 1]
 
-    # Build index filter
-    index_filter = sql.SQL("")
+    # Build index filter (shared helper; lower-cased to match stored codes)
     params: dict[str, Any] = {
         "recent_dates": recent_dates,
         "latest": recent_dates[0],
         "limit": limit,
     }
-
-    if index:
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     # Volume filter
     volume_filter = sql.SQL("")
@@ -775,18 +763,7 @@ def get_52week_extremes(
 
     # Fundamentals JOIN and columns
     if include_fundamentals:
-        fundamentals_cte = sql.SQL("""
-        latest_ratios AS (
-            SELECT DISTINCT ON (ticker)
-                ticker,
-                price_to_earnings,
-                dividend_yield,
-                return_on_equity,
-                debt_to_equity
-            FROM financial_ratios
-            ORDER BY ticker, date DESC
-        ),
-        """)
+        fundamentals_cte = sql.SQL(LATEST_RATIOS_CTE)
         fundamentals_join = sql.SQL("LEFT JOIN latest_ratios fr ON fr.ticker = c.ticker")
         fundamentals_cols = sql.SQL(""",
                 fr.price_to_earnings as pe_ratio,
@@ -959,22 +936,18 @@ def get_daily_range_leaders(
         sql.SQL(f) for f in filters
     ) if filters else sql.SQL("1=1")
 
-    # Index filter (applied in the CTE)
-    index_filter = sql.SQL("")
-    if index:
-        index_filter = sql.SQL("""AND c.ticker IN (
-            SELECT ic.ticker FROM index_constituents ic
-            JOIN indices i ON ic.index_id = i.id
-            WHERE i.code = %(index)s
-        )""")
-        params["index"] = index.lower()
+    # Index filter (applied in the CTE; shared helper, lower-cased to match
+    # stored codes)
+    index_filter = build_index_filter(
+        index.lower() if index else index, "c", params, param_name="index"
+    )
 
     query = sql.SQL("""
         WITH stock_data AS (
             SELECT
                 c.ticker,
                 c.name,
-                c.sic_description as sector,
+                get_gics_sector(c.ticker, c.sic_code, c.sic_description) as sector,
                 c.market_cap,
                 p.open,
                 p.high,

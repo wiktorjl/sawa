@@ -38,7 +38,7 @@ def render_ratios_chart(
     if layout is None:
         layout = get_layout()
     if theme is None:
-        theme = get_theme()
+        theme = get_theme(colors_enabled=layout.colors_enabled)
 
     # Extract key metrics
     metrics = _extract_metrics(data)
@@ -107,7 +107,7 @@ def _render_compact(
     if pe is not None:
         parts.append(f"P/E: {pe:.1f}")
     if roe is not None:
-        parts.append(f"ROE: {format_percent(roe)}")
+        parts.append(f"ROE: {format_percent(roe * 100)}")
     if de is not None:
         parts.append(f"D/E: {de:.2f}")
 
@@ -148,10 +148,10 @@ def _render_normal(
     metric_rows = [
         ("P/E Ratio", "pe_ratio", lambda x: f"{x:.1f}" if x else "--"),
         ("P/B Ratio", "pb_ratio", lambda x: f"{x:.1f}" if x else "--"),
-        ("ROE", "roe", lambda x: format_percent(x) if x else "--"),
-        ("ROA", "roa", lambda x: format_percent(x) if x else "--"),
+        ("ROE", "roe", lambda x: format_percent(x * 100) if x else "--"),
+        ("ROA", "roa", lambda x: format_percent(x * 100) if x else "--"),
         ("Debt/Equity", "debt_to_equity", lambda x: f"{x:.2f}" if x else "--"),
-        ("Div Yield", "dividend_yield", lambda x: format_percent(x) if x else "--"),
+        ("Div Yield", "dividend_yield", lambda x: format_percent(x * 100) if x else "--"),
     ]
 
     label_width = max(len(row[0]) for row in metric_rows)
@@ -232,10 +232,10 @@ def _render_detailed(
         ("P/B Ratio", "pb_ratio", lambda x: f"{x:.1f}" if x else "--"),
         ("P/S Ratio", "ps_ratio", lambda x: f"{x:.1f}" if x else "--"),
         ("EV/EBITDA", "ev_to_ebitda", lambda x: f"{x:.1f}" if x else "--"),
-        ("ROE", "roe", lambda x: format_percent(x) if x else "--"),
-        ("ROA", "roa", lambda x: format_percent(x) if x else "--"),
+        ("ROE", "roe", lambda x: format_percent(x * 100) if x else "--"),
+        ("ROA", "roa", lambda x: format_percent(x * 100) if x else "--"),
         ("Debt/Equity", "debt_to_equity", lambda x: f"{x:.2f}" if x else "--"),
-        ("Dividend Yield", "dividend_yield", lambda x: format_percent(x) if x else "--"),
+        ("Dividend Yield", "dividend_yield", lambda x: format_percent(x * 100) if x else "--"),
         ("EPS", "eps", lambda x: f"${x:.2f}" if x else "--"),
     ]
 
