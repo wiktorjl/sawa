@@ -250,8 +250,15 @@ Reverse index of §2 and §3.
 
 | Variable | Required for | Effect if missing |
 |----------|--------------|-------------------|
-| `POLYGON_API_KEY` | Almost everything (REST + WS) | Pipeline alerts (ntfy if `NTFY_TOPIC` set), skips the affected step, continues |
+| `POLYGON_API_KEY` | Almost everything (REST + WS) | Pipeline logs an error and exits non-zero before any work — Polygon underpins almost every step |
 | `POLYGON_S3_ACCESS_KEY` / `POLYGON_S3_SECRET_KEY` | `coldstart` bulk price download | Coldstart bulk price step fails — REST fallback is much slower for multi-year history |
 | `FRED_API_KEY` | `market_internals` step | Step is skipped with an alert; pipeline still exits 0 |
 | `DATABASE_URL` | Everything | Hard failure |
 | `NTFY_TOPIC` | nothing (optional) | No push notifications; logging continues normally |
+
+Database connection: `DATABASE_URL` is checked first, but if it is unset
+`sawa/utils/config.py::get_database_url` falls back to the standard libpq
+`PG*` variables — `PGHOST`, `PGPORT` (default `5432`), `PGDATABASE`,
+`PGUSER`, and `PGPASSWORD` (password optional). It builds the connection
+URL from those when `PGHOST`, `PGDATABASE`, and `PGUSER` are all set. See
+the commented-out block in `.env.example`.

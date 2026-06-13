@@ -21,8 +21,14 @@ DATABASE_URL=postgresql://user:pass@host:5432/dbname
 NTFY_TOPIC=https://ntfy.sh/...   # optional; pipeline + scheduler push notifications
 ```
 
-The pipeline alerts (via `NTFY_TOPIC` if set, otherwise log + non-zero exit
-for the affected step) when `POLYGON_API_KEY` or `FRED_API_KEY` are missing.
+Missing API keys behave differently by key:
+
+- `POLYGON_API_KEY` (or `--api-key`) is required up front. If it is missing,
+  `daily`/`weekly`/`quarterly`/`coldstart` log an error and exit non-zero
+  before doing any work — Polygon underpins almost every step.
+- `FRED_API_KEY` is optional. If it is missing, only the FRED market-internals
+  step is skipped: the job logs an error, sends an ntfy alert (if `NTFY_TOPIC`
+  is set) via `alert_missing_api_key`, and still exits 0.
 
 ### Database
 
@@ -159,7 +165,7 @@ the job is not marked done and an error notification is sent.
 
 ```cron
 0 18 * * 1-5 /path/to/sawa/scripts/daily.sh
-0  2 * * 0   /path/to/sawa/scripts/weekly.sh
+0  2 * * 6   /path/to/sawa/scripts/weekly.sh   # Saturday, matching market_scheduler.sh
 ```
 
 Quarterly is small — run by hand or once a quarter.
