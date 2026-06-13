@@ -16,11 +16,12 @@ Usage:
 """
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from sawa.api.async_client import AsyncPolygonClient
 from sawa.utils.config import get_env
+from sawa.utils.dates import timestamp_to_date
 
 
 async def get_live_price(
@@ -92,17 +93,21 @@ async def get_live_price(
     # Sort ascending for history
     results.sort(key=lambda x: x["t"])
 
-    # Calculate daily change (from previous close to current)
+    # Calculate daily change (from previous close to current). Guard against a
+    # missing/zero previous close so we never divide by zero.
     last_close = results[-1]["c"]
     prev_close = results[-2]["c"] if len(results) >= 2 else last_close
-    change_percent = ((last_close - prev_close) / prev_close) * 100
+    if not prev_close:
+        change_percent = None
+    else:
+        change_percent = round(((last_close - prev_close) / prev_close) * 100, 2)
 
     return {
         "ticker": ticker,
         "current_price": last_close,
-        "current_date": datetime.fromtimestamp(results[-1]["t"] / 1000).date().isoformat(),
+        "current_date": timestamp_to_date(results[-1]["t"]).isoformat(),
         "history": results,
-        "change_percent": round(change_percent, 2),
+        "change_percent": change_percent,
         "error": None,
     }
 
@@ -164,17 +169,21 @@ async def get_live_prices_batch(
         # Sort ascending
         results.sort(key=lambda x: x["t"])
 
-        # Calculate daily change (from previous close to current)
+        # Calculate daily change (from previous close to current). Guard against
+        # a missing/zero previous close so we never divide by zero.
         last_close = results[-1]["c"]
         prev_close = results[-2]["c"] if len(results) >= 2 else last_close
-        change_percent = ((last_close - prev_close) / prev_close) * 100
+        if not prev_close:
+            change_percent = None
+        else:
+            change_percent = round(((last_close - prev_close) / prev_close) * 100, 2)
 
         output[ticker] = {
             "ticker": ticker,
             "current_price": last_close,
-            "current_date": datetime.fromtimestamp(results[-1]["t"] / 1000).date().isoformat(),
+            "current_date": timestamp_to_date(results[-1]["t"]).isoformat(),
             "history": results,
-            "change_percent": round(change_percent, 2),
+            "change_percent": change_percent,
             "error": None,
         }
 
