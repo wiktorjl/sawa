@@ -16,6 +16,14 @@ from sawa.database.intraday_load import load_intraday_bars
 DELAYED_WEBSOCKET_URL = "wss://delayed.polygon.io/stocks"
 REALTIME_WEBSOCKET_URL = "wss://socket.polygon.io/stocks"
 
+# Reconnect backoff ceiling (seconds).
+MAX_RECONNECT_BACKOFF = 60.0
+# Wall-clock backstop: force-flush a window only if it is this many minutes
+# older than its own end, so a fully stalled stream cannot grow memory without
+# bound. It is deliberately generous (well beyond the 15-min feed delay) so it
+# never pre-empts the event-time watermark during normal operation.
+STREAM_STALL_MINUTES = 30
+
 
 class PolygonWebSocketClient:
     """
@@ -66,6 +74,12 @@ class PolygonWebSocketClient:
 
         # For aggregating 1-min bars into 5-min bars
         self.bar_aggregator: dict[tuple[str, datetime], dict[str, Any]] = {}
+
+        # Event-time watermark: the latest window start observed across all
+        # tickers. A window is complete once a bar from a strictly later window
+        # has arrived. This replaces a wall-clock cutoff, which is wrong on the
+        # delayed feed where bars arrive ~15 min after their event time.
+        self.max_bar_start: datetime | None = None
 
         # Try delayed endpoint by default (fallback to real-time if access granted)
         self.uri = DELAYED_WEBSOCKET_URL
@@ -158,6 +172,10 @@ class PolygonWebSocketClient:
         rounded_minute = (bar_time.minute // self.bar_size) * self.bar_size
         bar_start = bar_time.replace(minute=rounded_minute, second=0, microsecond=0)
 
+        # Advance the event-time watermark used by _flush_completed_bars.
+        if self.max_bar_start is None or bar_start > self.max_bar_start:
+            self.max_bar_start = bar_start
+
         key = (ticker, bar_start)
 
         if key not in self.bar_aggregator:
@@ -181,14 +199,37 @@ class PolygonWebSocketClient:
             agg["volume"] += bar_data.get("v", 0)
             agg["bar_count"] += 1
 
-    def _flush_completed_bars(self) -> None:
-        """Move completed bars from aggregator to buffer."""
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(minutes=self.bar_size + 1)  # Keep current bar in aggregator
+    def _flush_completed_bars(self, flush_all: bool = False) -> None:
+        """Move completed bars from aggregator to buffer.
 
-        completed_keys = [
-            key for key, bar in self.bar_aggregator.items() if bar["timestamp"] < cutoff
-        ]
+        A window ``[W, W+bar_size)`` is complete once we have observed a 1-min
+        bar belonging to a later window (the event-time watermark). We cannot
+        use wall-clock time: on the 15-min delayed feed every bar arrives long
+        after its event time, so a wall-clock cutoff would flush each window
+        after its first 1-min bar and the later bars would re-create — then
+        overwrite — the same window, leaving only the last 1-min bar's data.
+
+        Args:
+            flush_all: Drain every window regardless of completeness (used at
+                shutdown, when no later bars will ever arrive).
+        """
+        if flush_all:
+            completed_keys = list(self.bar_aggregator.keys())
+        elif self.max_bar_start is None:
+            return
+        else:
+            bar_delta = timedelta(minutes=self.bar_size)
+            watermark = self.max_bar_start
+            # Backstop so a fully stalled stream cannot grow memory unbounded.
+            stale_cutoff = datetime.now(timezone.utc) - timedelta(
+                minutes=self.bar_size + STREAM_STALL_MINUTES
+            )
+            completed_keys = [
+                key
+                for key, bar in self.bar_aggregator.items()
+                if bar["timestamp"] + bar_delta <= watermark
+                or bar["timestamp"] < stale_cutoff
+            ]
 
         for key in completed_keys:
             bar = self.bar_aggregator.pop(key)
@@ -279,37 +320,55 @@ class PolygonWebSocketClient:
                 await self._batch_write_to_db()
 
     async def run(self) -> None:
-        """Main event loop - run until interrupted."""
+        """Main event loop - run until interrupted.
+
+        Reconnects with exponential backoff on connection loss so a mid-session
+        disconnect does not silently end the stream (and drop bars) until the
+        next scheduler tick. The in-memory aggregator and buffer persist across
+        reconnects, so a transient blip loses no already-received data.
+        """
         self.running = True
-        flush_task: asyncio.Task[None] | None = None
+        # The flush task outlives individual connections.
+        flush_task = asyncio.create_task(self._periodic_flush())
+        backoff = 1.0
 
         try:
-            await self.connect()
-            await self.subscribe()
+            while self.running:
+                try:
+                    await self.connect()
+                    await self.subscribe()
 
-            if self.websocket is None:
-                raise RuntimeError("WebSocket not connected")
+                    if self.websocket is None:
+                        raise RuntimeError("WebSocket not connected")
 
-            # Start periodic flush task
-            flush_task = asyncio.create_task(self._periodic_flush())
+                    backoff = 1.0  # reset after a successful connect+subscribe
+                    self.logger.info("Streaming started. Press Ctrl+C to stop.")
 
-            self.logger.info("Streaming started. Press Ctrl+C to stop.")
+                    async for message in self.websocket:
+                        if not self.running:
+                            break
+                        if isinstance(message, str):
+                            await self._handle_message(message)
 
-            # Listen for messages
-            async for message in self.websocket:
+                    if not self.running:
+                        break
+                    self.logger.warning("Stream ended by server; will reconnect")
+                except KeyboardInterrupt:
+                    self.logger.info("Interrupted by user")
+                    break
+                except websockets.exceptions.ConnectionClosed:
+                    self.logger.warning("Connection closed")
+                except (OSError, websockets.exceptions.WebSocketException) as e:
+                    self.logger.warning(f"WebSocket error: {e}")
+
                 if not self.running:
                     break
-                if isinstance(message, str):
-                    await self._handle_message(message)
-
-        except websockets.exceptions.ConnectionClosed:
-            self.logger.warning("Connection closed")
-        except KeyboardInterrupt:
-            self.logger.info("Interrupted by user")
+                self.logger.info(f"Reconnecting in {backoff:.0f}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF)
         finally:
             self.running = False
-            if flush_task is not None:
-                flush_task.cancel()
+            flush_task.cancel()
             await self.shutdown()
 
     async def shutdown(self) -> None:
@@ -317,8 +376,8 @@ class PolygonWebSocketClient:
         self.logger.info("Shutting down...")
         self.running = False
 
-        # Flush any remaining bars
-        self._flush_completed_bars()
+        # Flush any remaining bars — no later bars will arrive, so drain all.
+        self._flush_completed_bars(flush_all=True)
         if self.buffer:
             await self._batch_write_to_db()
 

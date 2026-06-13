@@ -102,11 +102,22 @@ def _insert_rows(
     rows: list[dict[str, Any]],
     upsert: bool,
     log: logging.Logger | None = None,
+    coalesce_columns: list[str] | None = None,
 ) -> int:
-    """Insert rows into table with optional upsert."""
+    """Insert rows into table with optional upsert.
+
+    Args:
+        coalesce_columns: Columns whose upsert uses
+            ``col = COALESCE(EXCLUDED.col, table.col)`` so an incoming NULL keeps
+            the stored value instead of clobbering it. Use for series that are
+            never legitimately retracted to NULL (e.g. market_internals), so a
+            transient upstream gap cannot erase good history.
+    """
     log = log or logger
     if not rows:
         return 0
+
+    coalesce_set = set(coalesce_columns or [])
 
     # Get primary key columns
     pk_columns = _get_primary_key(conn, table_name)
@@ -119,11 +130,15 @@ def _insert_rows(
         pk_sql = sql.SQL(", ").join(map(sql.Identifier, pk_columns))
         update_cols = [c for c in columns if c not in pk_columns]
 
+        def _set_clause(c: str) -> sql.Composed:
+            if c in coalesce_set:
+                return sql.SQL("{col} = COALESCE(EXCLUDED.{col}, {tbl}.{col})").format(
+                    col=sql.Identifier(c), tbl=sql.Identifier(table_name)
+                )
+            return sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
+
         if update_cols:
-            set_sql = sql.SQL(", ").join(
-                sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
-                for c in update_cols
-            )
+            set_sql = sql.SQL(", ").join(_set_clause(c) for c in update_cols)
             query = sql.SQL(
                 "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
             ).format(sql.Identifier(table_name), cols_sql, placeholders, pk_sql, set_sql)
@@ -547,7 +562,17 @@ def load_market_internals(
             db_row[col] = val if val not in ("", None) else None
         db_rows.append(db_row)
 
-    return _insert_rows(conn, "market_internals", columns, db_rows, upsert=True, log=log)
+    # COALESCE value columns: a NULL from a transient FRED-series failure (or
+    # the never-populated put_call_ratio) must not overwrite good stored data.
+    return _insert_rows(
+        conn,
+        "market_internals",
+        columns,
+        db_rows,
+        upsert=True,
+        log=log,
+        coalesce_columns=["vix", "vix3m", "hy_spread", "put_call_ratio"],
+    )
 
 
 def load_market_internals_csv(
