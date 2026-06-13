@@ -32,6 +32,7 @@ EXPECTED_TABLES = {
     "inflation_expectations",
     "labor_market",
     "sic_gics_mapping",
+    "gics_overrides",
     "news_articles",
     "news_article_tickers",
     "news_sentiment",
