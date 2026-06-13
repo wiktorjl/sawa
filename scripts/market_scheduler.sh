@@ -94,6 +94,21 @@ run_doctor() {
     log "Doctor passed for $job"
 }
 
+# ── Heartbeat (dead-man's-switch) ─────────────────────────────────────────────
+#
+# Pings an external monitor (e.g. healthchecks.io) so that if the host, cron,
+# or notifier is down — meaning no Sawa notification can be delivered at all —
+# the *absence* of a ping raises an alert there. Configured via
+# SAWA_HEARTBEAT_URL (daily) and SAWA_WEEKLY_HEARTBEAT_URL (weekly), sourced
+# from .env; a no-op when the relevant URL is unset.
+heartbeat() {
+    local url="$1" suffix="${2:-}"  # suffix: "" on success, "/fail" on failure
+    [ -z "$url" ] && return 0
+    if ! curl -fsS --max-time 10 "${url}${suffix}" >/dev/null 2>&1; then
+        log "WARN: heartbeat ping failed (${url}${suffix})"
+    fi
+}
+
 # ── Environment setup ────────────────────────────────────────────────────────
 
 setup_env() {
@@ -266,10 +281,12 @@ run_weekly() {
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa weekly failed (exit $exit_code)"
         notify "Sawa Weekly FAILED" "sawa weekly exited with code $exit_code at $(cat "$STATE_DIR/weekly_end_time")" error
+        heartbeat "${SAWA_WEEKLY_HEARTBEAT_URL:-}" /fail
         return 1
     fi
 
     if ! run_doctor weekly; then
+        heartbeat "${SAWA_WEEKLY_HEARTBEAT_URL:-}" /fail
         return 1
     fi
 
@@ -281,6 +298,7 @@ run_weekly() {
     end_time=$(cat "$STATE_DIR/weekly_end_time")
     log "Weekly completed: $start_time — $end_time"
     notify "Sawa Weekly Complete" "Weekly update finished at $end_time (economy, overviews, news, corporate actions)"
+    heartbeat "${SAWA_WEEKLY_HEARTBEAT_URL:-}"
 
     # Clean up old flag files (keep last 8 weeks)
     find "$STATE_DIR" -name "weekly_done_*" -mtime +60 -delete 2>/dev/null || true
@@ -309,10 +327,12 @@ run_daily() {
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa daily failed (exit $exit_code)"
         notify "Sawa Daily FAILED" "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")" error
+        heartbeat "${SAWA_HEARTBEAT_URL:-}" /fail
         return 1
     fi
 
     if ! run_doctor daily; then
+        heartbeat "${SAWA_HEARTBEAT_URL:-}" /fail
         return 1
     fi
 
@@ -325,6 +345,7 @@ run_daily() {
 
     log "Daily completed: $summary"
     notify "Sawa Daily Summary" "$summary"
+    heartbeat "${SAWA_HEARTBEAT_URL:-}"
 
     # Clean up old flag files (keep last 7 days)
     find "$STATE_DIR" -name "daily_done_*" -mtime +7 -delete 2>/dev/null || true
