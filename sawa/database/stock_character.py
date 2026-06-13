@@ -166,10 +166,15 @@ def load_flags(
             batch = flags[i : i + batch_size]
             for flag in batch:
                 try:
+                    # SAVEPOINT per row so a failed insert rolls back only that
+                    # row, not the whole uncommitted batch.
+                    cur.execute("SAVEPOINT row_insert")
                     cur.execute(query, flag.to_tuple())
+                    cur.execute("RELEASE SAVEPOINT row_insert")
                     inserted += 1
                 except Exception as e:
-                    conn.rollback()
+                    cur.execute("ROLLBACK TO SAVEPOINT row_insert")
+                    cur.execute("RELEASE SAVEPOINT row_insert")
                     errors += 1
                     if errors <= 3:
                         log.warning(

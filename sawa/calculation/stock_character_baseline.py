@@ -64,6 +64,45 @@ def _compute_atr(
     return cast(np.ndarray, atr)
 
 
+def compute_recent_atr(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    window: int,
+) -> float | None:
+    """Mean true range over the most recent *window* bars (``recent_ATR_10d``).
+
+    Shared by Stage 3 (detection) and Stage 4 (scorecard) so the resulting
+    ``atr_ratio`` is identical in both -- COMPRESSION/EXPANSION flags and the
+    scorecard must agree.  True range uses each bar's *actual* prior close
+    (the bar before the window is consulted when available), matching the
+    canonical TR used by :func:`_compute_atr`.
+
+    Returns ``None`` when fewer than 2 bars are available.
+    """
+    n = len(close)
+    if n < 2:
+        return None
+
+    # Use up to `window` recent bars, but the previous close for the first
+    # bar in the window is taken from just before the window when it exists.
+    span = min(window, n - 1)
+    recent_high = high[-span:]
+    recent_low = low[-span:]
+    prev_close = close[-(span + 1) : -1]
+
+    tr = np.maximum(
+        recent_high - recent_low,
+        np.maximum(
+            np.abs(recent_high - prev_close),
+            np.abs(recent_low - prev_close),
+        ),
+    )
+    if len(tr) == 0 or np.all(np.isnan(tr)):
+        return None
+    return float(np.nanmean(tr))
+
+
 def _rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
     """Simple rolling mean via cumulative sum.  First ``window-1`` values are NaN."""
     out = np.full_like(arr, np.nan, dtype=np.float64)

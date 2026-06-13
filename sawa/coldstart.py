@@ -681,22 +681,25 @@ def run_coldstart(
                     if not execute_sql_file(conn, sql_file, dry_run=False, logger=logger):
                         failed_files.append(sql_file.name)
 
-                # Schema-only mode: exit after schema setup
+                # Abort on any schema failure regardless of mode. Loading data
+                # against a broken/partial schema would silently produce a
+                # corrupt database, so fail fast with a clear error.
+                if failed_files:
+                    logger.error(
+                        f"\n❌ Schema setup failed! "
+                        f"{len(failed_files)} file(s) had errors:"
+                    )
+                    for fname in failed_files:
+                        logger.error(f"   - {fname}")
+                    stats["success"] = False
+                    stats["failed_files"] = failed_files
+                    return stats
+
+                # Schema-only mode: exit after a successful schema setup.
                 if schema_only:
-                    if failed_files:
-                        logger.error(
-                            f"\n❌ Schema setup failed! "
-                            f"{len(failed_files)} file(s) had errors:"
-                        )
-                        for fname in failed_files:
-                            logger.error(f"   - {fname}")
-                        stats["success"] = False
-                        stats["failed_files"] = failed_files
-                        return stats
-                    else:
-                        stats["success"] = True
-                        logger.info("\n✅ Schema setup complete!")
-                        return stats
+                    stats["success"] = True
+                    logger.info("\n✅ Schema setup complete!")
+                    return stats
 
             # If load_only or skip_all_downloads, just load existing CSV data
             if load_only or skip_all_downloads:

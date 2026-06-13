@@ -62,11 +62,20 @@ class PolygonS3Client:
         Uses exponential backoff for transient failures.
         Does not retry on 404 (no data for that day).
 
+        A 404 means there is no file for that date (weekend/holiday/not yet
+        available) and yields None. A 403, in contrast, indicates a
+        credentials/entitlement problem: the bucket is reachable but access is
+        denied. Treating 403 as "no data" would let a misconfigured coldstart
+        silently produce an empty history, so we fail fast with a clear error.
+
         Args:
             target_date: Date to download
 
         Returns:
             Path to temp file, or None if no data (weekend/holiday)
+
+        Raises:
+            PermissionError: On HTTP 403 (bad/insufficient S3 credentials).
         """
         date_str = target_date.strftime(DATE_FORMAT)
         key = S3_KEY_TEMPLATE.format(
@@ -85,7 +94,16 @@ class PolygonS3Client:
                     return tmp.name
             except ClientError as e:
                 error_code = e.response.get("Error", {}).get("Code")
-                if error_code in ("404", "403"):
+                if error_code in ("403", "AccessDenied"):
+                    # Credentials/entitlement problem, not a missing day. Fail
+                    # fast so a bad-credential coldstart doesn't silently produce
+                    # an empty history.
+                    raise PermissionError(
+                        f"S3 access denied (403) for s3://{S3_BUCKET}/{key}. "
+                        "Check POLYGON_S3_ACCESS_KEY / POLYGON_S3_SECRET_KEY and "
+                        "flat-file entitlements."
+                    ) from e
+                if error_code == "404":
                     # No data for this date (weekend/holiday/not yet available) - don't retry
                     return None
                 if error_code in ("500", "502", "503", "504", "SlowDown"):
