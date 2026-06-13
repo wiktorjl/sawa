@@ -354,6 +354,29 @@ def run_weekly(
             )
             stats["character"] = character_stats
 
+        # Maintenance: refresh the MCP execute_query insights cache. Nothing else
+        # regenerates it, so the "agents reaching for raw SQL where a tool exists"
+        # signal would otherwise go stale. Non-fatal.
+        try:
+            from sawa.mcp_query_insights import analyze_query_log
+
+            insights = analyze_query_log()
+            summary = insights.get("summary", {})
+            stats["mcp_query_insights"] = {
+                "total": summary.get("total_queries"),
+                "recent": summary.get("recent_queries"),
+            }
+            logger.info(
+                f"\nRefreshed MCP query insights: {summary.get('total_queries', 0)} "
+                f"custom queries total, {summary.get('recent_queries', 0)} in the "
+                f"last {summary.get('window_days', 7)} days"
+            )
+            if summary.get("warning"):
+                logger.warning(f"  {summary['warning']}")
+        except Exception as e:
+            logger.warning(f"MCP query insights refresh failed: {e}")
+            stats["mcp_query_insights_error"] = str(e)
+
         stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info("WEEKLY UPDATE COMPLETE")
