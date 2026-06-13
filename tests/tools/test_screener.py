@@ -149,3 +149,66 @@ def test_get_52week_extremes_uses_latest_available_snapshot(monkeypatch) -> None
     assert "latest_52w" in query_repr
     assert "latest_ratios" in query_repr
     assert "NULLIF(e.high_52w, 0)" in query_repr
+
+
+def _invalid_placeholders(text: str) -> list[str]:
+    """Return any bare '%' that is not a valid psycopg placeholder.
+
+    psycopg's client-side parsing only accepts %s, %b, %t, %(name)s, or an
+    escaped %%. A stray '%' (e.g. inside a SQL comment) raises at execute time
+    but is invisible to mocked tests, so check the composed SQL statically.
+    """
+    bad: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "%":
+            nxt = text[i + 1 : i + 2]
+            if nxt == "%":
+                i += 2
+                continue
+            if nxt not in ("s", "b", "t", "("):
+                bad.append(text[i : i + 6])
+        i += 1
+    return bad
+
+
+def test_detect_crossovers_forward_fills_live_sma(monkeypatch) -> None:
+    """Same-day crosses must survive. The live (today) row has no
+    technical_indicators row yet (TA is computed EOD), so the query LEFT JOINs
+    and carries the latest EOD SMA forward instead of inner-joining the row
+    away. Also guards against a stray '%' in the composed SQL: that raises
+    server-side via psycopg placeholder parsing but passes a mocked execute."""
+    captured: dict[str, Any] = {}
+
+    def fake_execute_query(
+        query: str | sql.Composable,
+        params: dict[str, Any] | None = None,
+        validate: bool = True,
+    ) -> list[dict[str, Any]]:
+        if isinstance(query, str) and "SELECT DISTINCT date" in query:
+            return [{"date": date(2026, 6, day)} for day in (11, 10, 9, 8, 5, 4)]
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(screener, "execute_query", fake_execute_query)
+    monkeypatch.setattr(screener, "get_price_date_refs", lambda: dict(FAKE_DATE_REFS))
+
+    result = screener.detect_crossovers(sma_period=50, lookback_days=5)
+    assert result == []
+
+    rendered = captured["query"].as_string(None)
+
+    # Live row is retained (LEFT JOIN) and its missing SMA is forward-filled.
+    assert "LEFT JOIN technical_indicators" in rendered
+    assert "COALESCE(" in rendered
+    assert 'LAG(ti."sma_50")' in rendered
+    # Positivity guards moved out to act on the forward-filled value.
+    assert "sma_value > 0" in rendered
+    assert "prev_sma > 0" in rendered
+    # The old guard that excluded the live row must be gone.
+    assert "ti.date = ANY" not in rendered
+
+    # Regression: a stray '%' (the kind that hid in a SQL comment) would make
+    # psycopg reject the statement at execute time.
+    assert _invalid_placeholders(rendered) == []

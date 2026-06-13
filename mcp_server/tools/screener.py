@@ -571,6 +571,18 @@ def detect_crossovers(
         List of stocks with crossover details:
         - ticker, name, sector, price, sma_value, crossover_date
         - volume_ratio, change_since_crossover
+
+    Notes:
+        SMA values are computed end-of-day. During a live session the current
+        day's row has no SMA yet, so the most recent EOD SMA is carried forward
+        as a proxy, letting a same-day cross be detected against it. Two
+        consequences:
+        - A same-day cross has no volume_ratio yet (relative volume needs a full
+          session), so passing min_volume_ratio excludes today's crossovers
+          until the EOD job runs.
+        - If the EOD TA job is mid-run and the prior day is also missing an SMA,
+          today falls back to no proxy and is skipped (no false signal) rather
+          than reaching further back.
     """
     limit = min(limit, 200)
 
@@ -632,16 +644,24 @@ def detect_crossovers(
                 sp.ticker,
                 sp.date,
                 sp.close,
-                ti.{sma_col} as sma_value,
+                -- Today's intraday row exists in the live view but has no
+                -- technical_indicators row yet (TA is computed EOD). Carry the
+                -- latest EOD SMA forward one step so a cross happening *today*
+                -- is still detectable; the SMA line barely shifts day to day
+                -- for the 150/200 windows, so yesterday's value is a sound
+                -- proxy until the EOD job runs. Only the live row can be
+                -- missing, so a single LAG step fully fills the gap.
+                COALESCE(
+                    ti.{sma_col},
+                    LAG(ti.{sma_col}) OVER (PARTITION BY sp.ticker ORDER BY sp.date)
+                ) as sma_value,
                 LAG(sp.close) OVER (PARTITION BY sp.ticker ORDER BY sp.date) as prev_close,
                 LAG(ti.{sma_col}) OVER (PARTITION BY sp.ticker ORDER BY sp.date) as prev_sma,
                 ti.volume_ratio
             FROM stock_prices_live sp
-            JOIN technical_indicators ti ON sp.ticker = ti.ticker AND sp.date = ti.date
+            LEFT JOIN technical_indicators ti
+                ON sp.ticker = ti.ticker AND sp.date = ti.date
             WHERE sp.date = ANY(%(recent_dates)s)
-              AND ti.date = ANY(%(recent_dates)s)
-              AND ti.{sma_col} IS NOT NULL
-              AND ti.{sma_col} > 0
         ),
         crossovers AS (
             SELECT
@@ -656,6 +676,9 @@ def detect_crossovers(
             FROM crossover_data
             WHERE prev_close IS NOT NULL
               AND prev_sma IS NOT NULL
+              AND sma_value IS NOT NULL
+              AND sma_value > 0
+              AND prev_sma > 0
               AND {cross_condition}
         )
         SELECT
