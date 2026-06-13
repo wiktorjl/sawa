@@ -93,6 +93,15 @@ class BoxChars:
 class Theme(ABC):
     """Abstract base class for chart themes."""
 
+    def __init__(self, colors_enabled: bool = True) -> None:
+        """
+        Args:
+            colors_enabled: When False, colorize/rgb_to_ansi/reset emit no ANSI
+                escape codes (honors NO_COLOR). Symbols and box chars are
+                unaffected.
+        """
+        self.colors_enabled = colors_enabled
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -126,14 +135,18 @@ class Theme(ABC):
             foreground: If True, returns foreground color; otherwise background
 
         Returns:
-            ANSI escape sequence
+            ANSI escape sequence (empty string when colors are disabled)
         """
+        if not self.colors_enabled:
+            return ""
         r, g, b = rgb
         code = 38 if foreground else 48
         return f"\033[{code};2;{r};{g};{b}m"
 
     def reset(self) -> str:
-        """Get ANSI reset code."""
+        """Get ANSI reset code (empty string when colors are disabled)."""
+        if not self.colors_enabled:
+            return ""
         return "\033[0m"
 
     def colorize(
@@ -151,8 +164,11 @@ class Theme(ABC):
             bold: Whether to make text bold
 
         Returns:
-            Colorized text with ANSI codes
+            Colorized text with ANSI codes, or the plain text when colors are
+            disabled
         """
+        if not self.colors_enabled:
+            return text
         codes = []
         if bold:
             codes.append("\033[1m")

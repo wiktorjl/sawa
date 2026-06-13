@@ -240,6 +240,36 @@ def _price_checks(
             expected="> 0",
         )
     ]
+
+    # Completeness of the companies dimension itself. Heavy NULL population in
+    # sic_code/market_cap silently degrades sector bucketing and market-cap
+    # sorted tools, and was previously unmonitored.
+    if active_count > 0:
+        total, null_sic, null_mcap = _fetchone(
+            conn,
+            """
+            SELECT COUNT(*),
+                   COUNT(*) FILTER (WHERE sic_code IS NULL),
+                   COUNT(*) FILTER (WHERE market_cap IS NULL)
+            FROM companies
+            WHERE active = true
+            """,
+        )
+        total = int(total or 0)
+        if total > 0:
+            sic_frac = int(null_sic or 0) / total
+            mcap_frac = int(null_mcap or 0) / total
+            checks.append(
+                _check(
+                    "companies.attribute_completeness",
+                    sic_frac <= 0.30 and mcap_frac <= 0.30,
+                    f"active companies missing sic_code={null_sic or 0}/{total} "
+                    f"({sic_frac:.0%}), market_cap={null_mcap or 0}/{total} ({mcap_frac:.0%})",
+                    severity="warn",
+                    observed=f"sic_null={sic_frac:.0%}, mcap_null={mcap_frac:.0%}",
+                    expected="<= 30% NULL on each",
+                )
+            )
     checks.append(
         _check(
             "stock_prices.expected_universe",
@@ -369,14 +399,17 @@ def _daily_checks(
             FROM technical_indicators
             """,
         )
+        # TA is recomputed by every daily run, so chronic staleness/coverage
+        # loss is a real failure the scheduler should catch and retry — not a
+        # silent WARN. Threshold allows for a long weekend.
         checks.append(
             _check(
                 "technical_indicators.latest_date",
-                _within_days(latest_ta, today, 10),
+                _within_days(latest_ta, today, 4),
                 f"latest technical_indicators date is {latest_ta}",
-                severity="warn",
+                severity="fail",
                 observed=latest_ta,
-                expected=f"within 10 days of {today}",
+                expected=f"within 4 days of {today}",
             )
         )
         checks.append(
@@ -384,7 +417,7 @@ def _daily_checks(
                 "technical_indicators.coverage",
                 _coverage_ok(int(ta_tickers or 0), active_count, min_coverage),
                 f"technical_indicators covers {ta_tickers or 0}/{active_count} active tickers",
-                severity="warn",
+                severity="fail",
                 observed=int(ta_tickers or 0),
                 expected=f">= {min_coverage:.0%} of active companies",
             )
@@ -392,14 +425,16 @@ def _daily_checks(
 
     if _table_exists(conn, "market_internals"):
         latest_market = _fetchone(conn, "SELECT MAX(date) FROM market_internals")[0]
+        # Refreshed by every daily run (FRED + same-day CBOE); promote to FAIL
+        # so a silently-skipped internals step is caught and retried.
         checks.append(
             _check(
                 "market_internals.latest_date",
-                _within_days(latest_market, today, 14),
+                _within_days(latest_market, today, 5),
                 f"latest market_internals date is {latest_market}",
-                severity="warn",
+                severity="fail",
                 observed=latest_market,
-                expected=f"within 14 days of {today}",
+                expected=f"within 5 days of {today}",
             )
         )
 
@@ -456,8 +491,12 @@ def _weekly_checks(
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
 
+    # treasury_yields is a daily-cadence series but currently refreshed only by
+    # the weekly job, so it can lag up to a week. Threshold tightened from 21 to
+    # 8 days so a *missed* weekly run (which would push it past a week) is
+    # surfaced instead of hidden. (Follow-up: move it to the daily refresh.)
     economy_thresholds = {
-        "treasury_yields": 21,
+        "treasury_yields": 8,
         "inflation": 120,
         "inflation_expectations": 120,
         "labor_market": 120,

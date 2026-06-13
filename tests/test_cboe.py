@@ -64,6 +64,28 @@ class TestCboeClient:
 
         assert rows == [{"date": "2026-06-10", "vix3m": 22.89}]
 
+    def test_mismatched_trade_dates_merge_into_one_row(self) -> None:
+        """If the two feeds disagree on the trade date, both fields still land
+        on a single row keyed by the later settlement date."""
+        client = CboeClient()
+        with patch.object(client.client, "get") as mock_get:
+            mock_get.side_effect = [
+                _ok_response(_quote_payload("_VIX", 22.22, "2026-06-09T16:15:01")),
+                _ok_response(_quote_payload("_VIX3M", 22.89, "2026-06-10T16:15:01")),
+            ]
+            rows = client.get_market_internals()
+
+        assert rows == [{"date": "2026-06-10", "vix": 22.22, "vix3m": 22.89}]
+
+    def test_both_symbols_failing_returns_empty(self) -> None:
+        client = CboeClient()
+        with patch.object(client.client, "get") as mock_get:
+            mock_get.side_effect = [
+                httpx.ReadTimeout("timed out"),
+                httpx.ReadTimeout("timed out"),
+            ]
+            assert client.get_market_internals() == []
+
 
 class TestMergeCboeInternals:
     def test_appends_same_day_row_fred_lacks(self) -> None:

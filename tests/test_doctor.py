@@ -43,10 +43,14 @@ class FakeConnection:
         recent_baseline_tickers: int = 100,
         bad_latest_rows: int = 0,
         latest_news: datetime | None = None,
+        null_sic: int = 0,
+        null_mcap: int = 0,
     ) -> None:
         self.queries: list[str] = []
         self.tables = tables
         self.active_count = active_count
+        self.null_sic = null_sic
+        self.null_mcap = null_mcap
         self.latest_price_date = latest_price_date
         self.price_tickers = price_tickers
         self.price_rows = price_rows
@@ -66,6 +70,9 @@ class FakeConnection:
         if "to_regclass" in compact:
             table = str(params[0]).removeprefix("public.")
             return (table if table in self.tables else None,)
+
+        if "FILTER (WHERE sic_code IS NULL)" in compact:
+            return (self.active_count, self.null_sic, self.null_mcap)
 
         if "COUNT(*) FROM companies WHERE active = true" in compact:
             return (self.active_count,)

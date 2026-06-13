@@ -23,7 +23,7 @@ Sawa has two halves that share a single PostgreSQL database:
 ```
 ┌──────────────────────────┐        ┌──────────────────────────────┐
 │   sawa CLI (data ETL)    │        │  stock-data MCP server       │
-│   - coldstart / daily /  │  ───>  │  - 60+ MCP tools for AI      │
+│   - coldstart / daily /  │  ───>  │  - 55 MCP tools for AI       │
 │     weekly / quarterly   │   DB   │    clients (Claude, etc.)    │
 │   - intraday WebSocket   │        │  - read-only queries + views │
 └──────────────────────────┘        └──────────────────────────────┘
@@ -69,9 +69,9 @@ Full bootstrap. Does these things in order:
    - `data/economy/*.csv`
    - `data/economy/market_internals.csv` (FRED — needs `FRED_API_KEY`)
    - News articles (last 30 days)
-5. Load each CSV into PostgreSQL via `sawa/database/load.py` (upserts)
-6. Mirror VIX rows from `market_internals` into `stock_prices` for chart
-   tooling (`mirror_vix_to_stock_prices`)
+5. Load each CSV into PostgreSQL via `sawa/database/load.py` (upserts).
+   VIX/VIX3M land only in `market_internals` (sole source since commit
+   `2d4e350`); they are no longer mirrored into `stock_prices`.
 
 Flags worth remembering:
 - `--no-drop` — re-apply schema without losing data (safe upgrade path
@@ -92,16 +92,19 @@ Runs after market close. Steps:
 4. Fetch news (`fetch_and_load_news`) — last `DEFAULT_NEWS_DAYS` of articles
 5. Recompute technical indicators incrementally
    (`sawa/database/ta_load.py`)
-6. Pull FRED market internals → `market_internals` table, mirror VIX into
-   `stock_prices`
+6. Pull FRED market internals → `market_internals` table (VIX/VIX3M/HY
+   spread live only here; not mirrored into `stock_prices`)
 
 Skips: `--skip-news`, `--skip-ta`, `--skip-market-internals`,
 `--news-only`. `--from-date YYYY-MM-DD` replays from a date forward.
 
-Missing API keys (Polygon or FRED) trigger `alert_missing_api_key` — the
-relevant step is skipped, a notification is sent if `NTFY_TOPIC` is set,
-and the overall job still exits 0 for the other steps. (See
-`b59f8a6 feat: alert on missing API keys, deprecate Polygon VIX path`.)
+A missing `POLYGON_API_KEY` is fatal: `daily` logs an error and exits
+non-zero before doing any work (Polygon underpins prices, news, and TA).
+A missing `FRED_API_KEY` is not fatal: it triggers `alert_missing_api_key`
+— the market-internals step is skipped, an ntfy notification is sent if
+`NTFY_TOPIC` is set, and the overall job still exits 0 for the other
+steps. (See `b59f8a6 feat: alert on missing API keys, deprecate Polygon
+VIX path`.)
 
 ### `sawa weekly` → `sawa/weekly.py`
 
@@ -283,10 +286,13 @@ data/
 
 `data/` is the working directory for ETL output. The pipeline always
 re-reads from PostgreSQL — these CSVs are intermediate caches, safe to
-delete and regenerate. The exception is `data/nasdaq1000_symbols.txt`,
-which is the **source of truth** for the NASDAQ universe and is also
+delete and regenerate. `data/nasdaq1000_symbols.txt` is special: it is
 shipped inside the installed wheel (see
-`[tool.hatch.build.targets.wheel.force-include]` in `pyproject.toml`).
+`[tool.hatch.build.targets.wheel.force-include]` in `pyproject.toml`), but
+it is only a **fallback**. `sawa/utils/symbols.py::fetch_nasdaq_listed_symbols`
+fetches the NASDAQ-listed universe live from Polygon as its primary source
+and reads this bundled 2021-era snapshot only when the Polygon path is
+unreachable.
 
 ## 7. Environment variables
 

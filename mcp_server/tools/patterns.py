@@ -412,14 +412,22 @@ def detect_candlestick_patterns(
     end_date = date.today()
     start_date = end_date - timedelta(days=int(lookback_days * 1.6))
 
+    # Take the most-recent `limit` candles in the window (inner DESC + LIMIT),
+    # then re-order ascending for the chronological pattern scan. A bare
+    # "ORDER BY date ASC LIMIT N" would keep the OLDEST N and drop the recent
+    # data the analysis window actually needs.
     query = """
         SELECT date, open, high, low, close, volume
-        FROM stock_prices
-        WHERE ticker = %(ticker)s
-            AND date >= %(start_date)s
-            AND date <= %(end_date)s
+        FROM (
+            SELECT date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = %(ticker)s
+                AND date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {
@@ -1101,14 +1109,22 @@ def detect_chart_patterns(
     end_date = date.today()
     start_date = end_date - timedelta(days=int(lookback_days * 1.6))
 
+    # Take the most-recent `limit` candles in the window (inner DESC + LIMIT),
+    # then re-order ascending for the chronological pattern scan. A bare
+    # "ORDER BY date ASC LIMIT N" would keep the OLDEST N and drop the recent
+    # data the analysis window actually needs.
     query = """
         SELECT date, open, high, low, close, volume
-        FROM stock_prices
-        WHERE ticker = %(ticker)s
-            AND date >= %(start_date)s
-            AND date <= %(end_date)s
+        FROM (
+            SELECT date, open, high, low, close, volume
+            FROM stock_prices
+            WHERE ticker = %(ticker)s
+                AND date >= %(start_date)s
+                AND date <= %(end_date)s
+            ORDER BY date DESC
+            LIMIT %(limit)s
+        ) recent
         ORDER BY date ASC
-        LIMIT %(limit)s
     """
 
     params = {

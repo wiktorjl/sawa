@@ -42,18 +42,24 @@ def load_splits(
             split_to = EXCLUDED.split_to
     """
 
+    loaded = 0
     with conn.cursor() as cur:
         for split in splits:
             try:
+                cur.execute("SAVEPOINT row_insert")
                 cur.execute(insert_sql, split.to_tuple())
+                cur.execute("RELEASE SAVEPOINT row_insert")
+                loaded += 1
             except psycopg.errors.ForeignKeyViolation:
-                # Skip splits for tickers not in companies table
-                conn.rollback()
+                # Skip splits for tickers not in companies table. Roll back only
+                # this row's savepoint so prior inserts in the batch survive.
+                cur.execute("ROLLBACK TO SAVEPOINT row_insert")
+                cur.execute("RELEASE SAVEPOINT row_insert")
                 logger.debug(f"Skipping split for unknown ticker: {split.ticker}")
                 continue
 
     conn.commit()
-    return len(splits)
+    return loaded
 
 
 def load_dividends(
@@ -83,11 +89,15 @@ def load_dividends(
     with conn.cursor() as cur:
         for div in dividends:
             try:
+                cur.execute("SAVEPOINT row_insert")
                 cur.execute(insert_sql, div.to_tuple())
+                cur.execute("RELEASE SAVEPOINT row_insert")
                 loaded += 1
             except psycopg.errors.ForeignKeyViolation:
-                # Skip dividends for tickers not in companies table
-                conn.rollback()
+                # Skip dividends for tickers not in companies table. Roll back
+                # only this row's savepoint so prior inserts survive.
+                cur.execute("ROLLBACK TO SAVEPOINT row_insert")
+                cur.execute("RELEASE SAVEPOINT row_insert")
                 logger.debug(f"Skipping dividend for unknown ticker: {div.ticker}")
                 continue
 
@@ -127,10 +137,14 @@ def load_earnings(
                 logger.debug(f"Skipping earnings without fiscal period: {earn.ticker}")
                 continue
             try:
+                cur.execute("SAVEPOINT row_insert")
                 cur.execute(insert_sql, earn.to_tuple())
+                cur.execute("RELEASE SAVEPOINT row_insert")
                 loaded += 1
             except psycopg.errors.ForeignKeyViolation:
-                conn.rollback()
+                # Roll back only this row's savepoint so prior inserts survive.
+                cur.execute("ROLLBACK TO SAVEPOINT row_insert")
+                cur.execute("RELEASE SAVEPOINT row_insert")
                 logger.debug(f"Skipping earnings for unknown ticker: {earn.ticker}")
                 continue
 

@@ -145,16 +145,21 @@ def fetch_and_load_news(
 
     log.info(f"Fetched {len(articles)} articles")
 
-    # Load each article
+    # Load each article. Wrap each in a SAVEPOINT so a single bad article rolls
+    # back only its own writes, not every article already inserted in this batch.
     loaded = 0
-    for article in articles:
-        try:
-            load_news_article(conn, article)
-            loaded += 1
-        except psycopg.Error as e:
-            log.warning(f"Failed to load article {article.get('id')}: {e}")
-            conn.rollback()
-            continue
+    with conn.cursor() as sp_cur:
+        for article in articles:
+            try:
+                sp_cur.execute("SAVEPOINT article_insert")
+                load_news_article(conn, article)
+                sp_cur.execute("RELEASE SAVEPOINT article_insert")
+                loaded += 1
+            except psycopg.Error as e:
+                log.warning(f"Failed to load article {article.get('id')}: {e}")
+                sp_cur.execute("ROLLBACK TO SAVEPOINT article_insert")
+                sp_cur.execute("RELEASE SAVEPOINT article_insert")
+                continue
 
     conn.commit()
     log.info(f"Loaded {loaded} articles")

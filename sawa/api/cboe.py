@@ -71,14 +71,21 @@ class CboeClient:
 
     def get_market_internals(self) -> list[dict[str, Any]]:
         """
-        Fetch latest VIX/VIX3M settlement values, merged by date.
+        Fetch latest VIX/VIX3M settlement values as a single same-session row.
+
+        VIX and VIX3M settle together, so a same-session pull is one logical
+        "today" row carrying both fields. We collect both quotes first, then
+        merge them onto one settlement date — the latest reported trade date —
+        rather than keying each quote by its own last_trade_time. Otherwise, if
+        the two feeds momentarily disagree on the date, we'd emit two partial
+        single-field rows instead of one complete row.
 
         Returns:
             List of dicts with keys: date, vix, vix3m (no hy_spread —
             CBOE does not carry credit spreads). Usually a single row;
             empty if both quotes failed.
         """
-        by_date: dict[str, dict[str, Any]] = {}
+        quotes: list[tuple[str, dict[str, Any]]] = []
         for symbol, field in SYMBOLS.items():
             try:
                 quote = self.get_quote(symbol)
@@ -87,10 +94,19 @@ class CboeClient:
                 continue
             if quote is None:
                 continue
-            row = by_date.setdefault(quote["date"], {"date": quote["date"]})
-            row[field] = quote["close"]
+            quotes.append((field, quote))
             self.logger.info(
                 f"  CBOE {symbol}: {quote['close']} ({quote['date']})"
             )
 
-        return [by_date[dt] for dt in sorted(by_date)]
+        if not quotes:
+            return []
+
+        # One settlement date for the whole row: the latest trade date reported
+        # by either feed. When both agree (the normal case) this is that date.
+        settlement_date = max(q["date"] for _, q in quotes)
+        row: dict[str, Any] = {"date": settlement_date}
+        for field, quote in quotes:
+            row[field] = quote["close"]
+
+        return [row]

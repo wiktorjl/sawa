@@ -78,15 +78,21 @@ class PolygonClient:
         params: dict[str, Any] | None = None,
         path_params: dict[str, str] | None = None,
         timeout: int = DEFAULT_HTTP_TIMEOUT,
+        max_retries: int = 3,
     ) -> dict[str, Any]:
         """
         Make GET request to API.
+
+        Retries transient failures (timeouts/connection drops, HTTP 429
+        rate limits, and 5xx server errors) with backoff, matching
+        get_single's retry style.
 
         Args:
             endpoint: Endpoint key from ENDPOINTS or full path
             params: Query parameters
             path_params: URL path parameters (e.g., {ticker})
             timeout: Request timeout
+            max_retries: Retry attempts for transient failures
 
         Returns:
             JSON response data
@@ -100,15 +106,49 @@ class PolygonClient:
         params["apiKey"] = self.api_key
 
         self.logger.debug(f"GET {url}")
-        response = self.client.get(url, params=params, timeout=timeout)
-        response.raise_for_status()
 
-        data = cast(dict[str, Any], response.json())
-        if data.get("status") not in ("OK", "DELAYED"):
-            error = data.get("error", data.get("message", "Unknown error"))
-            raise ProviderError(f"API error: {error}", provider="polygon")
+        for attempt in range(max_retries):
+            try:
+                response = self.client.get(url, params=params, timeout=timeout)
 
-        return data
+                if response.status_code == 429:
+                    wait = (attempt + 1) * 2
+                    self.logger.warning(f"Rate limited. Waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+
+                response.raise_for_status()
+                data = cast(dict[str, Any], response.json())
+                if data.get("status") not in ("OK", "DELAYED"):
+                    error = data.get("error", data.get("message", "Unknown error"))
+                    raise ProviderError(f"API error: {error}", provider="polygon")
+
+                return data
+
+            except httpx.RequestError as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Request failed: {e}. Retrying...")
+                    time.sleep(1)
+                else:
+                    raise
+            except httpx.HTTPStatusError as e:
+                # Retry on transient 5xx; surface other 4xx/5xx as ProviderError.
+                if e.response.status_code >= 500 and attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"HTTP {e.response.status_code}: {e}. Retrying..."
+                    )
+                    time.sleep(1)
+                    continue
+                raise ProviderError(
+                    f"HTTP {e.response.status_code}: {e}",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
+
+        # All attempts exhausted on 429s without returning.
+        raise ProviderError(
+            f"Rate limited after {max_retries} attempts", provider="polygon"
+        )
 
     def get_paginated(
         self,
@@ -172,6 +212,17 @@ class PolygonClient:
                         time.sleep(wait)
                     else:
                         raise
+                except httpx.HTTPStatusError as e:
+                    # raise_for_status() raised on a non-429 4xx/5xx. This is NOT
+                    # a subclass of RequestError, so without this branch it would
+                    # escape as an uncaught httpx.HTTPStatusError (callers such as
+                    # the daily news path only catch RequestError/ProviderError).
+                    # Surface it as a domain ProviderError they already handle.
+                    raise ProviderError(
+                        f"HTTP {e.response.status_code} on page {page}: {e}",
+                        provider="polygon",
+                        original_error=e,
+                    ) from e
             else:
                 # All attempts exhausted on 429s without ever breaking out.
                 raise ProviderError(

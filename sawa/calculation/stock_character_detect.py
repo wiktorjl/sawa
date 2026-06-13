@@ -15,6 +15,7 @@ from datetime import date
 import numpy as np
 
 from sawa.calculation.stock_character import _extract_ohlcv_arrays, _to_decimal
+from sawa.calculation.stock_character_baseline import compute_recent_atr
 from sawa.calculation.stock_character_config import (
     COMPRESSION_RATIO,
     DECORRELATION_STDDEV,
@@ -69,26 +70,6 @@ def _percentileofscore(arr: np.ndarray, score: float) -> float:
     if len(arr) == 0:
         return 0.0
     return float(np.sum(arr <= score) / len(arr) * 100.0)
-
-
-def _compute_recent_atr(
-    high: np.ndarray,
-    low: np.ndarray,
-    close: np.ndarray,
-) -> float:
-    """Return the mean true-range over the most recent RECENT_WINDOW_DAYS bars."""
-    recent_high = high[-RECENT_WINDOW_DAYS:]
-    recent_low = low[-RECENT_WINDOW_DAYS:]
-    prev_close = close[-(RECENT_WINDOW_DAYS + 1) : -1]
-
-    tr = np.maximum(
-        recent_high - recent_low,
-        np.maximum(
-            np.abs(recent_high - prev_close),
-            np.abs(recent_low - prev_close),
-        ),
-    )
-    return float(np.mean(tr))
 
 
 def _align_returns_by_date(
@@ -451,7 +432,11 @@ def detect_flags(
             logger.info("%s: non-positive current price", ticker)
             return []
 
-        recent_atr = _compute_recent_atr(high, low, close)
+        recent_atr = compute_recent_atr(high, low, close, RECENT_WINDOW_DAYS)
+        if recent_atr is None:
+            # All recent true ranges were NaN: keep NaN so atr_ratio comparisons
+            # are False and no COMPRESSION/EXPANSION/VOL_SPIKE flag fires.
+            recent_atr = float("nan")
 
         flags: list[CharacterFlag] = []
         character = classification.character

@@ -24,6 +24,16 @@ def _rate_limited() -> MagicMock:
     return resp
 
 
+def _http_error(status_code: int) -> MagicMock:
+    """Response whose raise_for_status() raises HTTPStatusError (non-429)."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        f"{status_code}", request=MagicMock(), response=resp
+    )
+    return resp
+
+
 class TestGetPaginatedRetry:
     """get_paginated must retry transient failures per page (mirrors get_single)."""
 
@@ -92,3 +102,67 @@ class TestGetPaginatedRetry:
 
         assert results == [{"id": "a"}, {"id": "b"}]
         assert mock_get.call_count == 4
+
+    def test_http_status_error_becomes_provider_error(self) -> None:
+        """A non-429 4xx/5xx must surface as ProviderError (callers catch that),
+        not escape as an uncaught httpx.HTTPStatusError."""
+        client = PolygonClient("test-key")
+
+        with patch.object(client.client, "get") as mock_get, patch("time.sleep"):
+            mock_get.return_value = _http_error(404)
+            with pytest.raises(ProviderError):
+                client.get_paginated("news", {"limit": 10})
+
+
+class TestGetRetry:
+    """get() (single-GET aggregates path) must retry transient failures."""
+
+    def test_retries_on_request_error_then_succeeds(self) -> None:
+        client = PolygonClient("test-key")
+        ok = _ok_response({"status": "OK", "results": []})
+
+        with patch.object(client.client, "get") as mock_get, patch("time.sleep"):
+            mock_get.side_effect = [httpx.ReadTimeout("timed out"), ok]
+            data = client.get("aggregates", path_params={"ticker": "AAPL", "start": "x", "end": "y"})
+
+        assert data == {"status": "OK", "results": []}
+        assert mock_get.call_count == 2
+
+    def test_retries_on_429_then_succeeds(self) -> None:
+        client = PolygonClient("test-key")
+        ok = _ok_response({"status": "OK", "results": []})
+
+        with patch.object(client.client, "get") as mock_get, patch("time.sleep"):
+            mock_get.side_effect = [_rate_limited(), ok]
+            data = client.get("aggregates", path_params={"ticker": "AAPL", "start": "x", "end": "y"})
+
+        assert data == {"status": "OK", "results": []}
+        assert mock_get.call_count == 2
+
+    def test_retries_on_5xx_then_raises_provider_error(self) -> None:
+        client = PolygonClient("test-key")
+
+        with patch.object(client.client, "get") as mock_get, patch("time.sleep"):
+            mock_get.return_value = _http_error(503)
+            with pytest.raises(ProviderError):
+                client.get(
+                    "aggregates",
+                    path_params={"ticker": "AAPL", "start": "x", "end": "y"},
+                    max_retries=2,
+                )
+
+        assert mock_get.call_count == 2
+
+    def test_4xx_raises_provider_error_without_retry(self) -> None:
+        client = PolygonClient("test-key")
+
+        with patch.object(client.client, "get") as mock_get, patch("time.sleep"):
+            mock_get.return_value = _http_error(400)
+            with pytest.raises(ProviderError):
+                client.get(
+                    "aggregates",
+                    path_params={"ticker": "AAPL", "start": "x", "end": "y"},
+                )
+
+        # 4xx is not retried.
+        assert mock_get.call_count == 1

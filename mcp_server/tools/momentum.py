@@ -403,25 +403,13 @@ def get_momentum_indicators(
                          / (plus_dm_smooth + minus_dm_smooth) * 100
                     ELSE NULL
                 END AS dx,
-                -- Stochastic %K (smoothed with D period SMA)
-                ROUND(
-                    AVG(stoch_k_raw) OVER (
-                        ORDER BY date
-                        ROWS BETWEEN %(stoch_d)s PRECEDING AND CURRENT ROW
-                    )::numeric, 2
-                ) AS stoch_k,
-                -- Stochastic %D (SMA of %K)
-                ROUND(
-                    AVG(
-                        AVG(stoch_k_raw) OVER (
-                            ORDER BY date
-                            ROWS BETWEEN %(stoch_d)s PRECEDING AND CURRENT ROW
-                        )
-                    ) OVER (
-                        ORDER BY date
-                        ROWS BETWEEN %(stoch_d)s PRECEDING AND CURRENT ROW
-                    )::numeric, 2
-                ) AS stoch_d,
+                -- Stochastic %K (smoothed with D period SMA). %D is a moving
+                -- average of %K, computed in the next CTE: PostgreSQL forbids
+                -- nesting one window aggregate inside another.
+                AVG(stoch_k_raw) OVER (
+                    ORDER BY date
+                    ROWS BETWEEN %(stoch_d)s PRECEDING AND CURRENT ROW
+                ) AS stoch_k_smooth,
                 -- Williams %R
                 ROUND(williams_r::numeric, 2) AS williams_r,
                 -- ROC
@@ -443,8 +431,15 @@ def get_momentum_indicators(
                     ROWS BETWEEN %(adx_period)s PRECEDING AND CURRENT ROW
                 )::numeric, 2
             ) AS adx,
-            stoch_k,
-            stoch_d,
+            -- Stochastic %K
+            ROUND(stoch_k_smooth::numeric, 2) AS stoch_k,
+            -- Stochastic %D (SMA of %K, computed over the already-smoothed %K)
+            ROUND(
+                AVG(stoch_k_smooth) OVER (
+                    ORDER BY date
+                    ROWS BETWEEN %(stoch_d)s PRECEDING AND CURRENT ROW
+                )::numeric, 2
+            ) AS stoch_d,
             williams_r,
             roc
         FROM indicators

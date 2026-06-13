@@ -38,7 +38,7 @@ def render_price_chart(
     if layout is None:
         layout = get_layout()
     if theme is None:
-        theme = get_theme()
+        theme = get_theme(colors_enabled=layout.colors_enabled)
 
     # Extract data - filter out None values
     dates = [d.get("date") for d in data]

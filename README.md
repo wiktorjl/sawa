@@ -52,7 +52,7 @@ Sawa has two parts:
 
 1. **Data pipeline** (`sawa` CLI) -- Downloads market data from [Polygon.io](https://polygon.io/) into PostgreSQL and keeps it current with daily/weekly/quarterly update jobs.
 
-2. **MCP server** (`stock-data-mcp-server`) -- Exposes 60+ specialized tools that AI assistants call to answer your questions. The AI picks the right tool, passes the right parameters, and interprets the results for you.
+2. **MCP server** (`stock-data-mcp-server`) -- Exposes 55 specialized tools that AI assistants call to answer your questions. The AI picks the right tool, passes the right parameters, and interprets the results for you.
 
 The MCP server doesn't just run raw SQL. It provides structured tools for common analysis patterns -- screeners, technical indicators, chart pattern detection, support/resistance levels, earnings calendars, sector comparisons -- so the AI can answer complex questions in a single step instead of piecing together multiple queries.
 
@@ -282,7 +282,7 @@ sawa/                        # Core data pipeline package
   weekly.py, quarterly.py
 mcp_server/                  # MCP server package
   charts/                    # Unicode chart rendering (plotext)
-  tools/                     # 60+ MCP tool implementations
+  tools/                     # 55 MCP tool implementations
   services/                  # Service layer and domain converters
 sqlschema/                   # PostgreSQL schema files (applied in numeric order)
 scripts/                     # Shell wrappers, cron scheduler, ad-hoc backfills
