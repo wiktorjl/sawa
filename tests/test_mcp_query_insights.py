@@ -3,6 +3,7 @@ from pathlib import Path
 
 from sawa.mcp_query_insights import (
     analyze_query_log,
+    classify_query,
     fingerprint_sql,
     get_query_jsonl_path,
     load_cached_query_warning,
@@ -89,6 +90,54 @@ def test_cached_query_warning_reads_summary_without_log_scan(tmp_path: Path) -> 
 
     assert warning is not None
     assert "High custom SQL usage detected" in warning
+
+
+def test_classify_query_separates_forensic_from_analytical() -> None:
+    # Genuine agent-style lookups.
+    assert classify_query("SELECT ticker, close FROM stock_prices WHERE ticker = 'AAPL'") == "analytical"
+    assert classify_query("SELECT * FROM companies WHERE active = true") == "analytical"
+    # Introspection / data-quality audit / EXPLAIN / comments -> forensic.
+    assert classify_query("SELECT * FROM information_schema.columns") == "forensic"
+    assert classify_query("SELECT pg_get_viewdef('stock_prices_live'::regclass)") == "forensic"
+    assert classify_query("EXPLAIN ANALYZE SELECT 1") == "forensic"
+    assert classify_query("SELECT COUNT(*) FILTER (WHERE vix IS NULL) FROM market_internals") == "forensic"
+    assert classify_query("-- audit\nSELECT COUNT(*) FROM stock_prices") == "forensic"
+    # Explicit source override forces forensic even for an analytical-looking query.
+    assert classify_query("SELECT close FROM stock_prices", source="review") == "forensic"
+    assert classify_query("SELECT close FROM stock_prices", source="agent") == "analytical"
+
+
+def test_forensic_queries_excluded_from_tool_gap_signal(tmp_path: Path) -> None:
+    log_path = get_query_jsonl_path(tmp_path)
+    # One genuine analytical query...
+    _append(log_path, {
+        "timestamp": "2026-05-17T10:00:00+00:00",
+        "sql": "SELECT ticker, close FROM stock_prices WHERE ticker = 'AAPL'",
+        "success": True,
+    })
+    # ...and two forensic ones (one by SQL shape, one by explicit source).
+    _append(log_path, {
+        "timestamp": "2026-05-17T10:01:00+00:00",
+        "sql": "SELECT COUNT(*) FILTER (WHERE sic_code IS NULL) FROM companies",
+        "success": True,
+    })
+    _append(log_path, {
+        "timestamp": "2026-05-17T10:02:00+00:00",
+        "sql": "SELECT date, vix FROM market_internals ORDER BY date DESC LIMIT 6",
+        "source": "review",
+        "success": True,
+    })
+
+    summary = analyze_query_log(log_dir=tmp_path, window_days=30, warning_threshold=2)["summary"]
+
+    assert summary["total_queries"] == 3
+    assert summary["category_counts"] == {"analytical": 1, "forensic": 2}
+    # Recent/warning are analytical-only: 1 analytical < threshold 2 -> no warning.
+    assert summary["recent_queries"] == 1
+    assert summary["recent_total_queries"] == 3
+    assert summary["warning"] is None
+    # The signal sees only stock_prices (the forensic companies/market_internals excluded).
+    assert [r["value"] for r in summary["top_tables"]] == ["stock_prices"]
 
 
 def test_sql_fingerprint_normalizes_literals() -> None:

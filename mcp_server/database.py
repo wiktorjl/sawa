@@ -141,6 +141,10 @@ def log_execute_query_result(
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": "execute_query",
+        # Explicit override hook: set MCP_QUERY_SOURCE=review (or forensic/audit)
+        # on a server used for a code review or data audit so those queries are
+        # tagged and excluded from the missing-tool signal. Defaults to "agent".
+        "source": os.environ.get("MCP_QUERY_SOURCE", "agent"),
         "sql": query,
         "params": params or {},
         "duration_ms": round(duration_ms, 2),
