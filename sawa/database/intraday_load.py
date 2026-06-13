@@ -26,6 +26,11 @@ def load_intraday_bars(
     if not bars:
         return 0
 
+    # Each window is flushed once, fully aggregated, by the websocket client.
+    # The WHERE guard keeps the most complete write to win idempotently: a
+    # re-stream of the same window (equal volume) is a harmless no-op, while a
+    # rare straggler re-flush (lower volume) is rejected rather than clobbering
+    # a complete window with a partial one.
     query = sql.SQL("""
         INSERT INTO stock_prices_intraday
             (ticker, timestamp, open, high, low, close, volume, bar_size_minutes)
@@ -37,6 +42,7 @@ def load_intraday_bars(
             low = EXCLUDED.low,
             close = EXCLUDED.close,
             volume = EXCLUDED.volume
+        WHERE EXCLUDED.volume >= stock_prices_intraday.volume
     """)
 
     inserted = 0

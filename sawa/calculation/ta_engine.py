@@ -310,11 +310,29 @@ def calculate_indicators_for_ticker(
     return results
 
 
+# Warm-up multiplier for the incremental TA window. talib seeds an N-period
+# EMA with an SMA of the first N bars, so a window only marginally longer than
+# the period leaves the seed carrying most of the weight — and because the
+# window slides one bar per day, consecutive days seed off different bars and
+# the stored EMA-200 series drifts (it does not satisfy the EMA recurrence and
+# jumps on a full backfill). Fetching ~4x the longest period pushes the seed's
+# residual weight on EMA-200 below ~0.1% ((1-2/201)^~680 ≈ 0.001), so each
+# day's value converges to the full-history EMA within storage precision.
+# A periodic full-history recompute (run_weekly) resets any residual drift.
+EMA_WARMUP_MULTIPLIER = 4
+
+# Trading days -> calendar days. ~252 trading days per 365 calendar days, so a
+# trading day is ~1.45 calendar days; 1.6 adds margin for holiday clustering.
+_CALENDAR_DAYS_PER_TRADING_DAY = 1.6
+
+
 def get_required_lookback_days() -> int:
     """Get the number of calendar days needed for lookback.
 
-    Returns calendar days (trading days * 1.5 for weekends/holidays).
-    Based on longest indicator period (SMA-200 = 200 trading days).
+    Sized so the longest EMA (period 200) has enough warm-up history that its
+    talib SMA seed has decayed to negligible weight, keeping the incrementally
+    computed daily series consistent with a full-history computation.
     """
     max_period = max(MIN_PERIODS.values())
-    return int(max_period * 1.5)  # ~300 calendar days for 200 trading days
+    trading_bars = max_period * EMA_WARMUP_MULTIPLIER
+    return int(trading_bars * _CALENDAR_DAYS_PER_TRADING_DAY)
