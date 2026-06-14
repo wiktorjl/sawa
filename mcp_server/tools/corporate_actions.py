@@ -300,7 +300,8 @@ def get_earnings_calendar(
         limit: Maximum results (default: 200, max: 500)
 
     Returns:
-        List of earnings with dates, EPS estimates, actuals, and surprise %
+        List of earnings with report dates, fiscal period (calendar quarter of the
+        report), EPS estimates, actuals, and surprise %
     """
     limit = min(limit, 500)
 
@@ -331,8 +332,7 @@ def get_earnings_calendar(
             e.fiscal_year,
             e.eps_estimate,
             e.eps_actual,
-            e.surprise_pct,
-            e.revenue_actual
+            e.surprise_pct
         FROM earnings e
         JOIN companies c ON e.ticker = c.ticker
         WHERE {where_clause}
@@ -372,8 +372,7 @@ def get_earnings_history(
             CASE WHEN e.eps_estimate IS NOT NULL AND e.eps_actual IS NOT NULL
                  THEN e.eps_actual - e.eps_estimate
                  ELSE NULL END as eps_surprise,
-            e.surprise_pct as eps_surprise_pct,
-            e.revenue_actual
+            e.surprise_pct as eps_surprise_pct
         FROM earnings e
         WHERE e.ticker = %(ticker)s
         ORDER BY e.report_date DESC

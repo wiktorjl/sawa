@@ -542,7 +542,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum bars to return (default: 100, max: 500)",
+                        "description": "Most-recent bars per ticker (default: 100, max: 500)",
                         "default": 100,
                         "minimum": 1,
                         "maximum": 500,
@@ -754,8 +754,8 @@ async def list_tools() -> list[Tool]:
                 "  market_internals(date PK, vix, vix3m, hy_spread) - FRED daily\n"
                 "  stock_splits(ticker, execution_date, split_from, split_to)\n"
                 "  dividends(ticker, ex_dividend_date, cash_amount, frequency, ...)\n"
-                "  earnings(ticker, report_date, eps_estimate, eps_actual, revenue_actual, "
-                "surprise_pct, timing)\n"
+                "  earnings(ticker, report_date, fiscal_year, fiscal_quarter, eps_estimate, "
+                "eps_actual, surprise_pct, timing)\n"
                 "  news_articles(id PK, title, published_utc, ...)\n"
                 "  news_article_tickers(article_id, ticker)\n"
                 "  news_sentiment(article_id, ticker, sentiment)\n\n"
@@ -1789,7 +1789,11 @@ async def list_tools() -> list[Tool]:
         # Multi-timeframe analysis tools
         Tool(
             name="get_weekly_monthly_candles",
-            description="Get weekly or monthly aggregated OHLCV candles from daily data",
+            description=(
+                "Get weekly or monthly aggregated OHLCV candles from daily data. The "
+                "newest candle may be the still-forming current period — check the "
+                "is_partial flag (true = period in progress, not yet complete)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

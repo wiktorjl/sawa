@@ -386,6 +386,67 @@ class TestGetAdvancedVolumeIndicators:
         assert result["ticker"] == "AAPL"
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
+    def test_cumulative_series_anchored_at_window_start(self, mock_query):
+        """OBV/A-D/VWAP must anchor at the requested window start, not the buffer.
+
+        Regression for the bug where the cumulative series (and therefore the
+        published VWAP bullish/bearish signal) flipped with lookback_days because
+        accumulation started at the earliest FETCHED (buffer) bar. With a fixed
+        row set, the displayed VWAP for a short lookback must equal a VWAP
+        computed over only the displayed window, regardless of how many extra
+        warmup/buffer bars precede it.
+        """
+        rows = _make_price_rows(80, base_price=100.0, price_pattern="up")
+        mock_query.return_value = rows
+
+        result = get_advanced_volume_indicators("AAPL", lookback_days=10)
+        indicators = result["indicators"]
+        assert len(indicators) == 10
+
+        # The earliest displayed bar must be a fresh anchor:
+        # OBV[0] == its own volume (no buffer carried in).
+        assert indicators[0]["obv"] == indicators[0]["volume"]
+
+        # VWAP at the latest displayed bar must equal a cumulative VWAP computed
+        # over ONLY the displayed window (the buffer rows must not leak in).
+        window = rows[-10:]
+        cum_tp_vol = 0.0
+        cum_vol = 0
+        for r in window:
+            tp = (float(r["high"]) + float(r["low"]) + float(r["close"])) / 3
+            cum_tp_vol += tp * int(r["volume"])
+            cum_vol += int(r["volume"])
+        expected_vwap = round(cum_tp_vol / cum_vol, 2)
+        assert indicators[-1]["vwap"] == expected_vwap
+
+    @patch("mcp_server.tools.volume_analysis.execute_query")
+    def test_vwap_independent_of_buffer_size(self, mock_query):
+        """The displayed VWAP for a window must not change with extra buffer bars.
+
+        Two row sets that share the same last N bars but differ in how many
+        leading buffer bars precede them must yield the same VWAP for the
+        last bar (anchored at output_start, not the buffer).
+        """
+        tail = _make_price_rows(10, base_price=120.0, price_pattern="volatile")
+        # A longer set whose final 10 bars are identical to `tail`.
+        long_rows = _make_price_rows(60, base_price=120.0, price_pattern="volatile")
+        # Make the trailing 10 bars match by regenerating tail aligned to long_rows.
+        long_rows[-10:] = [dict(r) for r in long_rows[-10:]]
+        # Recompute tail to mirror the same trailing slice for an apples-to-apples check.
+        tail = [dict(r) for r in long_rows[-10:]]
+
+        mock_query.return_value = tail
+        short_result = get_advanced_volume_indicators("AAPL", lookback_days=10)
+
+        mock_query.return_value = long_rows
+        long_result = get_advanced_volume_indicators("AAPL", lookback_days=10)
+
+        assert (
+            short_result["indicators"][-1]["vwap"]
+            == long_result["indicators"][-1]["vwap"]
+        )
+
+    @patch("mcp_server.tools.volume_analysis.execute_query")
     def test_ad_line_calculation(self, mock_query):
         """A/D line should be calculated correctly for known values."""
         # Create simple test: close at high means max accumulation

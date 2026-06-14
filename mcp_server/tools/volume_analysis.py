@@ -368,10 +368,17 @@ def get_advanced_volume_indicators(
 
     n = len(rows)
 
-    # Calculate OBV (On-Balance Volume)
+    # Anchor the cumulative series (OBV, A/D, VWAP) at the requested window
+    # start, not the earliest fetched (buffer) bar. The buffer only exists to
+    # warm up the rolling CMF window; if the cumulative anchors moved with the
+    # buffer size, the published values and the VWAP bullish/bearish signal
+    # would flip with lookback_days even for the same date.
+    output_start = max(0, n - lookback_days)
+
+    # Calculate OBV (On-Balance Volume), reset at output_start
     obv = [0] * n
-    obv[0] = volumes[0]
-    for i in range(1, n):
+    obv[output_start] = volumes[output_start]
+    for i in range(output_start + 1, n):
         if closes[i] > closes[i - 1]:
             obv[i] = obv[i - 1] + volumes[i]
         elif closes[i] < closes[i - 1]:
@@ -379,18 +386,19 @@ def get_advanced_volume_indicators(
         else:
             obv[i] = obv[i - 1]
 
-    # Calculate A/D (Accumulation/Distribution) line
+    # Calculate A/D (Accumulation/Distribution) line, reset at output_start
     ad_line = [0.0] * n
-    for i in range(n):
+    for i in range(output_start, n):
         hl_range = highs[i] - lows[i]
         if hl_range > 0:
             mfm = ((closes[i] - lows[i]) - (highs[i] - closes[i])) / hl_range
         else:
             mfm = 0.0
         mfv = mfm * volumes[i]
-        ad_line[i] = (ad_line[i - 1] + mfv) if i > 0 else mfv
+        ad_line[i] = (ad_line[i - 1] + mfv) if i > output_start else mfv
 
-    # Calculate CMF (Chaikin Money Flow) - 20-day window
+    # Calculate CMF (Chaikin Money Flow) - 20-day window. This rolling window
+    # legitimately uses the warmup buffer before output_start.
     cmf_period = 20
     cmf: list[float | None] = [None] * n
     for i in range(cmf_period - 1, n):
@@ -407,18 +415,17 @@ def get_advanced_volume_indicators(
 
         cmf[i] = round(window_mfv_sum / window_vol_sum, 4) if window_vol_sum > 0 else 0.0
 
-    # Calculate VWAP (cumulative for the period)
+    # Calculate VWAP (cumulative, anchored at the requested window start)
     cum_tp_vol = 0.0
     cum_vol = 0
     vwap: list[float | None] = [None] * n
-    for i in range(n):
+    for i in range(output_start, n):
         typical_price = (highs[i] + lows[i] + closes[i]) / 3
         cum_tp_vol += typical_price * volumes[i]
         cum_vol += volumes[i]
         vwap[i] = round(cum_tp_vol / cum_vol, 2) if cum_vol > 0 else None
 
     # Build output records (only last lookback_days)
-    output_start = max(0, n - lookback_days)
     indicators = []
     for i in range(output_start, n):
         indicators.append({

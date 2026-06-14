@@ -30,7 +30,9 @@ def get_weekly_monthly_candles(
 
     Returns:
         List of candle dicts with period_start, open, high, low, close,
-        volume, trading_days, and change_pct.
+        volume, trading_days, change_pct, and is_partial. The newest candle
+        is the still-forming current week/month; is_partial=True flags it so
+        callers don't treat the in-progress period as a finished candle.
     """
     if periods is None:
         periods = 52 if timeframe == "weekly" else 12
@@ -48,6 +50,9 @@ def get_weekly_monthly_candles(
 
     start_date = (date.today() - timedelta(days=lookback_days)).isoformat()
 
+    # The in-progress current period (week/month) is flagged is_partial so
+    # callers can distinguish the still-forming candle from completed ones.
+    # The ET market date is used because the DB session runs in UTC.
     query = sql.SQL("""
         WITH candles AS (
             SELECT
@@ -77,6 +82,10 @@ def get_weekly_monthly_candles(
             close,
             volume,
             trading_days,
+            (period_start = DATE_TRUNC(
+                {trunc_unit},
+                (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+            )::date) as is_partial,
             CASE WHEN open > 0
                  THEN ROUND(((close - open) / open * 100)::numeric, 2)
                  ELSE NULL END as change_pct
@@ -300,7 +309,13 @@ def _fetch_aggregated_candles(
     trunc_unit: str,
     start_date: str,
 ) -> list[dict[str, Any]]:
-    """Fetch price data aggregated by week or month."""
+    """Fetch price data aggregated by week or month.
+
+    Excludes the in-progress current period (HAVING) so weekly/monthly
+    SMA/RSI/MACD signals are computed on the last COMPLETED candle and stay
+    comparable to the finalized daily anchor (which reads the latest EOD row).
+    The ET market date is used because the DB session runs in UTC.
+    """
     query = sql.SQL("""
         SELECT
             DATE_TRUNC({trunc_unit}, date)::date as period_start,
@@ -313,6 +328,10 @@ def _fetch_aggregated_candles(
         WHERE ticker = %(ticker)s
           AND date >= %(start_date)s
         GROUP BY DATE_TRUNC({trunc_unit}, date)
+        HAVING DATE_TRUNC({trunc_unit}, date) < DATE_TRUNC(
+            {trunc_unit},
+            (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+        )
         ORDER BY period_start ASC
     """).format(trunc_unit=sql.Literal(trunc_unit))
 

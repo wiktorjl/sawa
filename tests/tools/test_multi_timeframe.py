@@ -11,6 +11,7 @@ from mcp_server.tools.multi_timeframe import (
     _compute_beta,
     _compute_rs_trend,
     _compute_signals_from_candles,
+    _fetch_aggregated_candles,
     _overall_direction,
     _rsi_signal,
     _sample_rs_line,
@@ -506,11 +507,25 @@ class TestGetWeeklyMonthlyCandles:
                 "volume": 5000000,
                 "trading_days": 5,
                 "change_pct": 5.0,
+                "is_partial": False,
             }
         ]
         mock_query.return_value = mock_data
         result = get_weekly_monthly_candles("AAPL")
         assert result == mock_data
+
+    @patch("mcp_server.tools.multi_timeframe.execute_query")
+    def test_flags_in_progress_period_as_partial(self, mock_query):
+        # The query must label the still-forming current week/month so callers
+        # can tell it apart from completed candles (anchored on the ET date
+        # because the DB session runs in UTC).
+        mock_query.return_value = []
+        get_weekly_monthly_candles("AAPL", timeframe="monthly")
+
+        query = mock_query.call_args[0][0]
+        rendered = query.as_string(None)
+        assert "is_partial" in rendered
+        assert "America/New_York" in rendered
 
 
 # -- Tests for get_multi_timeframe_alignment (mocked DB) --
@@ -586,6 +601,34 @@ class TestGetMultiTimeframeAlignment:
 
         result = get_multi_timeframe_alignment("aapl", timeframes=["daily"])
         assert result["ticker"] == "AAPL"
+
+
+# -- Tests for _fetch_aggregated_candles (mocked DB) --
+
+
+class TestFetchAggregatedCandles:
+    @patch("mcp_server.tools.multi_timeframe.execute_query")
+    def test_excludes_in_progress_period(self, mock_query):
+        # Weekly/monthly signal candles must drop the still-forming current
+        # period so SMA/RSI/MACD use the last COMPLETED period and stay
+        # comparable to the finalized daily anchor. The exclusion is anchored
+        # on the ET market date because the DB session runs in UTC.
+        mock_query.return_value = []
+        _fetch_aggregated_candles("AAPL", "month", "2021-01-01")
+
+        query = mock_query.call_args[0][0]
+        rendered = query.as_string(None)
+        assert "HAVING" in rendered
+        assert "America/New_York" in rendered
+
+    @patch("mcp_server.tools.multi_timeframe.execute_query")
+    def test_passes_ticker_and_start_date(self, mock_query):
+        mock_query.return_value = []
+        _fetch_aggregated_candles("AAPL", "week", "2024-01-01")
+
+        params = mock_query.call_args[0][1]
+        assert params["ticker"] == "AAPL"
+        assert params["start_date"] == "2024-01-01"
 
 
 # -- Tests for calculate_relative_strength (mocked DB) --
