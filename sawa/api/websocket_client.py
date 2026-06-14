@@ -75,11 +75,19 @@ class PolygonWebSocketClient:
         # For aggregating 1-min bars into 5-min bars
         self.bar_aggregator: dict[tuple[str, datetime], dict[str, Any]] = {}
 
-        # Event-time watermark: the latest window start observed across all
-        # tickers. A window is complete once a bar from a strictly later window
-        # has arrived. This replaces a wall-clock cutoff, which is wrong on the
-        # delayed feed where bars arrive ~15 min after their event time.
-        self.max_bar_start: datetime | None = None
+        # Per-ticker event-time watermark: the latest window start observed for
+        # each ticker. A ticker's window is complete once a bar from a strictly
+        # later window of THAT SAME ticker has arrived. A single global
+        # watermark is wrong here: a liquid ticker advancing it into the next
+        # window would prematurely flush a thin ticker's still-partial window
+        # before all of its in-window minutes arrive, and the thin ticker's
+        # later minutes would then re-create — and corrupt — the same window.
+        # We still use a wall-clock backstop so a stalled stream cannot grow
+        # memory without bound; the per-ticker watermark is the normal path
+        # because on the 15-min delayed feed every bar arrives long after its
+        # event time, so a wall-clock cutoff alone would flush each window
+        # after its first 1-min bar.
+        self.max_bar_start_by_ticker: dict[str, datetime] = {}
 
         # Try delayed endpoint by default (fallback to real-time if access granted)
         self.uri = DELAYED_WEBSOCKET_URL
@@ -172,9 +180,12 @@ class PolygonWebSocketClient:
         rounded_minute = (bar_time.minute // self.bar_size) * self.bar_size
         bar_start = bar_time.replace(minute=rounded_minute, second=0, microsecond=0)
 
-        # Advance the event-time watermark used by _flush_completed_bars.
-        if self.max_bar_start is None or bar_start > self.max_bar_start:
-            self.max_bar_start = bar_start
+        # Advance this ticker's event-time watermark used by
+        # _flush_completed_bars. Keyed per ticker so a liquid ticker cannot
+        # prematurely complete a thin ticker's window.
+        prev_watermark = self.max_bar_start_by_ticker.get(ticker)
+        if prev_watermark is None or bar_start > prev_watermark:
+            self.max_bar_start_by_ticker[ticker] = bar_start
 
         key = (ticker, bar_start)
 
@@ -202,12 +213,16 @@ class PolygonWebSocketClient:
     def _flush_completed_bars(self, flush_all: bool = False) -> None:
         """Move completed bars from aggregator to buffer.
 
-        A window ``[W, W+bar_size)`` is complete once we have observed a 1-min
-        bar belonging to a later window (the event-time watermark). We cannot
-        use wall-clock time: on the 15-min delayed feed every bar arrives long
-        after its event time, so a wall-clock cutoff would flush each window
-        after its first 1-min bar and the later bars would re-create — then
-        overwrite — the same window, leaving only the last 1-min bar's data.
+        A ticker's window ``[W, W+bar_size)`` is complete once we have observed
+        a 1-min bar of THAT SAME ticker belonging to a later window (its
+        per-ticker event-time watermark). A single global watermark is wrong:
+        a liquid ticker advancing it into a later window would prematurely flush
+        a thin ticker's still-partial window, and the thin ticker's remaining
+        in-window minutes would then re-create — and corrupt — the same window.
+        We cannot use wall-clock time alone either: on the 15-min delayed feed
+        every bar arrives long after its event time, so a wall-clock cutoff
+        would flush each window after its first 1-min bar. The wall-clock
+        ``stale_cutoff`` is kept only as a memory backstop for a stalled stream.
 
         Args:
             flush_all: Drain every window regardless of completeness (used at
@@ -215,21 +230,21 @@ class PolygonWebSocketClient:
         """
         if flush_all:
             completed_keys = list(self.bar_aggregator.keys())
-        elif self.max_bar_start is None:
-            return
         else:
             bar_delta = timedelta(minutes=self.bar_size)
-            watermark = self.max_bar_start
             # Backstop so a fully stalled stream cannot grow memory unbounded.
             stale_cutoff = datetime.now(timezone.utc) - timedelta(
                 minutes=self.bar_size + STREAM_STALL_MINUTES
             )
-            completed_keys = [
-                key
-                for key, bar in self.bar_aggregator.items()
-                if bar["timestamp"] + bar_delta <= watermark
-                or bar["timestamp"] < stale_cutoff
-            ]
+            completed_keys = []
+            for key, bar in self.bar_aggregator.items():
+                ticker = key[0]
+                watermark = self.max_bar_start_by_ticker.get(ticker)
+                if (
+                    watermark is not None
+                    and bar["timestamp"] + bar_delta <= watermark
+                ) or bar["timestamp"] < stale_cutoff:
+                    completed_keys.append(key)
 
         for key in completed_keys:
             bar = self.bar_aggregator.pop(key)
