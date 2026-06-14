@@ -89,6 +89,36 @@ def load_technical_indicators(
     return inserted
 
 
+def delete_technical_indicators_for_tickers(
+    conn,
+    tickers: list[str],
+    log: logging.Logger | None = None,
+) -> int:
+    """Delete all technical_indicators rows for the given tickers.
+
+    Used before a full-history TA recompute (e.g. after split adjustment
+    rewrites historical OHLC) so stale indicator rows computed from the
+    pre-adjustment prices cannot survive the (ticker, date) upsert — which only
+    overwrites dates that the recompute re-emits.
+
+    Returns the number of rows deleted.
+    """
+    log = log or logger
+    if not tickers:
+        return 0
+
+    upper = [t.upper() for t in tickers]
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM technical_indicators WHERE ticker = ANY(%s)",
+            (upper,),
+        )
+        deleted = int(cur.rowcount)
+    conn.commit()
+    log.info(f"  Deleted {deleted} stale technical_indicator rows for {len(upper)} ticker(s)")
+    return deleted
+
+
 def get_last_ta_date(conn, ticker: str) -> date | None:
     """Get most recent technical indicator calculation date for ticker.
 

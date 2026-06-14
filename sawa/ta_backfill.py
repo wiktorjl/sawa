@@ -15,6 +15,7 @@ import psycopg
 
 from sawa.calculation.ta_engine import calculate_indicators_for_ticker
 from sawa.database.ta_load import (
+    delete_technical_indicators_for_tickers,
     get_prices_for_ticker,
     get_ta_count,
     get_tickers_with_prices,
@@ -119,6 +120,58 @@ def estimate_backfill_time(
         "successful_samples": len(successful),
         "failed_samples": len(results) - len(successful),
     }
+
+
+def recompute_ta_for_tickers(
+    database_url: str,
+    tickers: list[str],
+    workers: int = 1,
+    log: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Fully recompute technical indicators for specific tickers from scratch.
+
+    Unlike the daily incremental TA path (which only computes dates > last_ta),
+    this DELETEs every existing technical_indicators row for the given tickers
+    and recomputes the WHOLE price series. Call this after split adjustment
+    rewrites historical OHLC, so stored SMA/EMA/RSI/etc. are rebuilt from the
+    adjusted prices instead of staying off by the split ratio.
+
+    Idempotent: re-running just deletes and recomputes the same rows.
+
+    Args:
+        database_url: PostgreSQL connection URL
+        tickers: Tickers to recompute (deduped; empty list is a no-op)
+        workers: Parallel workers for the recompute (1 = sequential)
+        log: Logger instance
+
+    Returns:
+        Statistics dictionary (includes ``deleted`` and the backfill stats).
+    """
+    log = log or setup_logging()
+    stats: dict[str, Any] = {"success": False, "deleted": 0}
+
+    unique = list(dict.fromkeys(t.upper() for t in tickers))
+    if not unique:
+        log.info("No tickers to recompute TA for")
+        stats["success"] = True
+        return stats
+
+    log.info(f"Recomputing technical indicators for {len(unique)} ticker(s): {', '.join(unique)}")
+
+    # Drop the stale rows first so a (ticker, date) upsert can't leave behind
+    # indicator rows for dates the recompute happens not to re-emit.
+    with psycopg.connect(database_url) as conn:
+        stats["deleted"] = delete_technical_indicators_for_tickers(conn, unique, log)
+
+    backfill = run_ta_backfill(
+        database_url=database_url,
+        tickers=unique,
+        workers=workers,
+        log=log,
+    )
+    stats.update({k: v for k, v in backfill.items() if k != "success"})
+    stats["success"] = backfill.get("success", False)
+    return stats
 
 
 def run_ta_backfill(

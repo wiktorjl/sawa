@@ -681,7 +681,7 @@ def cmd_adjust_splits(args) -> int:
 
     try:
         with monitored_run("adjust-splits", logger=logger) as ctx:
-            ctx["stats"] = refresh_split_adjusted_prices(
+            stats = refresh_split_adjusted_prices(
                 api_key=api_key,
                 database_url=db_url,
                 tickers=tickers,
@@ -689,6 +689,25 @@ def cmd_adjust_splits(args) -> int:
                 dry_run=args.dry_run,
                 logger=logger,
             )
+            ctx["stats"] = stats
+
+            # Re-adjusting prices rewrites historical OHLC, which leaves the
+            # stored technical_indicators stale (computed from pre-adjustment
+            # prices). Recompute TA for exactly the adjusted tickers so the
+            # standalone CLI matches the weekly/daily auto-heal behaviour.
+            adjusted = stats.get("tickers") or []
+            if not args.dry_run and stats.get("success") and adjusted:
+                from sawa.ta_backfill import recompute_ta_for_tickers
+
+                logger.info(
+                    f"Recomputing technical indicators for {len(adjusted)} "
+                    f"adjusted ticker(s)..."
+                )
+                stats["ta_recompute"] = recompute_ta_for_tickers(
+                    database_url=db_url,
+                    tickers=adjusted,
+                    log=logger,
+                )
         return 0 if ctx["stats"].get("success") else 1
     except Exception:
         if args.verbose:

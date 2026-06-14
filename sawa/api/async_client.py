@@ -19,10 +19,11 @@ from typing import Any
 import httpx
 
 from sawa.domain.exceptions import ProviderError
-from sawa.repositories.rate_limiter import SyncRateLimiter
+from sawa.repositories.rate_limiter import RateLimiter, TokenBucket
 
 DEFAULT_TIMEOUT = 30
 MAX_REQUESTS_PER_MINUTE = 5
+MAX_RETRIES = 3
 
 
 class AsyncPolygonClient:
@@ -32,7 +33,7 @@ class AsyncPolygonClient:
         self,
         api_key: str,
         logger: logging.Logger,
-        rate_limiter: SyncRateLimiter | None = None,
+        rate_limiter: RateLimiter | None = None,
         timeout: int = DEFAULT_TIMEOUT,
     ):
         """Initialize async client.
@@ -40,15 +41,18 @@ class AsyncPolygonClient:
         Args:
             api_key: Polygon API key
             logger: Logger instance
-            rate_limiter: Optional rate limiter
+            rate_limiter: Optional async rate limiter (must expose an async
+                acquire()). Defaults to an async-safe TokenBucket so the
+                event loop is not blocked by a synchronous time.sleep().
             timeout: Request timeout in seconds
         """
         self.api_key = api_key
         self.logger = logger
         self.base_url = "https://api.polygon.io"
         self.timeout = timeout
-        self.rate_limiter = rate_limiter or SyncRateLimiter(
-            requests_per_second=MAX_REQUESTS_PER_MINUTE / 60.0,
+        self.rate_limiter: RateLimiter = rate_limiter or TokenBucket(
+            rate=MAX_REQUESTS_PER_MINUTE / 60.0,
+            capacity=float(MAX_REQUESTS_PER_MINUTE),
         )
 
     async def get_aggregates(
@@ -88,29 +92,67 @@ class AsyncPolygonClient:
         }
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            # Rate limiting (synchronous check before async call)
-            self.rate_limiter.acquire()
+            # Retry transient failures (HTTP 429 rate limits, 5xx server
+            # errors, and connection/timeout errors) with backoff, mirroring
+            # the sync PolygonClient. Without this a single 429 would raise
+            # immediately and silently drop the ticker from the batch result.
+            for attempt in range(MAX_RETRIES):
+                # Rate limiting (async-safe; awaits a TokenBucket token).
+                await self.rate_limiter.acquire()
 
-            try:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                data: dict[str, Any] = response.json()
-                results: list[dict[str, Any]] = data.get("results", [])
-                return results
-            except httpx.HTTPStatusError as e:
-                self.logger.error(f"HTTP error for {ticker}: {e}")
-                raise ProviderError(
-                    f"HTTP error fetching aggregates for {ticker}: {e.response.status_code}",
-                    provider="polygon",
-                    original_error=e,
-                ) from e
-            except httpx.RequestError as e:
-                self.logger.error(f"Request error for {ticker}: {e}")
-                raise ProviderError(
-                    f"Request error fetching aggregates for {ticker}",
-                    provider="polygon",
-                    original_error=e,
-                ) from e
+                try:
+                    response = await client.get(url, params=params)
+
+                    if response.status_code == 429:
+                        wait = (attempt + 1) * 2
+                        self.logger.warning(
+                            f"Rate limited for {ticker}. Waiting {wait}s..."
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
+                    response.raise_for_status()
+                    data: dict[str, Any] = response.json()
+                    results: list[dict[str, Any]] = data.get("results", [])
+                    return results
+                except httpx.HTTPStatusError as e:
+                    # Retry transient 5xx; surface other 4xx as ProviderError.
+                    if e.response.status_code >= 500 and attempt < MAX_RETRIES - 1:
+                        wait = attempt + 1
+                        self.logger.warning(
+                            f"HTTP {e.response.status_code} for {ticker}: {e}. "
+                            f"Retrying in {wait}s..."
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    self.logger.error(f"HTTP error for {ticker}: {e}")
+                    raise ProviderError(
+                        f"HTTP error fetching aggregates for {ticker}: "
+                        f"{e.response.status_code}",
+                        provider="polygon",
+                        original_error=e,
+                    ) from e
+                except httpx.RequestError as e:
+                    if attempt < MAX_RETRIES - 1:
+                        wait = attempt + 1
+                        self.logger.warning(
+                            f"Request error for {ticker}: {e}. Retrying in {wait}s..."
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    self.logger.error(f"Request error for {ticker}: {e}")
+                    raise ProviderError(
+                        f"Request error fetching aggregates for {ticker}",
+                        provider="polygon",
+                        original_error=e,
+                    ) from e
+
+            # All attempts exhausted on 429s without returning.
+            raise ProviderError(
+                f"Rate limited fetching aggregates for {ticker} "
+                f"after {MAX_RETRIES} attempts",
+                provider="polygon",
+            )
 
     async def get_ticker_details(self, ticker: str) -> dict[str, Any] | None:
         """
@@ -126,7 +168,7 @@ class AsyncPolygonClient:
         params = {"apiKey": self.api_key}
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            self.rate_limiter.acquire()
+            await self.rate_limiter.acquire()
 
             try:
                 response = await client.get(url, params=params)
@@ -183,14 +225,23 @@ class AsyncPolygonClient:
         tasks = [fetch_one(ticker) for ticker in tickers]
         gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter out exceptions and return successful results
+        # Filter out exceptions and return successful results. Surface the
+        # count of dropped tickers (after the per-ticker retries above are
+        # exhausted) so callers can see the gap instead of it being silent.
         output: dict[str, list[dict[str, Any]]] = {}
+        dropped = 0
         for item in gathered:
             if isinstance(item, BaseException):
+                dropped += 1
                 self.logger.error(f"Batch fetch error: {item}")
                 continue
             # item is tuple[str, list[dict[str, Any]]]
             ticker, data = item[0], item[1]
             output[ticker] = data
+
+        if dropped:
+            self.logger.warning(
+                f"Batch fetch dropped {dropped}/{len(tickers)} tickers after retries"
+            )
 
         return output

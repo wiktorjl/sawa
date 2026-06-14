@@ -25,13 +25,19 @@ from sawa.utils.dates import DATE_FORMAT
 def download_fundamentals(
     client: PolygonClient,
     symbols: list[str],
-    start_date: str,
+    start_date: str | None,
     end_date: str,
     output_dir: Path,
     logger: logging.Logger,
     rate_limiter: SyncRateLimiter | None = None,
+    filing_date_gte: str | None = None,
 ) -> dict[str, int]:
-    """Download fundamentals data (balance sheets, cash flow, income statements)."""
+    """Download fundamentals data (balance sheets, cash flow, income statements).
+
+    The incremental quarterly pull filters on filing_date_gte (when reports
+    became available) so late filings and restatements of older periods are
+    captured; start_date (period_end.gte) is used only for a full backfill.
+    """
     endpoints = ["balance-sheets", "cash-flow", "income-statements"]
     stats: dict[str, int] = {}
 
@@ -47,7 +53,11 @@ def download_fundamentals(
                 if rate_limiter:
                     rate_limiter.acquire()
                 data = client.get_fundamentals(
-                    endpoint, ticker=symbol, start_date=start_date, end_date=end_date
+                    endpoint,
+                    ticker=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    filing_date_gte=filing_date_gte,
                 )
                 # Clean up tickers field
                 for record in data:
@@ -143,25 +153,45 @@ def run_quarterly(
             logger.info(f"Found {len(symbols)} symbols in database")
             stats["symbols"] = len(symbols)
 
-            # Get last date for incremental updates
-            last_fundamental_date = get_last_date(conn, "balance_sheets", "period_end")
+            # Get last date for incremental updates. Anchor on MAX(filing_date)
+            # (when reports became available), NOT MAX(period_end) (when the
+            # fiscal period closed): filtering on period_end silently skips
+            # late/amended filers, non-calendar fiscal years, and restatements
+            # of older quarters whose period_end predates the global max.
+            last_filing_date = get_last_date(conn, "balance_sheets", "filing_date")
 
             # Calculate date range
             end_date = date.today()
-            if last_fundamental_date:
-                fund_start = last_fundamental_date - timedelta(days=30)  # Overlap for safety
-            else:
-                fund_start = end_date - timedelta(days=365)  # 1 year if no data
-
-            fund_start_str = fund_start.strftime(DATE_FORMAT)
             end_str = end_date.strftime(DATE_FORMAT)
 
-            logger.info(f"Fundamentals date range: {fund_start_str} to {end_str}")
+            # filing_date_gte drives the incremental pull; fund_start_str
+            # (period_end.gte) is only used for the full-backfill cold path.
+            fund_start_str: str | None
+            if last_filing_date:
+                # Widen overlap to 120 days to also recapture amended filings.
+                filing_gte = last_filing_date - timedelta(days=120)
+                filing_gte_str = filing_gte.strftime(DATE_FORMAT)
+                fund_start_str = None
+                logger.info(
+                    f"Fundamentals incremental window: filing_date >= {filing_gte_str} "
+                    f"(period_end <= {end_str})"
+                )
+            else:
+                # No data yet: full backfill anchored on period_end.
+                fund_start = end_date - timedelta(days=365)
+                fund_start_str = fund_start.strftime(DATE_FORMAT)
+                filing_gte_str = None
+                logger.info(f"Fundamentals date range: {fund_start_str} to {end_str}")
 
         if dry_run:
             logger.info("\n[DRY RUN] Would update:")
             if not skip_fundamentals:
-                logger.info(f"  - Fundamentals from {fund_start_str}")
+                window = (
+                    f"filing_date >= {filing_gte_str}"
+                    if filing_gte_str
+                    else f"period_end >= {fund_start_str}"
+                )
+                logger.info(f"  - Fundamentals ({window})")
             if not skip_ratios:
                 logger.info(f"  - Financial ratios for {len(symbols)} symbols")
             stats["success"] = True
@@ -183,6 +213,7 @@ def run_quarterly(
                 output_dir / "fundamentals",
                 logger,
                 rate_limiter,
+                filing_date_gte=filing_gte_str,
             )
             stats["fundamentals"] = fund_stats
             # Load into database

@@ -23,10 +23,10 @@ from sawa.database.news import fetch_and_load_news
 from sawa.domain.exceptions import ProviderError
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
-from sawa.utils.notify import NotificationLevel
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 from sawa.utils.market_hours import get_market_date, is_after_market_close
+from sawa.utils.notify import NotificationLevel
 
 # Must match doctor's stock_prices.latest_coverage threshold so the daily backfill
 # doesn't leave a date that the post-run doctor check will then flag.
@@ -145,9 +145,10 @@ def _is_valid_price_row(p: dict[str, Any]) -> bool:
     """Reject price rows that would corrupt downstream data.
 
     Guards the upsert against NULL/non-positive OHLC (after rounding to the
-    stored NUMERIC(16,4) precision, so sub-penny prices that collapse to 0 are
-    excluded rather than overwriting a good row with 0.0000), inverted
-    high < low bars, and negative volume.
+    stored NUMERIC(20,8) precision, so prices that collapse to 0 are excluded
+    rather than overwriting a good row with 0), inverted high < low bars, and
+    negative volume. The 8-decimal scale preserves sub-penny reverse-split-
+    adjusted prices (down to 1e-8) that scale-4 rounding would have dropped.
     """
     o, h, low_v, c, v = p.get("open"), p.get("high"), p.get("low"), p.get("close"), p.get("volume")
     if None in (o, h, low_v, c, v):
@@ -156,7 +157,7 @@ def _is_valid_price_row(p: dict[str, Any]) -> bool:
         o, h, low_v, c, v = float(o), float(h), float(low_v), float(c), float(v)
     except (TypeError, ValueError):
         return False
-    if any(round(x, 4) <= 0 for x in (o, h, low_v, c)):
+    if any(round(x, 8) <= 0 for x in (o, h, low_v, c)):
         return False
     if v < 0 or h < low_v:
         return False
@@ -307,6 +308,62 @@ def merge_cboe_internals(
     return fred_rows
 
 
+def _heal_splits_in_window(
+    api_key: str,
+    database_url: str,
+    start_date: date,
+    logger: logging.Logger,
+    stats: dict[str, Any],
+) -> None:
+    """Re-base prices + recompute TA for splits that executed since ``start_date``.
+
+    Polygon's adjusted=true endpoint re-bases the FULL price history on a split,
+    but the daily fetch only writes new dates — so a split executing Mon-Fri
+    leaves the historical series (and all stored technical indicators) split-
+    discontinuous until the next weekly run. This detects splits whose
+    execution_date falls in the just-fetched window and self-heals them the same
+    day: refresh the back-adjusted history, then fully recompute the affected
+    tickers' technical_indicators from the adjusted series. Idempotent.
+    """
+    from sawa.corporate_actions import run_corporate_actions_update
+
+    logger.info("\nChecking for splits in the fetched window (same-day self-heal)...")
+    # One global splits call scoped to the window; dividends/earnings skipped.
+    ca_stats = run_corporate_actions_update(
+        api_key=api_key,
+        database_url=database_url,
+        start_date=start_date,
+        include_splits=True,
+        include_dividends=False,
+        include_earnings=False,
+        logger=logger,
+    )
+    split_tickers = ca_stats.get("split_tickers", [])
+    stats["split_heal"] = {"splits_loaded": ca_stats.get("splits_loaded", 0)}
+    if not split_tickers:
+        logger.info("  No splits in window - nothing to self-heal")
+        return
+
+    from sawa.split_adjust import refresh_split_adjusted_prices
+    from sawa.ta_backfill import recompute_ta_for_tickers
+
+    logger.info(f"  Re-adjusting prices for {len(split_tickers)} split ticker(s)...")
+    adjust_stats = refresh_split_adjusted_prices(
+        api_key=api_key,
+        database_url=database_url,
+        tickers=split_tickers,
+        logger=logger,
+    )
+    stats["split_heal"]["split_adjust"] = adjust_stats
+
+    logger.info(f"  Recomputing TA for {len(split_tickers)} split ticker(s)...")
+    stats["split_heal"]["ta_recompute"] = recompute_ta_for_tickers(
+        database_url=database_url,
+        tickers=split_tickers,
+        log=logger,
+    )
+
+
 def run_daily(
     api_key: str,
     database_url: str,
@@ -398,28 +455,23 @@ def run_daily(
             logger.info(f"Found {len(symbols)} symbols in database")
             stats["symbols"] = len(symbols)
 
-        # Check if prices need updating
-        prices_up_to_date = start_date > end_date or skip_prices
-        trading_days: list[str] = []
+        # Decide whether to fetch prices purely from the date window — NOT from a
+        # single proxy-ticker probe. fetch_prices_via_api already returns nothing
+        # on non-trading days, so an empty/halted AAPL bar must not skip the whole
+        # universe's EOD.
+        should_fetch_prices = not skip_prices and start_date <= end_date
 
         if skip_prices:
             logger.info("Skipping prices (--news-only)")
             stats["prices_inserted"] = 0
-        elif prices_up_to_date:
+        elif not should_fetch_prices:
             logger.info("Prices already up to date.")
             stats["prices_inserted"] = 0
-        else:
-            # Get trading days for the update period
-            logger.info(f"\nGetting trading days from {start_str} to {end_str}...")
-            trading_days = client.get_trading_days(start_str, end_str)
-            logger.info(f"  Found {len(trading_days)} trading days")
-            stats["trading_days"] = len(trading_days)
 
         if dry_run:
             logger.info("\n[DRY RUN] Would fetch:")
-            if trading_days:
+            if should_fetch_prices:
                 logger.info(f"  - Prices for {len(symbols)} symbols")
-                logger.info(f"  - {len(trading_days)} trading days")
                 logger.info(f"  - Date range: {start_str} to {end_str}")
             else:
                 logger.info("  - No price updates needed")
@@ -433,49 +485,96 @@ def run_daily(
             stats["dry_run"] = True
             return stats
 
-        # Fetch and insert prices if there are trading days
-        if trading_days:
-            logger.info("\nFetching prices via API...")
-            prices = fetch_prices_via_api(
-                client, symbols, start_str, end_str, logger, rate_limiter, stats=stats
-            )
-            logger.info(f"  Fetched {len(prices)} price records")
-            stats["prices_fetched"] = len(prices)
-
-            logger.info("\nInserting prices into database...")
-            with psycopg.connect(database_url) as conn:
-                inserted = insert_prices(conn, prices, logger)
-
-                # If we just inserted today's EOD, cleanup intraday data for
-                # today — but only once today's EOD actually landed with
-                # adequate coverage. A partially-failed EOD fetch must not wipe
-                # the intraday fallback for tickers that got no EOD row.
-                if end_date == get_market_date():
-                    latest_count, baseline = _last_date_coverage(conn, end_date)
-                    required = ceil(baseline * MIN_LATEST_COVERAGE) if baseline else 0
-                    if baseline and latest_count >= required:
-                        try:
-                            from sawa.database.intraday_load import cleanup_today_intraday_data
-
-                            cleanup_today_intraday_data(conn, logger)
-                        except ImportError:
-                            pass
-                    else:
-                        logger.warning(
-                            f"  Today's EOD coverage {latest_count}/{baseline} below "
-                            f"{MIN_LATEST_COVERAGE:.0%}; keeping intraday data as fallback"
-                        )
-
-                # Cleanup old intraday data (>7 days)
+        # Fetch and insert prices. Isolated in its own try/except so a Polygon
+        # outage on the price path degrades to "prices skipped" and lets the
+        # downstream steps (news/TA/market-internals — separate providers) still
+        # run, mirroring the per-step isolation already applied below.
+        if should_fetch_prices:
+            try:
+                # The trading-days probe is informational only (a single
+                # proxy-ticker call); the fetch below does not depend on it.
                 try:
-                    from sawa.database.intraday_load import cleanup_old_intraday_data
+                    logger.info(f"\nGetting trading days from {start_str} to {end_str}...")
+                    trading_days = client.get_trading_days(start_str, end_str)
+                    logger.info(f"  Found {len(trading_days)} trading days")
+                    stats["trading_days"] = len(trading_days)
+                except Exception as e:
+                    logger.warning(
+                        f"  Trading-days probe failed ({type(e).__name__}: {e}); "
+                        "proceeding with the fetch anyway"
+                    )
 
-                    cleanup_old_intraday_data(conn, 7, logger)
-                except ImportError:
-                    pass
+                logger.info("\nFetching prices via API...")
+                prices = fetch_prices_via_api(
+                    client, symbols, start_str, end_str, logger, rate_limiter, stats=stats
+                )
+                logger.info(f"  Fetched {len(prices)} price records")
+                stats["prices_fetched"] = len(prices)
 
-            logger.info(f"  Inserted {inserted} records")
-            stats["prices_inserted"] = inserted
+                logger.info("\nInserting prices into database...")
+                with psycopg.connect(database_url) as conn:
+                    inserted = insert_prices(conn, prices, logger)
+
+                    # If we just inserted today's EOD, cleanup intraday data for
+                    # today — but only once today's EOD actually landed with
+                    # adequate coverage. A partially-failed EOD fetch must not
+                    # wipe the intraday fallback for tickers that got no EOD row.
+                    if end_date == get_market_date():
+                        latest_count, baseline = _last_date_coverage(conn, end_date)
+                        required = ceil(baseline * MIN_LATEST_COVERAGE) if baseline else 0
+                        if baseline and latest_count >= required:
+                            try:
+                                from sawa.database.intraday_load import (
+                                    cleanup_today_intraday_data,
+                                )
+
+                                cleanup_today_intraday_data(conn, logger)
+                            except ImportError:
+                                pass
+                        else:
+                            logger.warning(
+                                f"  Today's EOD coverage {latest_count}/{baseline} below "
+                                f"{MIN_LATEST_COVERAGE:.0%}; keeping intraday data as fallback"
+                            )
+
+                    # Cleanup old intraday data (>7 days)
+                    try:
+                        from sawa.database.intraday_load import cleanup_old_intraday_data
+
+                        cleanup_old_intraday_data(conn, 7, logger)
+                    except ImportError:
+                        pass
+
+                logger.info(f"  Inserted {inserted} records")
+                stats["prices_inserted"] = inserted
+            except (httpx.RequestError, ProviderError, psycopg.Error) as e:
+                logger.warning(f"Price fetch/insert failed: {type(e).__name__}: {e}")
+                stats["prices_error"] = f"{type(e).__name__}: {e}"
+                get_notifier(logger).send(
+                    title="Sawa: daily price fetch failed",
+                    body=(
+                        f"Price fetch/insert failed during daily run.\n"
+                        f"{type(e).__name__}: {e}\n\n"
+                        "Daily continued with news + TA + market internals. Prices "
+                        "will be retried on the next run (last_price_date did not "
+                        "advance)."
+                    ),
+                    level=NotificationLevel.WARNING,
+                    tags=["warning", "daily", "prices"],
+                )
+
+        # Same-day split self-heal: if a split executed in the window we just
+        # fetched, re-base the full history and recompute its TA now (instead of
+        # waiting for the Saturday weekly run, which would leave the price/TA
+        # series split-discontinuous for up to ~4 trading days). Detects splits
+        # via one global Polygon /v3/reference/splits call scoped to the window;
+        # idempotent (upserts) and isolated so a failure doesn't abort the run.
+        if not skip_prices and start_date <= end_date and not stats.get("prices_error"):
+            try:
+                _heal_splits_in_window(api_key, database_url, start_date, logger, stats)
+            except Exception as e:
+                logger.warning(f"Daily split self-heal failed: {type(e).__name__}: {e}")
+                stats["split_heal_error"] = f"{type(e).__name__}: {e}"
 
         if not skip_prices:
             try:
@@ -665,6 +764,8 @@ def run_daily(
         # day where news/TA/internals silently failed is not reported as a clean
         # success — and so the operator/scheduler can react.
         degraded_reasons: list[str] = []
+        if stats.get("prices_error"):
+            degraded_reasons.append("price fetch failed")
         if stats.get("news_error"):
             degraded_reasons.append("news fetch failed")
         if stats.get("ta_skipped"):
@@ -674,7 +775,9 @@ def run_daily(
         if stats.get("52week_extremes_refresh_error"):
             degraded_reasons.append("52-week extremes refresh failed")
         if stats.get("market_internals_skipped"):
-            degraded_reasons.append(f"market internals skipped ({stats['market_internals_skipped']})")
+            degraded_reasons.append(
+                f"market internals skipped ({stats['market_internals_skipped']})"
+            )
         stats["degraded"] = bool(degraded_reasons)
         if degraded_reasons:
             stats["degraded_reasons"] = degraded_reasons

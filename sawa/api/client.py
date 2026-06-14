@@ -320,21 +320,30 @@ class PolygonClient:
     def get_trading_days(self, start_date: str, end_date: str, ticker: str = "AAPL") -> list[str]:
         """Get trading days in date range using ticker as proxy."""
         ticker = validate_ticker(ticker)
-        data = self.get(
-            "aggregates",
-            path_params={"ticker": ticker, "start": start_date, "end": end_date},
-            params={"adjusted": "true"},
+        # Pass an explicit high limit + sort like the other aggregate callers
+        # (daily.py / add_symbol.py use limit=50000). Polygon's /v2/aggs
+        # otherwise defaults to limit=5000 ascending, which would silently
+        # truncate ranges longer than ~5000 trading days (~19.8 years) and,
+        # because results are ascending, drop the MOST RECENT trading days.
+        # The aggregates endpoint is paginated, so follow next_url too.
+        path = ENDPOINTS["aggregates"].format(ticker=ticker, start=start_date, end=end_date)
+        results = self.get_paginated(
+            path,
+            params={"adjusted": "true", "limit": 50000, "sort": "asc"},
         )
-        results = data.get("results", [])
         from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 
         return [timestamp_to_date(r["t"]).strftime(DATE_FORMAT) for r in results if r.get("t")]
 
     def get_ratios(self, ticker: str, limit: int = 100) -> list[dict[str, Any]]:
-        """Get financial ratios for ticker."""
+        """Get financial ratios for ticker.
+
+        Routes through get_paginated (follows next_url) like the other
+        financial-data getters, so a ticker with more than `limit` ratio rows
+        is not silently truncated to the first page.
+        """
         ticker = validate_ticker(ticker)
-        data = self.get("ratios", params={"ticker": ticker, "limit": limit})
-        return cast(list[dict[str, Any]], data.get("results", []))
+        return self.get_paginated("ratios", params={"ticker": ticker, "limit": limit})
 
     def get_fundamentals(
         self,
@@ -343,9 +352,16 @@ class PolygonClient:
         start_date: str | None = None,
         end_date: str | None = None,
         timeframe: str | None = None,
+        filing_date_gte: str | None = None,
         limit: int = 10000,
     ) -> list[dict[str, Any]]:
-        """Get fundamentals data (balance sheets, income, cash flow)."""
+        """Get fundamentals data (balance sheets, income, cash flow).
+
+        start_date/end_date filter on period_end (when the fiscal period
+        closed). filing_date_gte filters on filing_date (when the report
+        became available), which the incremental quarterly pull uses to
+        catch late filings and restatements of older periods.
+        """
         params: dict[str, Any] = {"limit": limit}
         if ticker:
             ticker = validate_ticker(ticker)
@@ -354,6 +370,8 @@ class PolygonClient:
             params["period_end.gte"] = start_date
         if end_date:
             params["period_end.lte"] = end_date
+        if filing_date_gte:
+            params["filing_date.gte"] = filing_date_gte
         if timeframe:
             params["timeframe"] = timeframe
         return self.get_paginated(endpoint, params)
