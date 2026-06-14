@@ -121,8 +121,8 @@ class Earnings:
     timing: str | None = None  # BMO, AMC, DMH
     eps_estimate: Decimal | None = None
     eps_actual: Decimal | None = None
-    revenue_estimate: int | None = None
     revenue_actual: int | None = None
+    surprise_pct: Decimal | None = None
 
     @property
     def eps_surprise(self) -> Decimal | None:
@@ -158,12 +158,15 @@ class Earnings:
                 Decimal(str(attrs["eps_estimate"])) if attrs.get("eps_estimate") else None
             ),
             eps_actual=Decimal(str(attrs["eps_actual"])) if attrs.get("eps_actual") else None,
-            revenue_estimate=attrs.get("revenue_estimate"),
             revenue_actual=attrs.get("revenue_actual"),
         )
 
     def to_tuple(self) -> tuple:
-        """Convert to tuple for database insertion."""
+        """Convert to tuple for database insertion.
+
+        Column order matches the migrated earnings schema (migration 19/20:
+        revenue_estimate dropped, surprise_pct added).
+        """
         return (
             self.ticker,
             self.report_date,
@@ -172,8 +175,8 @@ class Earnings:
             self.timing,
             self.eps_estimate,
             self.eps_actual,
-            self.revenue_estimate,
             self.revenue_actual,
+            self.surprise_pct if self.surprise_pct is not None else self.eps_surprise_pct,
         )
 
     @staticmethod
@@ -187,6 +190,6 @@ class Earnings:
             "timing",
             "eps_estimate",
             "eps_actual",
-            "revenue_estimate",
             "revenue_actual",
+            "surprise_pct",
         ]

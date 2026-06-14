@@ -110,31 +110,38 @@ def load_earnings(
     earnings: list[Earnings],
     logger: logging.Logger,
 ) -> int:
-    """Load earnings into database using upsert."""
+    """Load earnings into database using upsert.
+
+    Aligned to the migrated earnings schema (migration 19 swapped the unique
+    constraint to (ticker, report_date); migration 20 dropped revenue_estimate
+    and added surprise_pct), so the upsert keys on report_date rather than the
+    no-longer-present fiscal-period constraint.
+    """
     if not earnings:
         return 0
 
     insert_sql = """
         INSERT INTO earnings (
             ticker, report_date, fiscal_quarter, fiscal_year,
-            timing, eps_estimate, eps_actual, revenue_estimate, revenue_actual
+            timing, eps_estimate, eps_actual, revenue_actual, surprise_pct
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ticker, fiscal_year, fiscal_quarter) DO UPDATE SET
-            report_date = EXCLUDED.report_date,
+        ON CONFLICT (ticker, report_date) DO UPDATE SET
+            fiscal_quarter = EXCLUDED.fiscal_quarter,
+            fiscal_year = EXCLUDED.fiscal_year,
             timing = EXCLUDED.timing,
             eps_estimate = EXCLUDED.eps_estimate,
             eps_actual = EXCLUDED.eps_actual,
-            revenue_estimate = EXCLUDED.revenue_estimate,
-            revenue_actual = EXCLUDED.revenue_actual
+            revenue_actual = EXCLUDED.revenue_actual,
+            surprise_pct = EXCLUDED.surprise_pct
     """
 
     loaded = 0
     with conn.cursor() as cur:
         for earn in earnings:
-            # Skip if missing fiscal period info (required for unique constraint)
-            if not earn.fiscal_year or not earn.fiscal_quarter:
-                logger.debug(f"Skipping earnings without fiscal period: {earn.ticker}")
+            # Skip if missing report_date (the unique-constraint key).
+            if not earn.report_date:
+                logger.debug(f"Skipping earnings without report_date: {earn.ticker}")
                 continue
             try:
                 cur.execute("SAVEPOINT row_insert")
@@ -225,7 +232,10 @@ def run_corporate_actions_update(
                 ticker_set = set(tickers)
                 splits = [s for s in splits if s.ticker in ticker_set]
                 stats["splits_loaded"] = load_splits(conn, splits, logger)
-                stats["split_tickers"] = [s.ticker for s in splits]
+                # Distinct tickers only: a ticker with multiple splits in the
+                # window would otherwise trigger a redundant full-history
+                # re-fetch per split in refresh_split_adjusted_prices.
+                stats["split_tickers"] = list(dict.fromkeys(s.ticker for s in splits))
                 logger.info(f"  Loaded {stats['splits_loaded']} splits")
             elif dry_run:
                 logger.info("  [DRY RUN] Would load splits")

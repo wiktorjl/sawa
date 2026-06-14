@@ -318,7 +318,10 @@ def calculate_indicators_for_ticker(
 # jumps on a full backfill). Fetching ~4x the longest period pushes the seed's
 # residual weight on EMA-200 below ~0.1% ((1-2/201)^~680 ≈ 0.001), so each
 # day's value converges to the full-history EMA within storage precision.
-# A periodic full-history recompute (run_weekly) resets any residual drift.
+# Note: there is no periodic full-history recompute for the whole universe — the
+# only full recompute is recompute_ta_for_tickers, fired for split-affected
+# tickers after price adjustment (weekly + daily self-heal). A manual
+# `sawa ta-backfill` is the way to reset residual drift across all tickers.
 EMA_WARMUP_MULTIPLIER = 4
 
 # Trading days -> calendar days. ~252 trading days per 365 calendar days, so a

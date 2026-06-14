@@ -24,10 +24,10 @@ from sawa.database.load import (
 )
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
-from sawa.utils.notify import NotificationLevel
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
+from sawa.utils.notify import NotificationLevel
 
 ECONOMY_ENDPOINT_TABLES = {
     "treasury-yields": "treasury_yields",
@@ -243,34 +243,66 @@ def run_weekly(
             ]
         )
 
+        # Each independent step is wrapped so one raising does not abort the
+        # rest (the steps take database_url/symbols and don't depend on each
+        # other). Failures are recorded into stats and the overall run fails at
+        # the end if any required step failed — mirroring the market-internals
+        # step that was already guarded.
+        step_errors: dict[str, str] = {}
+
+        def _record_step_failure(name: str, exc: Exception, impact: str) -> None:
+            logger.error(f"Weekly step '{name}' failed: {type(exc).__name__}: {exc}")
+            step_errors[name] = f"{type(exc).__name__}: {exc}"
+            stats[f"{name}_error"] = step_errors[name]
+            get_notifier(logger).send(
+                title=f"Sawa: weekly {name} step failed",
+                body=(
+                    f"The '{name}' step failed during the weekly run.\n"
+                    f"{type(exc).__name__}: {exc}\n\n"
+                    f"{impact} Remaining weekly steps still ran."
+                ),
+                level=NotificationLevel.WARNING,
+                tags=["warning", "weekly", name],
+            )
+
         # Step: Update company overviews
         if not skip_overviews:
             logger.info(f"\n[{step}/{total_steps}] Updating company overviews...")
             step += 1
-            overview_count = download_overviews(
-                client, symbols, output_dir / "overviews", logger, rate_limiter
-            )
-            stats["overviews"] = overview_count
-            # Load into database
-            with psycopg.connect(database_url) as conn:
-                load_companies(conn, output_dir / "overviews" / "overviews.csv", logger)
+            try:
+                overview_count = download_overviews(
+                    client, symbols, output_dir / "overviews", logger, rate_limiter
+                )
+                stats["overviews"] = overview_count
+                # Load into database
+                with psycopg.connect(database_url) as conn:
+                    load_companies(conn, output_dir / "overviews" / "overviews.csv", logger)
+            except Exception as e:
+                _record_step_failure(
+                    "overviews", e, "Company metadata will be stale until the next run."
+                )
 
         # Step: Update economy data
         if not skip_economy:
             logger.info(f"\n[{step}/{total_steps}] Updating economy data...")
             step += 1
-            econ_stats = download_economy(
-                client,
-                min(economy_start_dates.values()),
-                end_str,
-                output_dir / "economy",
-                logger,
-                start_dates=economy_start_dates,
-            )
-            stats["economy"] = econ_stats
-            # Load into database
-            with psycopg.connect(database_url) as conn:
-                load_economy(conn, output_dir / "economy", logger)
+            try:
+                econ_stats = download_economy(
+                    client,
+                    min(economy_start_dates.values()),
+                    end_str,
+                    output_dir / "economy",
+                    logger,
+                    start_dates=economy_start_dates,
+                )
+                stats["economy"] = econ_stats
+                # Load into database
+                with psycopg.connect(database_url) as conn:
+                    load_economy(conn, output_dir / "economy", logger)
+            except Exception as e:
+                _record_step_failure(
+                    "economy", e, "Treasury/inflation/labor data will be stale until the next run."
+                )
 
         # Step: Update market internals from FRED
         if fred_api_key:
@@ -311,48 +343,86 @@ def run_weekly(
         if not skip_news:
             logger.info(f"\n[{step}/{total_steps}] Updating news articles...")
             step += 1
-            with psycopg.connect(database_url) as conn:
-                news_count = load_news(conn, client, symbols, days=DEFAULT_NEWS_DAYS, log=logger)
-            stats["news"] = news_count
+            try:
+                with psycopg.connect(database_url) as conn:
+                    news_count = load_news(
+                        conn, client, symbols, days=DEFAULT_NEWS_DAYS, log=logger
+                    )
+                stats["news"] = news_count
+            except Exception as e:
+                _record_step_failure(
+                    "news", e, "News articles will catch up on the next run (30-day re-pull)."
+                )
 
         # Step: Update corporate actions (splits, dividends)
         if not skip_corporate_actions:
             logger.info(f"\n[{step}/{total_steps}] Updating corporate actions...")
             step += 1
-            ca_stats = run_corporate_actions_update(
-                api_key=api_key,
-                database_url=database_url,
-                dry_run=False,
-                logger=logger,
-            )
-            stats["corporate_actions"] = ca_stats
-
-            # If splits were loaded, re-fetch adjusted prices for affected tickers
-            split_tickers = ca_stats.get("split_tickers", [])
-            if split_tickers:
-                from sawa.split_adjust import refresh_split_adjusted_prices
-
-                logger.info(f"\nAdjusting prices for {len(split_tickers)} split ticker(s)...")
-                adjust_stats = refresh_split_adjusted_prices(
+            try:
+                ca_stats = run_corporate_actions_update(
                     api_key=api_key,
                     database_url=database_url,
-                    tickers=split_tickers,
+                    dry_run=False,
                     logger=logger,
                 )
-                stats["split_adjust"] = adjust_stats
+                stats["corporate_actions"] = ca_stats
+
+                # If splits were loaded, re-fetch adjusted prices for affected
+                # tickers, then fully recompute their technical indicators so
+                # stored SMA/EMA/RSI track the back-adjusted prices instead of
+                # staying off by the split ratio.
+                split_tickers = ca_stats.get("split_tickers", [])
+                if split_tickers:
+                    from sawa.split_adjust import refresh_split_adjusted_prices
+
+                    logger.info(
+                        f"\nAdjusting prices for {len(split_tickers)} split ticker(s)..."
+                    )
+                    adjust_stats = refresh_split_adjusted_prices(
+                        api_key=api_key,
+                        database_url=database_url,
+                        tickers=split_tickers,
+                        logger=logger,
+                    )
+                    stats["split_adjust"] = adjust_stats
+
+                    from sawa.ta_backfill import recompute_ta_for_tickers
+
+                    logger.info(
+                        f"\nRecomputing technical indicators for "
+                        f"{len(split_tickers)} split ticker(s)..."
+                    )
+                    stats["split_ta_recompute"] = recompute_ta_for_tickers(
+                        database_url=database_url,
+                        tickers=split_tickers,
+                        log=logger,
+                    )
+            except Exception as e:
+                _record_step_failure(
+                    "corporate_actions",
+                    e,
+                    "Splits/dividends and split price/TA adjustment did not update this run.",
+                )
 
         # Step: Stock character classification
         if not skip_character:
-            from sawa.stock_character_batch import run_stock_character_batch
-
             logger.info(f"\n[{step}/{total_steps}] Running stock character classification...")
             step += 1
-            character_stats = run_stock_character_batch(
-                database_url=database_url,
-                workers=character_workers,
-                log=logger,
-            )
-            stats["character"] = character_stats
+            try:
+                from sawa.stock_character_batch import run_stock_character_batch
+
+                character_stats = run_stock_character_batch(
+                    database_url=database_url,
+                    workers=character_workers,
+                    log=logger,
+                )
+                stats["character"] = character_stats
+            except Exception as e:
+                _record_step_failure(
+                    "character",
+                    e,
+                    "Stock character classification will be stale until the next run.",
+                )
 
         # Maintenance: refresh the MCP execute_query insights cache. Nothing else
         # regenerates it, so the "agents reaching for raw SQL where a tool exists"
@@ -377,11 +447,23 @@ def run_weekly(
             logger.warning(f"MCP query insights refresh failed: {e}")
             stats["mcp_query_insights_error"] = str(e)
 
-        stats["success"] = True
+        # The run reaches here without a fatal exception, but individual steps
+        # may have failed (caught + recorded above). Fail the overall run if any
+        # did, so the scheduler withholds the weekly_done flag and retries — but
+        # only after every independent step had its chance to run.
+        if step_errors:
+            stats["success"] = False
+            stats["step_errors"] = step_errors
+        else:
+            stats["success"] = True
         logger.info("\n" + "=" * 60)
-        logger.info("WEEKLY UPDATE COMPLETE")
+        logger.info(
+            "WEEKLY UPDATE COMPLETE" + (" (DEGRADED)" if step_errors else "")
+        )
         logger.info("=" * 60)
 
+        if step_errors:
+            logger.warning("  Failed steps: " + ", ".join(sorted(step_errors)))
         if "overviews" in stats:
             logger.info(f"  Overviews: {stats['overviews']}")
         if "economy" in stats:

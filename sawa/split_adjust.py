@@ -16,7 +16,7 @@ from sawa.api import PolygonClient
 from sawa.daily import fetch_prices_via_api, insert_prices
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
-from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, SPLIT_ADJUST_BLACKLIST
+from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
 from sawa.utils.dates import DATE_FORMAT
 
 
@@ -81,19 +81,15 @@ def refresh_split_adjusted_prices(
     rate_limiter = SyncRateLimiter(DEFAULT_API_RATE_LIMIT)
 
     with psycopg.connect(database_url) as conn:
-        # Determine which tickers need adjustment
+        # Determine which tickers need adjustment. Dedupe so a ticker that split
+        # multiple times in the window isn't re-fetched (full earliest-to-present
+        # history) once per split.
         if tickers is None:
             tickers = get_tickers_with_recent_splits(conn, since)
-
-        # Drop tickers whose Polygon-adjusted history overflows our NUMERIC(16,4)
-        # price columns. See SPLIT_ADJUST_BLACKLIST for the why.
-        skipped = [t for t in tickers if t in SPLIT_ADJUST_BLACKLIST]
-        if skipped:
-            tickers = [t for t in tickers if t not in SPLIT_ADJUST_BLACKLIST]
-            logger.warning(
-                f"Skipping {len(skipped)} blacklisted ticker(s): {', '.join(sorted(set(skipped)))}"
-            )
-            stats["skipped_tickers"] = sorted(set(skipped))
+        else:
+            # Preserve order, drop duplicates (callers may pass one entry per
+            # split row, e.g. weekly's stats['split_tickers']).
+            tickers = list(dict.fromkeys(tickers))
 
         if not tickers:
             logger.info("No tickers with recent splits found - nothing to adjust")
@@ -101,6 +97,9 @@ def refresh_split_adjusted_prices(
             return stats
 
         logger.info(f"Found {len(tickers)} ticker(s) with splits to adjust: {', '.join(tickers)}")
+        # Expose the resolved ticker list so callers (e.g. the adjust-splits CLI)
+        # can recompute technical indicators for exactly the adjusted tickers.
+        stats["tickers"] = tickers
 
         # Get earliest price date to know how far back to fetch
         earliest = get_earliest_price_date(conn, tickers)

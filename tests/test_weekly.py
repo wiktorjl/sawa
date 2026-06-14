@@ -1,8 +1,118 @@
 import logging
+import os
 from datetime import date
+from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from sawa import weekly
+
+
+class _FakeCursor:
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def execute(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def fetchone(self) -> Any:
+        return (None,)
+
+    def fetchall(self) -> list[Any]:
+        return []
+
+
+class _FakeConn:
+    def __enter__(self) -> "_FakeConn":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor()
+
+    def commit(self) -> None:
+        return None
+
+
+def _run_weekly_with_mocks(**overrides: Any) -> dict[str, Any]:
+    """Run run_weekly with all external effects mocked (no DB / no network)."""
+    defaults: dict[str, Any] = {
+        "download_overviews": mock.DEFAULT,
+        "download_economy": {"treasury-yields": 1},
+        "load_companies": None,
+        "load_economy": None,
+        "load_news": 5,
+        "run_corporate_actions_update": {"splits_loaded": 0, "split_tickers": []},
+        "character": {"classified": 2, "total": 2, "errors": 0},
+    }
+    defaults.update(overrides)
+    os.environ.pop("FRED_API_KEY", None)
+    with mock.patch.object(weekly, "psycopg") as mpg, mock.patch.object(
+        weekly, "PolygonClient"
+    ), mock.patch.object(weekly, "SyncRateLimiter"), mock.patch.object(
+        weekly, "get_symbols_from_db", return_value=["AAPL", "MSFT"]
+    ), mock.patch.object(weekly, "get_last_date", return_value=date(2026, 1, 1)), mock.patch.object(
+        weekly, "download_overviews", return_value=3
+    ) as movr, mock.patch.object(
+        weekly, "download_economy", return_value=defaults["download_economy"]
+    ), mock.patch.object(weekly, "load_companies"), mock.patch.object(
+        weekly, "load_economy"
+    ), mock.patch.object(
+        weekly, "load_news", return_value=defaults["load_news"]
+    ), mock.patch.object(
+        weekly,
+        "run_corporate_actions_update",
+        return_value=defaults["run_corporate_actions_update"],
+    ), mock.patch(
+        "sawa.split_adjust.refresh_split_adjusted_prices",
+        return_value={"success": True, "prices_updated": 100},
+    ) as madj, mock.patch(
+        "sawa.ta_backfill.recompute_ta_for_tickers",
+        return_value={"success": True, "deleted": 10, "indicators_calculated": 12},
+    ) as mrec, mock.patch(
+        "sawa.stock_character_batch.run_stock_character_batch",
+        return_value=defaults["character"],
+    ), mock.patch.object(weekly, "get_notifier"), mock.patch.object(
+        weekly, "alert_missing_api_key"
+    ):
+        if overrides.get("download_overviews") is RuntimeError:
+            movr.side_effect = RuntimeError("bad overviews.csv")
+        mpg.connect.return_value = _FakeConn()
+        stats = weekly.run_weekly(
+            api_key="k",
+            database_url="db",
+            output_dir=Path("/tmp/sawa_test_weekly"),
+            logger=logging.getLogger(__name__),
+        )
+        stats["_adj_mock"] = madj
+        stats["_rec_mock"] = mrec
+    return stats
+
+
+def test_weekly_recomputes_ta_after_split_adjust() -> None:
+    stats = _run_weekly_with_mocks(
+        run_corporate_actions_update={"splits_loaded": 1, "split_tickers": ["KLAC"]},
+    )
+    assert stats["_adj_mock"].called
+    assert stats["_rec_mock"].called
+    assert stats["_rec_mock"].call_args.kwargs["tickers"] == ["KLAC"]
+    assert stats["split_ta_recompute"]["indicators_calculated"] == 12
+    assert stats["success"] is True
+
+
+def test_weekly_early_step_failure_does_not_abort_later_steps() -> None:
+    stats = _run_weekly_with_mocks(download_overviews=RuntimeError)
+    # The overviews step failed but the run continued through the later steps.
+    assert stats["success"] is False
+    assert "overviews" in stats["step_errors"]
+    assert stats["economy"] == {"treasury-yields": 1}
+    assert stats["news"] == 5
+    assert stats["character"] == {"classified": 2, "total": 2, "errors": 0}
 
 
 def test_get_economy_start_dates_uses_each_table(monkeypatch) -> None:
