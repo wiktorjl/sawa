@@ -1,10 +1,13 @@
 #!/bin/bash
 # Market Hours Scheduler
-# Runs via cron every 15 minutes on weekdays. Manages sawa intraday streaming
-# during market hours and runs sawa daily after market close.
+# Runs via cron every 15 minutes. Manages sawa intraday streaming during market
+# hours, runs sawa daily after market close, and runs sawa weekly once per ISO
+# week on the first eligible closed-market evening.
 #
-# Crontab entry (install manually):
-#   */15 * * * 1-5 /home/seed/code/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
+# Crontab entry (install manually). Run every day (0-6, includes Sunday) so a
+# missed Saturday weekly tick can recover on Sunday; the per-week/per-day done
+# flags keep it idempotent:
+#   */15 * * * * /home/seed/code/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
 #
 # State directory: ~/.sawa/scheduler/
 
@@ -415,9 +418,8 @@ main() {
         fi
 
         # Run daily after market close + wait period
-        local hour dow
+        local hour
         hour=$(TZ=America/New_York date '+%-H')
-        dow=$(TZ=America/New_York date '+%u')  # 1=Mon, 7=Sun
         local close_hour=$((16 + DAILY_WAIT_HOURS))  # 17 by default
 
         if [ "$hour" -lt "$close_hour" ]; then
@@ -429,14 +431,20 @@ main() {
             action_taken=true
         fi
 
-        # Run weekly on Saturdays (dow=6), after daily would have run
-        if [ "$dow" -eq 6 ]; then
-            if is_weekly_done_this_week; then
-                log "Weekly: already completed this week"
-            else
-                run_weekly
-                action_taken=true
-            fi
+        # Run weekly once per ISO week, on the first eligible closed-market
+        # evening. Decoupled from Saturday (dow=6) so a missed Saturday tick
+        # (host down, cron paused, reboot, lock held) self-heals on the next
+        # closed evening — Sunday, or a weekday after close. Idempotent via the
+        # per-week weekly_done flag; the in-job get_last_date backfill makes a
+        # later catch-up correct. Gated on $close_hour so it doesn't fire
+        # mid-session on a closed-but-early tick (e.g. a holiday morning).
+        if [ "$hour" -lt "$close_hour" ]; then
+            : # too early for the weekly job too; wait for the evening tick
+        elif is_weekly_done_this_week; then
+            log "Weekly: already completed this week"
+        else
+            run_weekly
+            action_taken=true
         fi
     fi
 

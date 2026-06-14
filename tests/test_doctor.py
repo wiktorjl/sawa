@@ -45,6 +45,15 @@ class FakeConnection:
         latest_news: datetime | None = None,
         null_sic: int = 0,
         null_mcap: int = 0,
+        economy_latest: date | None = None,
+        character_run: date | None = None,
+        character_tickers: int = 100,
+        corporate_action_rows: int = 5,
+        quarterly_latest: date | None = None,
+        quarterly_rows: int = 1000,
+        post_split_checked: int = 0,
+        post_split_flagged: int = 0,
+        post_split_worst: str = "",
     ) -> None:
         self.queries: list[str] = []
         self.tables = tables
@@ -59,6 +68,15 @@ class FakeConnection:
         self.recent_baseline_tickers = recent_baseline_tickers
         self.bad_latest_rows = bad_latest_rows
         self.latest_news = latest_news or datetime(2026, 5, 14, tzinfo=timezone.utc)
+        self.economy_latest = economy_latest or date(2026, 5, 14)
+        self.character_run = character_run or date(2026, 5, 14)
+        self.character_tickers = character_tickers
+        self.corporate_action_rows = corporate_action_rows
+        self.quarterly_latest = quarterly_latest or date(2026, 5, 14)
+        self.quarterly_rows = quarterly_rows
+        self.post_split_checked = post_split_checked
+        self.post_split_flagged = post_split_flagged
+        self.post_split_worst = post_split_worst
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -98,6 +116,16 @@ class FakeConnection:
         if "open IS NULL" in compact:
             return (self.bad_latest_rows,)
 
+        # Post-split TA recompute check: returns (checked, flagged, worst).
+        # Matched before the generic technical_indicators branch because its
+        # CTE also references FROM technical_indicators.
+        if "recent_splits" in compact and "stored_sma_50" in compact:
+            return (
+                self.post_split_checked,
+                self.post_split_flagged,
+                self.post_split_worst,
+            )
+
         if "FROM technical_indicators" in compact:
             return (self.latest_price_date, self.price_tickers)
 
@@ -109,6 +137,31 @@ class FakeConnection:
 
         if "FROM mv_52week_extremes" in compact:
             return (self.latest_price_date, self.latest_price_date)
+
+        if "FROM stock_character_classification" in compact:
+            return (self.character_run, self.character_tickers)
+
+        if compact.startswith("SELECT MAX(date) FROM") and any(
+            t in compact
+            for t in (
+                "treasury_yields",
+                "inflation",
+                "inflation_expectations",
+                "labor_market",
+            )
+        ):
+            return (self.economy_latest,)
+
+        if compact.startswith("SELECT COUNT(*) FROM") and (
+            "stock_splits" in compact or "dividends" in compact
+        ):
+            return (self.corporate_action_rows,)
+
+        if "SELECT MAX(period_end), COUNT(*)" in compact or (
+            "SELECT MAX(date), COUNT(*)" in compact
+            and "financial_ratios" in compact
+        ):
+            return (self.quarterly_latest, self.quarterly_rows)
 
         raise AssertionError(f"Unexpected query: {compact}")
 
@@ -260,6 +313,155 @@ def test_same_day_news_is_not_marked_stale() -> None:
     by_name = {c.name: c for c in checks}
 
     assert by_name["news_articles.recent"].status == "PASS"
+
+
+_DAILY_TABLES = {
+    "companies",
+    "stock_prices",
+    "technical_indicators",
+    "news_articles",
+    "market_internals",
+    "stock_prices_live",
+    "mv_52week_extremes",
+}
+
+_WEEKLY_TABLES = {
+    "companies",
+    "stock_prices",
+    "treasury_yields",
+    "inflation",
+    "inflation_expectations",
+    "labor_market",
+    "stock_splits",
+    "dividends",
+    "stock_character_classification",
+    "stock_character_scorecard",
+}
+
+_QUARTERLY_TABLES = {
+    "companies",
+    "stock_prices",
+    "financial_ratios",
+    "balance_sheets",
+    "income_statements",
+    "cash_flows",
+}
+
+
+def test_doctor_weekly_passes_when_cadence_is_fresh() -> None:
+    conn = FakeConnection(
+        tables=_WEEKLY_TABLES,
+        latest_price_date=date(2026, 5, 14),
+        economy_latest=date(2026, 5, 13),
+        character_run=date(2026, 5, 12),
+        character_tickers=100,
+    )
+
+    checks = run_doctor_on_connection(conn, job="weekly", today=date(2026, 5, 15))
+    by_name = {c.name: c for c in checks}
+
+    assert summarize_checks(checks)["success"] is True
+    assert by_name["treasury_yields.latest_date"].status == "PASS"
+    assert by_name["stock_character_classification.latest_run"].status == "PASS"
+
+
+def test_doctor_weekly_fails_on_stale_treasury_and_character() -> None:
+    # Fresh stock_prices (daily feed) but a stale weekly cadence must still flip
+    # the exit code: treasury_yields and the character run are FAIL-capable.
+    conn = FakeConnection(
+        tables=_WEEKLY_TABLES,
+        latest_price_date=date(2026, 5, 14),
+        economy_latest=date(2026, 1, 1),
+        character_run=date(2026, 1, 1),
+    )
+
+    checks = run_doctor_on_connection(conn, job="weekly", today=date(2026, 5, 15))
+    failed = {c.name for c in checks if c.status == "FAIL"}
+
+    assert summarize_checks(checks)["success"] is False
+    assert "treasury_yields.latest_date" in failed
+    assert "stock_character_classification.latest_run" in failed
+    # Slow series and coverage stay WARN, not FAIL.
+    assert "inflation.latest_date" not in failed
+    assert "labor_market.latest_date" not in failed
+    assert "stock_character_classification.coverage" not in failed
+
+
+def test_doctor_quarterly_fails_on_stale_fundamentals() -> None:
+    conn = FakeConnection(
+        tables=_QUARTERLY_TABLES,
+        latest_price_date=date(2026, 5, 14),
+        quarterly_latest=date(2025, 1, 1),
+        quarterly_rows=1000,
+    )
+
+    checks = run_doctor_on_connection(conn, job="quarterly", today=date(2026, 5, 15))
+    failed = {c.name for c in checks if c.status == "FAIL"}
+
+    assert summarize_checks(checks)["success"] is False
+    assert "financial_ratios.latest_date" in failed
+    assert "balance_sheets.latest_date" in failed
+    assert "income_statements.latest_date" in failed
+    assert "cash_flows.latest_date" in failed
+
+
+def test_doctor_quarterly_passes_when_fundamentals_fresh() -> None:
+    conn = FakeConnection(
+        tables=_QUARTERLY_TABLES,
+        latest_price_date=date(2026, 5, 14),
+        quarterly_latest=date(2026, 4, 5),
+        quarterly_rows=1000,
+    )
+
+    checks = run_doctor_on_connection(conn, job="quarterly", today=date(2026, 5, 15))
+
+    assert summarize_checks(checks)["success"] is True
+
+
+def test_post_split_ta_check_flags_uncomputed_tickers() -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES | {"stock_splits"},
+        post_split_checked=150,
+        post_split_flagged=3,
+        post_split_worst="KLAC, XXII, AERT",
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {c.name: c for c in checks}
+
+    check = by_name["technical_indicators.post_split_recompute"]
+    assert check.status == "WARN"
+    assert check.observed == 3
+    assert "KLAC" in check.message
+    # Detection-gap signal stays a WARN so the live DB (which has split
+    # tickers awaiting recompute) does not flip the exit code prematurely.
+    assert summarize_checks(checks)["success"] is True
+
+
+def test_post_split_ta_check_passes_when_recomputed() -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES | {"stock_splits"},
+        post_split_checked=150,
+        post_split_flagged=0,
+        post_split_worst="",
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {c.name: c for c in checks}
+
+    check = by_name["technical_indicators.post_split_recompute"]
+    assert check.status == "PASS"
+    assert check.observed == 0
+
+
+def test_post_split_ta_check_skipped_without_stock_splits_table() -> None:
+    conn = FakeConnection(tables=_DAILY_TABLES)
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+
+    assert not any(
+        c.name == "technical_indicators.post_split_recompute" for c in checks
+    )
 
 
 def test_format_checks_includes_summary_counts() -> None:

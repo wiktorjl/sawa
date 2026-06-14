@@ -37,7 +37,11 @@ class PriceUniverse:
     count: int
 
 
-def _fetchone(conn: Any, query: str, params: tuple[Any, ...] | None = None) -> tuple[Any, ...]:
+def _fetchone(
+    conn: Any,
+    query: str,
+    params: tuple[Any, ...] | dict[str, Any] | None = None,
+) -> tuple[Any, ...]:
     with conn.cursor() as cur:
         cur.execute(query, params or ())
         row = cur.fetchone()
@@ -382,6 +386,109 @@ def _price_checks(
     return checks
 
 
+# Post-split TA staleness detection. The daily TA loop only appends rows for
+# date > last_ta, and split_adjust rewrites historical stock_prices without
+# touching technical_indicators, so a recently-split ticker keeps TA computed
+# from pre-adjustment prices — off by ~the split ratio — while latest_date and
+# coverage still look current. We catch this by recomputing sma_50 from the
+# adjusted prices and comparing it to the stored value.
+#
+# sma_50 (not sma_5) is the signal: it stays contaminated for ~50 trading days
+# after a split, whereas the short sma_5 window self-heals within ~5 sessions.
+# 60 calendar days back from the latest price date covers that window with
+# margin. The 2% tolerance sits in a wide empirical gap — split-contaminated
+# tickers diverge >=4% (live: 0.045..8.75) while correctly-recomputed split
+# tickers land <1% off (nearest healthy ~0.6%), so the check is not flaky.
+_POST_SPLIT_TA_WINDOW_DAYS = 60
+_POST_SPLIT_TA_TOLERANCE = 0.02
+_POST_SPLIT_TA_QUERY = """
+    WITH recent_splits AS (
+        SELECT ticker, MAX(execution_date) AS exec_date
+        FROM stock_splits
+        WHERE execution_date >= (SELECT MAX(date) FROM stock_prices) - %(window)s
+        GROUP BY ticker
+    ),
+    latest_ta AS (
+        SELECT DISTINCT ON (ti.ticker)
+               ti.ticker, ti.date AS ta_date, ti.sma_50 AS stored_sma_50
+        FROM technical_indicators ti
+        JOIN recent_splits rs ON rs.ticker = ti.ticker
+        ORDER BY ti.ticker, ti.date DESC
+    ),
+    price_sma AS (
+        SELECT w.ticker,
+               AVG(w.close) AS price_sma_50,
+               COUNT(*) AS n,
+               MAX(w.maxdate) AS price_date
+        FROM (
+            SELECT ticker, close,
+                   MAX(date) OVER (PARTITION BY ticker) AS maxdate,
+                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
+            FROM stock_prices
+            WHERE ticker IN (SELECT ticker FROM recent_splits)
+        ) w
+        WHERE w.rn <= 50
+        GROUP BY w.ticker
+    ),
+    compared AS (
+        SELECT lt.ticker,
+               ABS(lt.stored_sma_50 / ps.price_sma_50 - 1) AS rel_diff
+        FROM latest_ta lt
+        JOIN price_sma ps ON ps.ticker = lt.ticker
+        WHERE ps.n >= 50
+          AND lt.ta_date = ps.price_date
+          AND lt.stored_sma_50 IS NOT NULL
+          AND lt.stored_sma_50 > 0
+          AND ps.price_sma_50 > 0
+    )
+    SELECT
+        COUNT(*) AS checked,
+        COUNT(*) FILTER (WHERE rel_diff > %(tolerance)s) AS flagged,
+        COALESCE(
+            string_agg(ticker, ', ' ORDER BY rel_diff DESC)
+                FILTER (WHERE rel_diff > %(tolerance)s),
+            ''
+        ) AS worst
+    FROM compared
+"""
+
+
+def _post_split_ta_check(conn: Any) -> DoctorCheck:
+    """Flag recently-split tickers whose stored TA was never recomputed."""
+    checked, flagged, worst = _fetchone(
+        conn,
+        _POST_SPLIT_TA_QUERY,
+        {
+            "window": _POST_SPLIT_TA_WINDOW_DAYS,
+            "tolerance": _POST_SPLIT_TA_TOLERANCE,
+        },
+    )
+    checked = int(checked or 0)
+    flagged = int(flagged or 0)
+    worst_list = str(worst or "")
+    # Cap the offender list so the message stays compact.
+    sample = ", ".join(worst_list.split(", ")[:8]) if worst_list else ""
+    if flagged > 0:
+        message = (
+            f"{flagged}/{checked} recently-split tickers have stored sma_50 "
+            f">{_POST_SPLIT_TA_TOLERANCE:.0%} off the price-derived value "
+            f"(TA not recomputed after split): {sample}"
+        )
+    else:
+        message = (
+            f"all {checked} recently-split tickers have stored sma_50 within "
+            f"{_POST_SPLIT_TA_TOLERANCE:.0%} of the price-derived value"
+        )
+    return _check(
+        "technical_indicators.post_split_recompute",
+        flagged == 0,
+        message,
+        severity="warn",
+        observed=flagged,
+        expected=0,
+    )
+
+
 def _daily_checks(
     conn: Any,
     *,
@@ -399,9 +506,13 @@ def _daily_checks(
             FROM technical_indicators
             """,
         )
-        # TA is recomputed by every daily run, so chronic staleness/coverage
-        # loss is a real failure the scheduler should catch and retry — not a
-        # silent WARN. Threshold allows for a long weekend.
+        # NEW dates get TA every daily run, so chronic staleness/coverage loss
+        # is a real failure the scheduler should catch and retry — not a silent
+        # WARN. Threshold allows for a long weekend. NOTE: the daily path only
+        # appends TA for date > last_ta; it does NOT recompute historical rows,
+        # so these two checks alone stay green even when a split has rewritten
+        # the underlying prices (see technical_indicators.post_split_recompute
+        # below, which guards that case).
         checks.append(
             _check(
                 "technical_indicators.latest_date",
@@ -422,6 +533,9 @@ def _daily_checks(
                 expected=f">= {min_coverage:.0%} of active companies",
             )
         )
+
+        if _table_exists(conn, "stock_splits"):
+            checks.append(_post_split_ta_check(conn))
 
     if _table_exists(conn, "market_internals"):
         latest_market = _fetchone(conn, "SELECT MAX(date) FROM market_internals")[0]
@@ -495,13 +609,19 @@ def _weekly_checks(
     # the weekly job, so it can lag up to a week. Threshold tightened from 21 to
     # 8 days so a *missed* weekly run (which would push it past a week) is
     # surfaced instead of hidden. (Follow-up: move it to the daily refresh.)
-    economy_thresholds = {
-        "treasury_yields": 8,
-        "inflation": 120,
-        "inflation_expectations": 120,
-        "labor_market": 120,
+    #
+    # treasury_yields is the fastest-cadence weekly series, so promote it to FAIL
+    # so a silently-skipped/failed weekly economy pull flips the exit code and
+    # the scheduler retries — the same "success on failure" guard the daily
+    # TA/internals checks already carry. The slower inflation/labor series stay
+    # WARN on their long thresholds (they genuinely refresh infrequently).
+    economy_thresholds: dict[str, tuple[int, Severity]] = {
+        "treasury_yields": (8, "fail"),
+        "inflation": (120, "warn"),
+        "inflation_expectations": (120, "warn"),
+        "labor_market": (120, "warn"),
     }
-    for table, max_age in economy_thresholds.items():
+    for table, (max_age, severity) in economy_thresholds.items():
         if not _table_exists(conn, table):
             continue
         latest = _fetchone(conn, f"SELECT MAX(date) FROM {table}")[0]
@@ -510,7 +630,7 @@ def _weekly_checks(
                 f"{table}.latest_date",
                 _within_days(latest, today, max_age),
                 f"latest {table} date is {latest}",
-                severity="warn",
+                severity=severity,
                 observed=latest,
                 expected=f"within {max_age} days of {today}",
             )
@@ -524,12 +644,17 @@ def _weekly_checks(
             FROM stock_character_classification
             """,
         )
+        # The character classification is the headline weekly artifact; a run
+        # that silently fails or is skipped leaves stale classifications served
+        # to MCP tools with no alert. Promote freshness to FAIL (the 21-day
+        # threshold still tolerates a single missed Saturday) so a stale weekly
+        # cadence flips the exit code; coverage stays WARN.
         checks.append(
             _check(
                 "stock_character_classification.latest_run",
                 _within_days(latest_run, today, 21),
                 f"latest stock character run is {latest_run}",
-                severity="warn",
+                severity="fail",
                 observed=latest_run,
                 expected=f"within 21 days of {today}",
             )
@@ -576,6 +701,12 @@ def _quarterly_checks(conn: Any, *, today: date) -> list[DoctorCheck]:
         latest = _fetchone(conn, f"SELECT MAX({date_column}), COUNT(*) FROM {table}")
         latest_date = latest[0]
         rows = int(latest[1] or 0)
+        # Fundamentals freshness is FAIL-capable: if a reporting season is
+        # missed or the quarterly pull silently fails, success=not any FAIL must
+        # flip the exit code so the run is surfaced/retried rather than served
+        # stale indefinitely. The 210-day window is deliberately loose (a single
+        # missed quarter still passes) — it only fires on a genuinely stale or
+        # empty fundamentals table.
         checks.append(
             _check(
                 f"{table}.latest_date",
@@ -583,7 +714,7 @@ def _quarterly_checks(conn: Any, *, today: date) -> list[DoctorCheck]:
                 and latest_date is not None
                 and _within_days(latest_date, today, 210),
                 f"latest {table} date is {latest_date}; total rows={rows}",
-                severity="warn",
+                severity="fail",
                 observed=latest_date,
                 expected=f"within 210 days of {today}",
             )
