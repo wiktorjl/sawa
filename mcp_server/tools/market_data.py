@@ -1,11 +1,12 @@
 """Market data MCP tools (prices, financial ratios, and technical indicators)."""
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from psycopg import sql
+from sawa.utils.market_hours import get_market_date
 
 from ..database import execute_query
 from ._index_filter import build_index_filter
@@ -103,7 +104,10 @@ def get_stock_prices(
     limit = min(limit, 1000)
 
     if end_date is None:
-        end_date = date.today().isoformat()
+        # ET market date, not UTC date.today(): on a UTC server the calendar
+        # date rolls a day ahead between ~8pm ET and midnight ET, which would
+        # otherwise drift this upper bound off the NY-anchored trading day.
+        end_date = get_market_date().isoformat()
 
     table_name = "stock_prices_live" if use_live else "stock_prices"
 
@@ -161,7 +165,10 @@ def get_financial_ratios(
     limit = min(limit, 1000)
 
     if end_date is None:
-        end_date = date.today().isoformat()
+        # ET market date, not UTC date.today(): on a UTC server the calendar
+        # date rolls a day ahead between ~8pm ET and midnight ET, which would
+        # otherwise drift this upper bound off the NY-anchored trading day.
+        end_date = get_market_date().isoformat()
 
     # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
     # ascending for output; a bare "ORDER BY date ASC LIMIT N" would drop the
@@ -380,7 +387,10 @@ def get_technical_indicators(
     limit = min(limit, 1000)
 
     if end_date is None:
-        end_date = date.today().isoformat()
+        # ET market date, not UTC date.today(): on a UTC server the calendar
+        # date rolls a day ahead between ~8pm ET and midnight ET, which would
+        # otherwise drift this upper bound off the NY-anchored trading day.
+        end_date = get_market_date().isoformat()
 
     # Most-recent `limit` rows in the range (inner DESC + LIMIT), re-ordered
     # ascending for output; a bare "ORDER BY date ASC LIMIT N" would drop the
@@ -708,7 +718,11 @@ def get_intraday_bars(
         """
         return execute_query(query, params)
     else:
-        # Return individual bars
+        # Return individual bars. Rank DESC and keep the most-recent `limit`
+        # bars per ticker, then re-order ASC for display. A plain ROW_NUMBER
+        # ORDER BY timestamp ASC + rn <= limit would keep the OLDEST bars and
+        # silently drop the afternoon/close action a "today's price action"
+        # caller wants (mirrors get_stock_prices' inner-DESC pattern).
         query = """
             WITH ranked_bars AS (
                 SELECT
@@ -721,7 +735,7 @@ def get_intraday_bars(
                     volume,
                     ROW_NUMBER() OVER (
                         PARTITION BY ticker
-                        ORDER BY timestamp ASC
+                        ORDER BY timestamp DESC
                     ) AS rn
                 FROM stock_prices_intraday
                 WHERE ticker = ANY(%(tickers)s)

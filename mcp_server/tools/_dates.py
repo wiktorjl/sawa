@@ -39,12 +39,12 @@ _PRICE_DATE_REFS_QUERY = """
         lr.latest,
         (SELECT MAX(date) FROM stock_prices WHERE date < lr.latest) AS prev_day,
         (SELECT MAX(date) FROM stock_prices
-         WHERE date <= CURRENT_DATE - INTERVAL '7 days') AS week_ago,
+         WHERE date <= mc.today - INTERVAL '7 days') AS week_ago,
         (SELECT MAX(date) FROM stock_prices
-         WHERE date <= CURRENT_DATE - INTERVAL '30 days') AS month_ago,
+         WHERE date <= mc.today - INTERVAL '30 days') AS month_ago,
         (SELECT MIN(date) FROM stock_prices
-         WHERE date >= DATE_TRUNC('year', CURRENT_DATE)) AS ytd_start
-    FROM latest_ref lr
+         WHERE date >= DATE_TRUNC('year', mc.today)) AS ytd_start
+    FROM latest_ref lr, market_clock mc
 """
 
 _EOD_DATE_REFS_QUERY = """

@@ -76,6 +76,10 @@ def test_intraday_multi_ticker_limit_is_applied_per_ticker(monkeypatch) -> None:
     assert isinstance(query, str)
     assert "ROW_NUMBER() OVER" in query
     assert "PARTITION BY ticker" in query
+    # Rank DESC so the most-recent `limit` bars per ticker are kept (not the
+    # oldest), then re-order ASC for display.
+    assert "ORDER BY timestamp DESC" in query
+    assert "ORDER BY ticker, timestamp ASC" in query
     assert "WHERE rn <= %(limit)s" in query
     assert "timestamp AT TIME ZONE 'America/New_York'" in query
     assert "TIME '09:30:00'" in query
@@ -148,6 +152,16 @@ def test_database_ratio_mapping_uses_schema_column_names() -> None:
     assert ratio.roa == Decimal("0.21")
     assert ratio.current_ratio == Decimal("1.5")
     assert ratio.quick_ratio == Decimal("1.2")
+
+    # These columns do not exist in financial_ratios, so the reader must
+    # not map them; the corresponding fields stay None rather than being
+    # read from a non-existent column.
+    assert ratio.peg_ratio is None
+    assert ratio.profit_margin is None
+    assert ratio.operating_margin is None
+    assert ratio.debt_to_assets is None
+    assert ratio.asset_turnover is None
+    assert ratio.inventory_turnover is None
 
 
 def test_database_technical_indicator_mapping_returns_newer_fields() -> None:

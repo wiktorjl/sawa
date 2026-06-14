@@ -74,9 +74,14 @@ def get_fundamentals(
         LIMIT %(limit)s
     """
 
-    # Get income statements with YoY growth metrics
+    # Get income statements with YoY growth metrics.
+    # YoY values come from the period ~1 year earlier rather than a fixed
+    # positional LAG: a hardcoded LAG(...,4) is correct only for quarterly
+    # statements (4 quarters = 1 year) and would compare annual statements
+    # against 4 years prior. Matching on period_end (between 11 and 13 months
+    # back) is correct for both timeframes and robust against missing periods.
     income_statements_sql = """
-        WITH ordered AS (
+        WITH base AS (
             SELECT
                 period_end,
                 filing_date,
@@ -91,6 +96,8 @@ def get_fundamentals(
                 basic_earnings_per_share AS basic_eps,
                 diluted_earnings_per_share AS diluted_eps,
                 ebitda,
+                revenue,
+                diluted_earnings_per_share,
                 CASE WHEN revenue > 0
                      THEN ROUND(gross_profit / revenue * 100, 2)
                      END AS gross_margin,
@@ -100,26 +107,36 @@ def get_fundamentals(
                 CASE WHEN revenue > 0
                      THEN ROUND(consolidated_net_income_loss
                           / revenue * 100, 2)
-                     END AS profit_margin,
-                LAG(diluted_earnings_per_share, 4) OVER (ORDER BY period_end) AS eps_yoy_ago,
-                LAG(revenue, 4) OVER (ORDER BY period_end) AS revenue_yoy_ago
+                     END AS profit_margin
             FROM income_statements
             WHERE ticker = %(ticker)s
                 AND timeframe = %(timeframe)s
-            ORDER BY period_end DESC
         )
         SELECT
-            period_end, filing_date, fiscal_year, fiscal_quarter,
-            total_revenue, cost_of_revenue, gross_profit, operating_expenses,
-            operating_income, net_income, basic_eps, diluted_eps, ebitda,
-            gross_margin, operating_margin, profit_margin,
-            CASE WHEN eps_yoy_ago IS NOT NULL AND eps_yoy_ago != 0
-                 THEN ROUND(((diluted_eps - eps_yoy_ago) / ABS(eps_yoy_ago) * 100)::numeric, 2)
+            b.period_end, b.filing_date, b.fiscal_year, b.fiscal_quarter,
+            b.total_revenue, b.cost_of_revenue, b.gross_profit,
+            b.operating_expenses, b.operating_income, b.net_income,
+            b.basic_eps, b.diluted_eps, b.ebitda,
+            b.gross_margin, b.operating_margin, b.profit_margin,
+            CASE WHEN prior.diluted_earnings_per_share IS NOT NULL
+                      AND prior.diluted_earnings_per_share != 0
+                 THEN ROUND(((b.diluted_eps - prior.diluted_earnings_per_share)
+                      / ABS(prior.diluted_earnings_per_share) * 100)::numeric, 2)
                  END AS eps_growth_yoy,
-            CASE WHEN revenue_yoy_ago IS NOT NULL AND revenue_yoy_ago > 0
-                 THEN ROUND(((total_revenue - revenue_yoy_ago) / revenue_yoy_ago * 100)::numeric, 2)
+            CASE WHEN prior.revenue IS NOT NULL AND prior.revenue > 0
+                 THEN ROUND(((b.total_revenue - prior.revenue)
+                      / prior.revenue * 100)::numeric, 2)
                  END AS revenue_growth_yoy
-        FROM ordered
+        FROM base b
+        LEFT JOIN LATERAL (
+            SELECT p.revenue, p.diluted_earnings_per_share
+            FROM base p
+            WHERE p.period_end BETWEEN b.period_end - INTERVAL '13 months'
+                                   AND b.period_end - INTERVAL '11 months'
+            ORDER BY p.period_end DESC
+            LIMIT 1
+        ) prior ON TRUE
+        ORDER BY b.period_end DESC
         LIMIT %(limit)s
     """
 

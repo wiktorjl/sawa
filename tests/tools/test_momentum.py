@@ -1,9 +1,12 @@
 """Tests for momentum/squeeze indicator tools."""
 
+import os
 import re
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
+
+import pytest
 
 from mcp_server.tools.momentum import (
     ADX_PERIOD,
@@ -573,7 +576,6 @@ class TestGetMomentumIndicators:
         # aggregate's own argument list does not itself contain "OVER" — that
         # would be a window nested inside a window, which PostgreSQL rejects
         # with "window function calls cannot be nested".
-        n = len(query)
         for m in re.finditer(r"\bOVER\b", query):
             # Walk left from OVER to find the matching aggregate argument list:
             # the ")" immediately preceding it and its matching "(".
@@ -726,6 +728,99 @@ class TestInterpretMomentum:
         assert signals["stochastic"] == "neutral"
         assert signals["williams_r"] == "neutral"
         assert signals["roc_momentum"] == "bullish"
+
+
+def _capture_momentum_query() -> str:
+    """Run get_momentum_indicators with execute_query mocked and return the
+    exact SQL template it builds (post-processing is skipped via empty rows)."""
+    with patch("mcp_server.tools.momentum.execute_query") as mock_query:
+        mock_query.return_value = []
+        get_momentum_indicators("AAPL")
+        return mock_query.call_args[0][0]
+
+
+class TestMomentumQueryPlaceholders:
+    """Guard against bare ``%X`` tokens in the momentum SQL.
+
+    The whole query text (comments included) is parsed by psycopg for pyformat
+    placeholders; any ``%X`` that is not ``%s``/``%b``/``%t`` (or an escaped
+    ``%%``) makes ``cur.execute`` raise ``ProgrammingError`` before the SQL
+    ever reaches Postgres, crashing the tool for every ticker. These tests
+    exercise the REAL query (the rest of the suite mocks execute_query, so the
+    bug slipped past it).
+    """
+
+    def test_query_template_has_no_bare_percent_placeholder(self):
+        """Every ``%`` in the template is either ``%%`` or a ``%(name)s`` param.
+
+        Walk the template and assert there is no stray percent-letter token
+        such as ``%R``/``%K``/``%D`` left in a SQL comment.
+        """
+        query = _capture_momentum_query()
+
+        i = 0
+        offenders = []
+        while i < len(query):
+            if query[i] == "%":
+                nxt = query[i + 1] if i + 1 < len(query) else ""
+                if nxt == "%":
+                    i += 2  # escaped percent
+                    continue
+                if nxt == "(":
+                    # named placeholder %(name)s
+                    end = query.find(")", i)
+                    if end != -1 and query[end + 1 : end + 2] == "s":
+                        i = end + 2
+                        continue
+                offenders.append(query[i : i + 3])
+            i += 1
+
+        assert not offenders, f"bare percent token(s) in momentum SQL: {offenders}"
+
+    def test_query_template_accepted_by_psycopg_parser(self):
+        """psycopg itself accepts the template + params (no ProgrammingError).
+
+        This is the exact code path that crashed in production: the placeholder
+        parser runs on the full query text, including comments. Runs without a
+        database connection.
+        """
+        from psycopg._queries import PostgresClientQuery
+        from psycopg.adapt import Transformer
+
+        query = _capture_momentum_query()
+        params = {
+            "ticker": "AAPL",
+            "start_date": "2025-01-01",
+            "adx_period": ADX_PERIOD,
+            "stoch_k": STOCHASTIC_K_PERIOD,
+            "stoch_d": STOCHASTIC_D_PERIOD,
+            "williams_period": WILLIAMS_R_PERIOD,
+            "roc_period": ROC_PERIOD,
+            "lookback_days": 60,
+        }
+
+        pgq = PostgresClientQuery(Transformer())
+        # Raises psycopg.ProgrammingError if any bare %X placeholder remains.
+        pgq.convert(query.encode(), params)
+
+    @pytest.mark.skipif(
+        not os.environ.get("DATABASE_URL"),
+        reason="no DATABASE_URL; live momentum smoke test requires a database",
+    )
+    def test_live_query_executes(self):
+        """End-to-end smoke test against the real DB (skipped without one)."""
+        try:
+            result = get_momentum_indicators("AAPL")
+        except Exception:  # pragma: no cover - DB may be unreachable in CI
+            pytest.skip("database unreachable for live momentum smoke test")
+
+        assert result["ticker"] == "AAPL"
+        assert "data" in result
+        for point in result["data"]:
+            assert set(point.keys()) == {
+                "date", "close", "adx", "plus_di", "minus_di",
+                "stoch_k", "stoch_d", "williams_r", "roc",
+            }
 
 
 class TestMomentumConstants:

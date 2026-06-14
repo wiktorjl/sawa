@@ -329,7 +329,7 @@ def get_momentum_indicators(
                     ORDER BY date
                     ROWS BETWEEN %(stoch_k)s PRECEDING AND CURRENT ROW
                 ) AS lowest_low_k,
-                -- Williams %R: highest high and lowest low over period
+                -- Williams %%R: highest high and lowest low over period
                 MAX(high) OVER (
                     ORDER BY date
                     ROWS BETWEEN %(williams_period)s PRECEDING AND CURRENT ROW
@@ -365,12 +365,12 @@ def get_momentum_indicators(
                     ORDER BY date
                     ROWS BETWEEN %(adx_period)s PRECEDING AND CURRENT ROW
                 ) AS minus_dm_smooth,
-                -- Stochastic %K (raw)
+                -- Stochastic %%K (raw)
                 CASE WHEN (highest_high_k - lowest_low_k) > 0
                     THEN ((close - lowest_low_k) / (highest_high_k - lowest_low_k)) * 100
                     ELSE 50.0
                 END AS stoch_k_raw,
-                -- Williams %R
+                -- Williams %%R
                 CASE WHEN (highest_high_w - lowest_low_w) > 0
                     THEN ((highest_high_w - close) / (highest_high_w - lowest_low_w)) * -100
                     ELSE -50.0
@@ -403,14 +403,14 @@ def get_momentum_indicators(
                          / (plus_dm_smooth + minus_dm_smooth) * 100
                     ELSE NULL
                 END AS dx,
-                -- Stochastic %K (smoothed with D period SMA). %D is a moving
-                -- average of %K, computed in the next CTE: PostgreSQL forbids
+                -- Stochastic %%K (smoothed with D period SMA). %%D is a moving
+                -- average of %%K, computed in the next CTE: PostgreSQL forbids
                 -- nesting one window aggregate inside another.
                 AVG(stoch_k_raw) OVER (
                     ORDER BY date
                     ROWS BETWEEN %(stoch_d)s PRECEDING AND CURRENT ROW
                 ) AS stoch_k_smooth,
-                -- Williams %R
+                -- Williams %%R
                 ROUND(williams_r::numeric, 2) AS williams_r,
                 -- ROC
                 ROUND(roc::numeric, 2) AS roc,
@@ -431,9 +431,9 @@ def get_momentum_indicators(
                     ROWS BETWEEN %(adx_period)s PRECEDING AND CURRENT ROW
                 )::numeric, 2
             ) AS adx,
-            -- Stochastic %K
+            -- Stochastic %%K
             ROUND(stoch_k_smooth::numeric, 2) AS stoch_k,
-            -- Stochastic %D (SMA of %K, computed over the already-smoothed %K)
+            -- Stochastic %%D (SMA of %%K, computed over the already-smoothed %%K)
             ROUND(
                 AVG(stoch_k_smooth) OVER (
                     ORDER BY date
