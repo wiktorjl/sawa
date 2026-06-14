@@ -606,7 +606,7 @@ def load_news(
         log: Logger instance
 
     Returns:
-        Total number of articles loaded
+        Total number of distinct articles loaded across all symbols
     """
     from sawa.database.news import fetch_news_for_symbols
 

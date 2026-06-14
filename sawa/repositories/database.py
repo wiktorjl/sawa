@@ -575,24 +575,24 @@ class DatabaseRatiosRepository(RatiosRepository):
         return [self._row_to_ratio(row) for row in rows]
 
     def _row_to_ratio(self, row: dict[str, Any]) -> FinancialRatio:
-        """Convert database row to FinancialRatio domain model."""
+        """Convert database row to FinancialRatio domain model.
+
+        Only maps columns that exist in financial_ratios. peg_ratio,
+        profit_margin, operating_margin, debt_to_assets, asset_turnover,
+        and inventory_turnover are not stored in this table, so the
+        corresponding FinancialRatio fields keep their None default.
+        """
         return FinancialRatio(
             ticker=row["ticker"],
             date=row["date"],
             pe_ratio=_to_decimal(row.get("price_to_earnings")),
             pb_ratio=_to_decimal(row.get("price_to_book")),
             ps_ratio=_to_decimal(row.get("price_to_sales")),
-            peg_ratio=_to_decimal(row.get("peg_ratio")),
             roe=_to_decimal(row.get("return_on_equity")),
             roa=_to_decimal(row.get("return_on_assets")),
-            profit_margin=_to_decimal(row.get("profit_margin")),
-            operating_margin=_to_decimal(row.get("operating_margin")),
             current_ratio=_to_decimal(row.get("current")),
             quick_ratio=_to_decimal(row.get("quick")),
             debt_to_equity=_to_decimal(row.get("debt_to_equity")),
-            debt_to_assets=_to_decimal(row.get("debt_to_assets")),
-            asset_turnover=_to_decimal(row.get("asset_turnover")),
-            inventory_turnover=_to_decimal(row.get("inventory_turnover")),
         )
 
     async def get_latest_ratio(self, ticker: str) -> FinancialRatio | None:

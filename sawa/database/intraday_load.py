@@ -26,23 +26,29 @@ def load_intraday_bars(
     if not bars:
         return 0
 
-    # Each window is flushed once, fully aggregated, by the websocket client.
-    # The WHERE guard keeps the most complete write to win idempotently: a
-    # re-stream of the same window (equal volume) is a harmless no-op, while a
-    # rare straggler re-flush (lower volume) is rejected rather than clobbering
-    # a complete window with a partial one.
+    # Each window is normally flushed once, fully aggregated, by the websocket
+    # client's per-ticker event-time watermark. A second write for the same
+    # (ticker, timestamp) can still occur if Polygon replays a window after a
+    # reconnect (the aggregator persists across reconnects, so a popped window
+    # gets re-created from the replayed minutes). On conflict we therefore MERGE
+    # rather than blind-overwrite, so a duplicate same-window bar cannot corrupt
+    # the OHLCV: keep the earliest open already recorded, take the true high/low
+    # extremes across both writes, advance the close to the latest write, and
+    # keep the larger volume (a full replay carries the full volume; a partial
+    # straggler carries less and must not reduce the count). An identical
+    # re-stream is an exact no-op. We deliberately do NOT SUM volume: a replay's
+    # minutes overlap the original window, so summing would double-count.
     query = sql.SQL("""
         INSERT INTO stock_prices_intraday
             (ticker, timestamp, open, high, low, close, volume, bar_size_minutes)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (ticker, timestamp)
         DO UPDATE SET
-            open = EXCLUDED.open,
-            high = EXCLUDED.high,
-            low = EXCLUDED.low,
+            open = stock_prices_intraday.open,
+            high = GREATEST(stock_prices_intraday.high, EXCLUDED.high),
+            low = LEAST(stock_prices_intraday.low, EXCLUDED.low),
             close = EXCLUDED.close,
-            volume = EXCLUDED.volume
-        WHERE EXCLUDED.volume >= stock_prices_intraday.volume
+            volume = GREATEST(stock_prices_intraday.volume, EXCLUDED.volume)
     """)
 
     inserted = 0

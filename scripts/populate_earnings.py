@@ -39,6 +39,14 @@ EARNINGS_LIMIT = 20        # yfinance limit param (~5 years of quarterly data)
 BATCH_COMMIT_SIZE = 25     # commit to DB every N tickers
 PROGRESS_LOG_INTERVAL = 10 # log progress every N tickers
 
+# When yfinance revises an estimated report_date it emits the corrected date in
+# the same batch but leaves the old (NULL-actual) estimate row stranded under the
+# (ticker, report_date) unique key, producing a phantom duplicate for the quarter.
+# An adjacent real quarter is ~90 days away, so a NULL-actual row within this many
+# days of a freshly-loaded actual that is NOT itself in the current batch is the
+# stale estimate of that same quarter and is pruned.
+PHANTOM_RECONCILE_DAYS = 7
+
 # Longer pauses injected periodically to look more human
 LONG_PAUSE_EVERY = (40, 80)        # random range: pause every N tickers
 LONG_PAUSE_DURATION = (30.0, 90.0) # random range: pause duration in seconds
@@ -140,6 +148,21 @@ def float_or_none(value) -> float | None:
         return None
 
 
+def derive_fiscal_period(report_date) -> tuple[str | None, int | None]:
+    """Derive (fiscal_quarter, fiscal_year) from the report date.
+
+    yfinance's get_earnings_dates exposes no fiscal-period label, so we record the
+    calendar quarter in which the company reported (Q1-Q4 of the report year). This
+    is a reporting-period label, not the underlying fiscal quarter of a non-calendar
+    fiscal year; it is deterministic and lets period-keyed reads group results.
+    """
+    try:
+        quarter = (report_date.month - 1) // 3 + 1
+        return f"Q{quarter}", report_date.year
+    except Exception:
+        return None, None
+
+
 def fetch_earnings(ticker: str) -> list[dict] | None:
     """Fetch earnings dates from yfinance for a single ticker."""
     try:
@@ -154,10 +177,13 @@ def fetch_earnings(ticker: str) -> list[dict] | None:
             if report_date is None:
                 continue
 
+            fiscal_quarter, fiscal_year = derive_fiscal_period(report_date)
             records.append(
                 {
                     "ticker": ticker,
                     "report_date": report_date,
+                    "fiscal_quarter": fiscal_quarter,
+                    "fiscal_year": fiscal_year,
                     "timing": infer_timing(dt_idx),
                     "eps_estimate": float_or_none(row["EPS Estimate"]),
                     "eps_actual": float_or_none(row["Reported EPS"]),
@@ -170,18 +196,63 @@ def fetch_earnings(ticker: str) -> list[dict] | None:
         return None
 
 
+def prune_phantom_estimates(conn: psycopg.Connection, records: list[dict]) -> int:
+    """Delete stale phantom estimate rows superseded by a freshly-loaded actual.
+
+    yfinance reissues a revised earnings date in the same batch but cannot update the
+    old date under the (ticker, report_date) key, orphaning the prior NULL-actual
+    estimate. For each incoming row that carries a real eps_actual, drop any existing
+    NULL-actual row for that ticker within PHANTOM_RECONCILE_DAYS whose date is NOT in
+    this batch (so a date we are about to (re)write is never removed). Returns rows
+    pruned.
+    """
+    incoming_dates = {rec["report_date"] for rec in records}
+    pruned = 0
+    for rec in records:
+        if rec.get("eps_actual") is None:
+            continue
+        try:
+            cur = conn.execute(
+                """
+                DELETE FROM earnings
+                WHERE ticker = %(ticker)s
+                  AND eps_actual IS NULL
+                  AND report_date <> %(report_date)s
+                  AND ABS(report_date - %(report_date)s) <= %(window)s
+                  AND report_date <> ALL(%(incoming)s)
+                """,
+                {
+                    "ticker": rec["ticker"],
+                    "report_date": rec["report_date"],
+                    "window": PHANTOM_RECONCILE_DAYS,
+                    "incoming": list(incoming_dates),
+                },
+            )
+            pruned += cur.rowcount
+        except Exception as e:
+            logger.debug(
+                f"  Phantom prune failed for {rec['ticker']} {rec['report_date']}: {e}"
+            )
+    return pruned
+
+
 def upsert_earnings(conn: psycopg.Connection, records: list[dict]) -> int:
     """Upsert earnings records into the database. Returns count of rows affected."""
     if not records:
         return 0
 
+    prune_phantom_estimates(conn, records)
+
     sql = """
         INSERT INTO earnings (
-            ticker, report_date, timing, eps_estimate, eps_actual, surprise_pct, updated_at
+            ticker, report_date, fiscal_quarter, fiscal_year,
+            timing, eps_estimate, eps_actual, surprise_pct, updated_at
         )
         VALUES (
             %(ticker)s,
             %(report_date)s,
+            %(fiscal_quarter)s,
+            %(fiscal_year)s,
             %(timing)s,
             %(eps_estimate)s,
             %(eps_actual)s,
@@ -189,6 +260,8 @@ def upsert_earnings(conn: psycopg.Connection, records: list[dict]) -> int:
             NOW()
         )
         ON CONFLICT (ticker, report_date) DO UPDATE SET
+            fiscal_quarter = COALESCE(EXCLUDED.fiscal_quarter, earnings.fiscal_quarter),
+            fiscal_year = COALESCE(EXCLUDED.fiscal_year, earnings.fiscal_year),
             timing = COALESCE(EXCLUDED.timing, earnings.timing),
             eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
             eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),

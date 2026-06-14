@@ -9,7 +9,7 @@ Usage:
 
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +111,7 @@ def fetch_and_load_news(
     days: int = 30,
     limit: int = 1000,
     log: logging.Logger | None = None,
+    loaded_ids: set[str] | None = None,
 ) -> int:
     """
     Fetch news from API and load into database.
@@ -122,13 +123,19 @@ def fetch_and_load_news(
         days: Number of days of history to fetch
         limit: Max articles per request
         log: Logger instance
+        loaded_ids: Optional set of article ids already loaded this run. Ids
+            loaded by this call are added to it so a multi-symbol caller can
+            count distinct articles (Polygon returns each article once per
+            in-universe ticker, so summing per-symbol counts overstates the
+            true article total).
 
     Returns:
-        Number of articles loaded
+        Number of distinct articles loaded by this call.
     """
     log = log or logger
-    # Calculate date range
-    end_date = datetime.now()
+    # Calculate date range. Use timezone-aware UTC so the 'Z' suffix sent to
+    # Polygon's published_utc filter is accurate regardless of host timezone.
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
 
     log.info(f"Fetching news from {start_date.date()} to {end_date.date()}")
@@ -147,21 +154,28 @@ def fetch_and_load_news(
 
     # Load each article. Wrap each in a SAVEPOINT so a single bad article rolls
     # back only its own writes, not every article already inserted in this batch.
-    loaded = 0
+    # Track distinct ids loaded this call so the reported total is a real
+    # article count rather than a sum of per-ticker upserts.
+    call_ids: set[str] = set()
     with conn.cursor() as sp_cur:
         for article in articles:
+            article_id = article.get("id")
             try:
                 sp_cur.execute("SAVEPOINT article_insert")
                 load_news_article(conn, article)
                 sp_cur.execute("RELEASE SAVEPOINT article_insert")
-                loaded += 1
+                if article_id is not None:
+                    call_ids.add(article_id)
             except psycopg.Error as e:
-                log.warning(f"Failed to load article {article.get('id')}: {e}")
+                log.warning(f"Failed to load article {article_id}: {e}")
                 sp_cur.execute("ROLLBACK TO SAVEPOINT article_insert")
                 sp_cur.execute("RELEASE SAVEPOINT article_insert")
                 continue
 
     conn.commit()
+    if loaded_ids is not None:
+        loaded_ids.update(call_ids)
+    loaded = len(call_ids)
     log.info(f"Loaded {loaded} articles")
     return loaded
 
@@ -186,27 +200,30 @@ def fetch_news_for_symbols(
         log: Logger instance
 
     Returns:
-        Total number of articles loaded
+        Total number of distinct articles loaded across all symbols. Polygon
+        returns each article once per in-universe ticker, so the same article
+        is fetched and re-upserted under several symbols; deduping on article id
+        keeps this from overstating the true article count.
     """
     log = log or logger
-    total = 0
+    loaded_ids: set[str] = set()
     for i, symbol in enumerate(symbols, 1):
         log.info(f"[{i}/{len(symbols)}] Fetching news for {symbol}")
         try:
-            count = fetch_and_load_news(
+            fetch_and_load_news(
                 conn,
                 client,
                 ticker=symbol,
                 days=days,
                 limit=limit_per_symbol,
                 log=log,
+                loaded_ids=loaded_ids,
             )
-            total += count
         except Exception as e:
             log.error(f"Failed to fetch news for {symbol}: {e}")
             continue
 
-    return total
+    return len(loaded_ids)
 
 
 def main() -> int:
