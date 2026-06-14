@@ -141,14 +141,23 @@ def fetch_prices_via_api(
     return all_prices
 
 
+# stock_prices OHLC is NUMERIC(20, 8): the absolute value must round to less
+# than 10^12. A reverse-split back-adjustment on a deeply diluted microcap can
+# produce absurd (>$1e12) ancient bars; those rows are skipped (with a warning)
+# rather than aborting the whole batch insert — and such prices are unusable
+# junk anyway (they would dominate every chart and indicator).
+_MAX_STORABLE_PRICE = 1e12
+
+
 def _is_valid_price_row(p: dict[str, Any]) -> bool:
     """Reject price rows that would corrupt downstream data.
 
     Guards the upsert against NULL/non-positive OHLC (after rounding to the
     stored NUMERIC(20,8) precision, so prices that collapse to 0 are excluded
-    rather than overwriting a good row with 0), inverted high < low bars, and
-    negative volume. The 8-decimal scale preserves sub-penny reverse-split-
-    adjusted prices (down to 1e-8) that scale-4 rounding would have dropped.
+    rather than overwriting a good row with 0), prices too large to fit the
+    column, inverted high < low bars, and negative volume. The 8-decimal scale
+    preserves sub-penny reverse-split-adjusted prices (down to 1e-8) that
+    scale-4 rounding would have dropped.
     """
     o, h, low_v, c, v = p.get("open"), p.get("high"), p.get("low"), p.get("close"), p.get("volume")
     if None in (o, h, low_v, c, v):
@@ -158,6 +167,8 @@ def _is_valid_price_row(p: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
     if any(round(x, 8) <= 0 for x in (o, h, low_v, c)):
+        return False
+    if any(x >= _MAX_STORABLE_PRICE for x in (o, h, low_v, c)):
         return False
     if v < 0 or h < low_v:
         return False
