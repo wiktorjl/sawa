@@ -18,6 +18,7 @@ from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
 from sawa.utils.dates import DATE_FORMAT
+from sawa.utils.security import redact_sensitive_text
 
 
 def get_tickers_with_recent_splits(
@@ -49,6 +50,25 @@ def get_earliest_price_date(
         return row[0] if row else None
 
 
+def get_existing_price_dates(
+    conn,
+    tickers: list[str],
+) -> dict[str, set[date]]:
+    """Return every stored date that a full adjusted refresh must replace."""
+    dates: dict[str, set[date]] = {ticker: set() for ticker in tickers}
+    if not tickers:
+        return dates
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ticker, date FROM stock_prices WHERE ticker = ANY(%s)",
+            (tickers,),
+        )
+        for ticker, price_date in cur.fetchall():
+            if ticker in dates and isinstance(price_date, date):
+                dates[ticker].add(price_date)
+    return dates
+
+
 def refresh_split_adjusted_prices(
     api_key: str,
     database_url: str,
@@ -72,7 +92,13 @@ def refresh_split_adjusted_prices(
         Statistics dictionary
     """
     logger = logger or setup_logging()
-    stats: dict[str, Any] = {"success": False, "tickers_adjusted": 0, "prices_updated": 0}
+    stats: dict[str, Any] = {
+        "success": False,
+        "tickers_requested": 0,
+        "tickers_adjusted": 0,
+        "prices_fetched": 0,
+        "prices_updated": 0,
+    }
 
     if since is None:
         since = date.today() - timedelta(days=365)
@@ -96,6 +122,8 @@ def refresh_split_adjusted_prices(
             stats["success"] = True
             return stats
 
+        stats["tickers_requested"] = len(tickers)
+
         logger.info(f"Found {len(tickers)} ticker(s) with splits to adjust: {', '.join(tickers)}")
         # Expose the resolved ticker list so callers (e.g. the adjust-splits CLI)
         # can recompute technical indicators for exactly the adjusted tickers.
@@ -105,7 +133,17 @@ def refresh_split_adjusted_prices(
         earliest = get_earliest_price_date(conn, tickers)
         if not earliest:
             logger.warning("No existing price data found for split tickers")
-            stats["success"] = True
+            stats["error"] = "no existing price data found for requested split tickers"
+            return stats
+        existing_dates = get_existing_price_dates(conn, tickers)
+        tickers_without_prices = [ticker for ticker in tickers if not existing_dates[ticker]]
+        if tickers_without_prices:
+            stats["missing_tickers"] = tickers_without_prices
+            stats["error"] = (
+                "no existing price history found for "
+                f"{len(tickers_without_prices)} requested split ticker(s)"
+            )
+            logger.warning(stats["error"])
             return stats
 
         end_date = date.today()
@@ -124,17 +162,78 @@ def refresh_split_adjusted_prices(
             return stats
 
         # Fetch adjusted prices for each ticker
+        provider_stats: dict[str, Any] = {}
         prices = fetch_prices_via_api(
-            client, tickers, start_str, end_str, logger, rate_limiter
+            client,
+            tickers,
+            start_str,
+            end_str,
+            logger,
+            rate_limiter,
+            stats=provider_stats,
         )
+        stats["provider"] = provider_stats
+        stats["prices_fetched"] = len(prices)
         logger.info(f"Fetched {len(prices)} adjusted price records")
 
-        if prices:
-            inserted = insert_prices(conn, prices, logger)
-            stats["prices_updated"] = inserted
-            logger.info(f"Upserted {inserted} adjusted price records")
+        fetched_tickers = {str(price.get("ticker", "")).upper() for price in prices}
+        missing_tickers = [ticker for ticker in tickers if ticker not in fetched_tickers]
+        fetched_dates: set[tuple[str, date]] = set()
+        for price in prices:
+            ticker = str(price.get("ticker", "")).upper()
+            raw_date = price.get("date")
+            try:
+                price_date = (
+                    raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+                )
+            except ValueError:
+                continue
+            fetched_dates.add((ticker, price_date))
+        missing_existing_dates = sorted(
+            (ticker, price_date)
+            for ticker, stored_dates in existing_dates.items()
+            for price_date in stored_dates
+            if (ticker, price_date) not in fetched_dates
+        )
+        if missing_tickers or provider_stats.get("failed_symbols") or provider_stats.get(
+            "invalid_price_rows"
+        ) or missing_existing_dates:
+            stats["missing_tickers"] = missing_tickers
+            stats["missing_existing_price_dates"] = len(missing_existing_dates)
+            stats["missing_existing_price_date_samples"] = [
+                f"{ticker}/{price_date.isoformat()}"
+                for ticker, price_date in missing_existing_dates[:10]
+            ]
+            stats["error"] = (
+                "adjusted price source was incomplete "
+                f"({len(fetched_tickers)}/{len(tickers)} tickers with valid rows; "
+                f"{provider_stats.get('failed_symbols', 0)} request failures; "
+                f"{provider_stats.get('invalid_price_rows', 0)} invalid rows; "
+                f"{len(missing_existing_dates)} stored dates missing)"
+            )
+            logger.warning(stats["error"])
+            return stats
 
-        stats["tickers_adjusted"] = len(tickers)
+        try:
+            inserted = insert_prices(conn, prices, logger, commit=False)
+        except Exception as e:
+            conn.rollback()
+            safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
+            stats["error"] = f"adjusted price persistence failed: {safe_error}"
+            logger.error(stats["error"])
+            return stats
+        stats["prices_updated"] = inserted
+        logger.info(f"Upserted {inserted} adjusted price records")
+        if inserted != len(prices):
+            conn.rollback()
+            stats["error"] = (
+                f"adjusted price persistence wrote only {inserted}/{len(prices)} rows"
+            )
+            logger.error(stats["error"])
+            return stats
+        conn.commit()
+
+        stats["tickers_adjusted"] = len(fetched_tickers)
         stats["success"] = True
 
     return stats

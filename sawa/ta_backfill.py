@@ -8,6 +8,7 @@ Supports parallel processing with multiprocessing.Pool.
 
 import logging
 import time
+from datetime import date
 from multiprocessing import Pool
 from typing import Any, cast
 
@@ -28,12 +29,14 @@ logger = logging.getLogger(__name__)
 
 # Global database URL for worker processes
 _db_url: str = ""
+_replace_existing: bool = False
 
 
-def _init_worker(db_url: str) -> None:
-    """Initialize worker process with database URL."""
-    global _db_url
+def _init_worker(db_url: str, replace_existing: bool = False) -> None:
+    """Initialize worker process with its database URL and write mode."""
+    global _db_url, _replace_existing
     _db_url = db_url
+    _replace_existing = replace_existing
 
 
 def _process_ticker(ticker: str) -> dict[str, Any]:
@@ -60,11 +63,54 @@ def _process_ticker(ticker: str) -> dict[str, Any]:
             if not indicators:
                 return {"ticker": ticker, "count": 0, "error": "calculation failed", "time": 0}
 
-            # Insert into database
-            inserted = load_technical_indicators(conn, indicators, log)
+            # The calculator historically isolated a validation error by
+            # omitting that date. That is tolerable only if no destructive
+            # replacement follows: deleting the complete old series and then
+            # committing a shorter result silently loses the skipped date.
+            # Require a one-for-one, ordered result before any database write.
+            expected_dates = [
+                date.fromisoformat(value) if isinstance(value, str) else value
+                for value in (price["date"] for price in prices)
+            ]
+            actual_dates = [indicator.date for indicator in indicators]
+            if (
+                len(indicators) != len(prices)
+                or actual_dates != expected_dates
+                or any(indicator.ticker != ticker.upper() for indicator in indicators)
+            ):
+                raise ValueError(
+                    "calculation produced an incomplete or mismatched series "
+                    f"({len(indicators)}/{len(prices)} rows)"
+                )
+
+            # A split repair must replace each ticker in one transaction. The
+            # old implementation committed a bulk DELETE before calculation
+            # and insertion, so a single bad replacement row permanently
+            # erased otherwise-valid historical TA. Here the delete and every
+            # replacement upsert share this connection context's transaction;
+            # any exception rolls both operations back together.
+            deleted = 0
+            if _replace_existing:
+                deleted = delete_technical_indicators_for_tickers(
+                    conn,
+                    [ticker],
+                    log,
+                    commit=False,
+                )
+            inserted = load_technical_indicators(
+                conn,
+                indicators,
+                log,
+                commit=not _replace_existing,
+            )
 
             elapsed = time.time() - start
-            return {"ticker": ticker, "count": inserted, "time": elapsed}
+            return {
+                "ticker": ticker,
+                "count": inserted,
+                "deleted": deleted,
+                "time": elapsed,
+            }
 
     except Exception as e:
         elapsed = time.time() - start
@@ -158,16 +204,15 @@ def recompute_ta_for_tickers(
 
     log.info(f"Recomputing technical indicators for {len(unique)} ticker(s): {', '.join(unique)}")
 
-    # Drop the stale rows first so a (ticker, date) upsert can't leave behind
-    # indicator rows for dates the recompute happens not to re-emit.
-    with psycopg.connect(database_url) as conn:
-        stats["deleted"] = delete_technical_indicators_for_tickers(conn, unique, log)
-
+    # ``replace_existing`` makes each worker stage its ticker's DELETE and full
+    # replacement in one transaction. Successful tickers can commit
+    # independently, while a failed ticker retains its previously committed TA.
     backfill = run_ta_backfill(
         database_url=database_url,
         tickers=unique,
         workers=workers,
         log=log,
+        replace_existing=True,
     )
     stats.update({k: v for k, v in backfill.items() if k != "success"})
     stats["success"] = backfill.get("success", False)
@@ -181,6 +226,8 @@ def run_ta_backfill(
     dry_run: bool = False,
     estimate_only: bool = False,
     log: logging.Logger | None = None,
+    *,
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     """
     Run full technical indicator backfill.
@@ -192,6 +239,9 @@ def run_ta_backfill(
         dry_run: If True, show what would be done without executing
         estimate_only: If True, only run time estimation
         log: Logger instance
+        replace_existing: Atomically delete and replace all TA rows per ticker.
+            This is used after historical split adjustment; ordinary backfills
+            leave it disabled and upsert into existing rows.
 
     Returns:
         Statistics dictionary
@@ -208,7 +258,9 @@ def run_ta_backfill(
         log.info("\nRunning time estimation...")
         estimate = estimate_backfill_time(database_url, sample_size=10, log=log)
         stats.update(estimate)
-        stats["success"] = True
+        stats["success"] = not estimate.get("error") and not estimate.get(
+            "failed_samples", 0
+        )
 
         log.info("\nEstimation Results:")
         log.info(f"  Sample size: {estimate.get('sample_size', 0)} tickers")
@@ -242,7 +294,7 @@ def run_ta_backfill(
 
             # Get tickers to process
             if tickers:
-                all_tickers = [t.upper() for t in tickers]
+                all_tickers = list(dict.fromkeys(t.upper() for t in tickers))
                 log.info(f"Processing {len(all_tickers)} specified tickers")
             else:
                 all_tickers = get_tickers_with_prices(conn)
@@ -280,7 +332,7 @@ def run_ta_backfill(
             with Pool(
                 processes=workers,
                 initializer=_init_worker,
-                initargs=(database_url,),
+                initargs=(database_url, replace_existing),
             ) as pool:
                 for i, res in enumerate(pool.imap_unordered(_process_ticker, all_tickers)):
                     results.append(cast(dict[str, Any], res))
@@ -288,7 +340,7 @@ def run_ta_backfill(
                         log.info(f"  Progress: {i + 1}/{len(all_tickers)}")
         else:
             # Sequential processing
-            _init_worker(database_url)
+            _init_worker(database_url, replace_existing)
             for i, ticker in enumerate(all_tickers):
                 res = _process_ticker(ticker)
                 results.append(res)
@@ -306,6 +358,16 @@ def run_ta_backfill(
         stats["elapsed_minutes"] = round(elapsed / 60, 2)
         stats["tickers_processed"] = len(results)
         stats["tickers_failed"] = len(errors)
+        stats["tickers_succeeded"] = len(results) - len(errors)
+        stats["deleted"] = sum(r.get("deleted", 0) for r in results)
+        if errors:
+            stats["ticker_errors"] = [
+                {
+                    "ticker": str(result.get("ticker", "unknown")),
+                    "error": str(result.get("error", "unknown")),
+                }
+                for result in errors
+            ]
 
         log.info("\n" + "=" * 60)
         log.info("BACKFILL COMPLETE")
@@ -313,7 +375,8 @@ def run_ta_backfill(
         log.info(f"  Tickers processed: {len(results)}")
         log.info(f"  Indicators calculated: {total_inserted}")
         log.info(f"  Time: {stats['elapsed_minutes']:.1f} minutes")
-        log.info(f"  Rate: {len(results) / elapsed:.1f} tickers/second")
+        rate = len(results) / elapsed if elapsed > 0 else 0.0
+        log.info(f"  Rate: {rate:.1f} tickers/second")
 
         if errors:
             log.warning(f"  Errors: {len(errors)}")
@@ -322,7 +385,7 @@ def run_ta_backfill(
             if len(errors) > 5:
                 log.warning(f"    ... and {len(errors) - 5} more")
 
-        stats["success"] = True
+        stats["success"] = not errors
 
     except Exception as e:
         log.error(f"Backfill failed: {e}")
