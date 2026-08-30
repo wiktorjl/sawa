@@ -20,8 +20,8 @@ from .monitoring import monitored_run
 from .notify import (
     NotificationLevel,
     Notifier,
-    NullNotifier,
     NtfyNotifier,
+    NullNotifier,
     alert_missing_api_key,
     get_notifier,
     notify_ntfy,

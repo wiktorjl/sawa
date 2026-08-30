@@ -7,7 +7,7 @@ import json
 import os
 import re
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -221,9 +221,12 @@ def _load_cache(path: Path) -> dict[str, Any]:
     if not path.exists():
         return _empty_cache()
     try:
-        data = json.loads(path.read_text())
+        parsed: object = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return _empty_cache()
+    if not isinstance(parsed, dict):
+        return _empty_cache()
+    data: dict[str, Any] = {str(key): value for key, value in parsed.items()}
     if data.get("schema_version") != SCHEMA_VERSION:
         return _empty_cache()
     data.setdefault("state", {"jsonl_offset": 0, "jsonl_size": 0})
@@ -353,8 +356,13 @@ def _top_fingerprints(fingerprints: dict[str, Any], limit: int) -> list[dict[str
     return rows[:limit]
 
 
-def _recent_query_count(daily_counts: dict[str, int], window_days: int) -> int:
-    cutoff = date.today() - timedelta(days=max(window_days - 1, 0))
+def _recent_query_count(
+    daily_counts: dict[str, int],
+    window_days: int,
+    *,
+    today: date,
+) -> int:
+    cutoff = today - timedelta(days=max(window_days - 1, 0))
     total = 0
     for day, count in daily_counts.items():
         try:
@@ -373,12 +381,16 @@ def _build_summary(
     window_days: int,
     warning_threshold: int,
     top_n: int,
+    now: datetime,
 ) -> dict[str, Any]:
     stats = cache.get("stats", {})
     # The warning and "recent" reflect ANALYTICAL queries only — forensic
     # introspection/audit traffic must not trip the missing-tool signal.
-    recent_queries = _recent_query_count(stats.get("analytical_daily_counts", {}), window_days)
-    recent_total = _recent_query_count(stats.get("daily_counts", {}), window_days)
+    today = now.date()
+    recent_queries = _recent_query_count(
+        stats.get("analytical_daily_counts", {}), window_days, today=today
+    )
+    recent_total = _recent_query_count(stats.get("daily_counts", {}), window_days, today=today)
     category_counts = stats.get("category_counts", {"analytical": 0, "forensic": 0})
     warning = None
     if recent_queries >= warning_threshold:
@@ -390,7 +402,7 @@ def _build_summary(
         )
 
     return {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": now.isoformat(timespec="seconds"),
         "new_records": new_records,
         "total_queries": int(stats.get("total_queries", 0)),
         "successful_queries": int(stats.get("successful_queries", 0)),
@@ -419,8 +431,14 @@ def analyze_query_log(
     window_days: int = DEFAULT_WINDOW_DAYS,
     warning_threshold: int = DEFAULT_WARNING_THRESHOLD,
     top_n: int = DEFAULT_TOP_N,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Analyze new structured execute_query records and update the cache."""
+    """Analyze new structured execute_query records and update the cache.
+
+    ``now`` is injectable so callers and tests can evaluate rolling windows
+    deterministically. Production calls use the current UTC time.
+    """
+    reference_time = now or datetime.now(timezone.utc)
     directory = get_query_log_dir(log_dir)
     directory.mkdir(parents=True, exist_ok=True)
     cache_path = get_query_cache_path(directory)
@@ -452,6 +470,7 @@ def analyze_query_log(
         window_days=window_days,
         warning_threshold=warning_threshold,
         top_n=top_n,
+        now=reference_time,
     )
     cache["generated_at"] = summary["generated_at"]
     cache["summary"] = summary
@@ -533,4 +552,3 @@ def format_query_insights(cache: dict[str, Any], *, top_n: int = DEFAULT_TOP_N) 
             lines.append(f"        {example[:180]}")
 
     return "\n".join(lines)
-

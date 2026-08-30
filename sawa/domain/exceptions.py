@@ -23,6 +23,8 @@ Usage:
         print(f"Provider {e.provider} failed: {e}")
 """
 
+from sawa.utils.security import redact_sensitive_text
+
 
 class RepositoryError(Exception):
     """Base exception for repository errors.
@@ -54,8 +56,11 @@ class ProviderError(RepositoryError):
     def __str__(self) -> str:
         base = super().__str__()
         if self.original_error:
-            return f"{base} (provider: {self.provider}, caused by: {self.original_error})"
-        return f"{base} (provider: {self.provider})"
+            cause = redact_sensitive_text(self.original_error)
+            rendered = f"{base} (provider: {self.provider}, caused by: {cause})"
+        else:
+            rendered = f"{base} (provider: {self.provider})"
+        return redact_sensitive_text(rendered)
 
 
 class RateLimitError(ProviderError):

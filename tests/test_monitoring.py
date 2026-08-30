@@ -3,7 +3,12 @@ import logging
 import pytest
 
 from sawa.utils.monitoring import monitored_run
-from sawa.utils.notify import NotificationLevel, Notifier
+from sawa.utils.notify import (
+    MAX_NOTIFICATION_BODY_BYTES,
+    MAX_NOTIFICATION_TITLE_BYTES,
+    NotificationLevel,
+    Notifier,
+)
 
 
 class _CapHandler(logging.Handler):
@@ -147,3 +152,62 @@ def test_monitored_run_protocol_compatibility() -> None:
     """Spy notifier satisfies the Notifier protocol."""
     spy: Notifier = _SpyNotifier()
     assert spy.send(title="t", body="b") is True
+
+
+def test_monitored_run_redacts_and_bounds_failure_before_custom_notifier() -> None:
+    log, capture = _logger_with_capture()
+    spy = _SpyNotifier()
+    secret = "failure-secret"
+
+    with pytest.raises(RuntimeError):
+        with monitored_run("weekly", logger=log, notifier=spy) as ctx:
+            ctx["stats"] = {
+                "dsn": f"postgresql://reader:{secret}@db.invalid/sawa",
+            }
+            raise RuntimeError(f"apiKey={secret} " + "界" * 10_000)
+
+    call = spy.calls[0]
+    assert secret not in call["title"]
+    assert secret not in call["body"]
+    assert "<redacted>" in call["body"]
+    assert len(call["title"].encode()) <= MAX_NOTIFICATION_TITLE_BYTES
+    assert len(call["body"].encode()) <= MAX_NOTIFICATION_BODY_BYTES
+    rendered_logs = "\n".join(record.getMessage() for record in capture.records)
+    assert secret not in rendered_logs
+    assert "apiKey=<redacted>" in rendered_logs
+    assert all(record.exc_info is None for record in capture.records)
+
+
+def test_monitored_run_redacts_and_bounds_success_stats() -> None:
+    log, _ = _logger_with_capture()
+    spy = _SpyNotifier()
+    secret = "stats-secret"
+
+    with monitored_run("daily", logger=log, notifier=spy) as ctx:
+        ctx["stats"] = {
+            "provider": f"token={secret}",
+            "detail": "界" * 10_000,
+        }
+
+    call = spy.calls[0]
+    assert secret not in call["body"]
+    assert "token=<redacted>" in call["body"]
+    assert len(call["body"].encode()) <= MAX_NOTIFICATION_BODY_BYTES
+
+
+def test_monitored_run_explicit_unsuccessful_stats_send_failure_not_success() -> None:
+    log, cap = _logger_with_capture()
+    spy = _SpyNotifier()
+
+    with monitored_run("daily", logger=log, notifier=spy) as ctx:
+        ctx["stats"] = {"success": False, "prices_error": "provider outage"}
+
+    assert len(spy.calls) == 1
+    call = spy.calls[0]
+    assert call["title"] == "Sawa: daily FAILED"
+    assert call["level"] == NotificationLevel.ERROR
+    assert "unsuccessful status" in call["body"]
+    assert "prices_error: provider outage" in call["body"]
+    messages = [record.getMessage() for record in cap.records]
+    assert any("returned unsuccessful status" in message for message in messages)
+    assert not any("complete in" in message for message in messages)
