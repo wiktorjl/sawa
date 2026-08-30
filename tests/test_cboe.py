@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
-from sawa.api.cboe import CboeClient
+from sawa.api.cboe import CboeClient, CboeMarketInternalsResult
 from sawa.daily import merge_cboe_internals
 
 
@@ -63,10 +63,19 @@ class TestCboeClient:
             rows = client.get_market_internals()
 
         assert rows == [{"date": "2026-06-10", "vix3m": 22.89}]
+        assert isinstance(rows, CboeMarketInternalsResult)
+        assert rows.all_quotes_failed is False
+        assert rows.failure_details == [
+            {
+                "symbol": "_VIX",
+                "field": "vix",
+                "error_type": "ReadTimeout",
+                "message": "timed out",
+            }
+        ]
 
     def test_mismatched_trade_dates_merge_into_one_row(self) -> None:
-        """If the two feeds disagree on the trade date, both fields still land
-        on a single row keyed by the later settlement date."""
+        """A stale quote must never be relabeled onto the other feed's date."""
         client = CboeClient()
         with patch.object(client.client, "get") as mock_get:
             mock_get.side_effect = [
@@ -75,7 +84,10 @@ class TestCboeClient:
             ]
             rows = client.get_market_internals()
 
-        assert rows == [{"date": "2026-06-10", "vix": 22.22, "vix3m": 22.89}]
+        assert rows == [
+            {"date": "2026-06-09", "vix": 22.22},
+            {"date": "2026-06-10", "vix3m": 22.89},
+        ]
 
     def test_both_symbols_failing_returns_empty(self) -> None:
         client = CboeClient()
@@ -84,7 +96,55 @@ class TestCboeClient:
                 httpx.ReadTimeout("timed out"),
                 httpx.ReadTimeout("timed out"),
             ]
-            assert client.get_market_internals() == []
+            result = client.get_market_internals()
+
+        assert result == []
+        assert result.all_quotes_failed is True
+        assert [failure.field for failure in result.failures] == ["vix", "vix3m"]
+
+    def test_unusable_quote_is_a_typed_batch_failure(self) -> None:
+        client = CboeClient()
+        bad = _quote_payload("_VIX", 22.22, "2026-06-10T16:15:01")
+        bad["data"]["close"] = float("nan")
+        with patch.object(client.client, "get") as mock_get:
+            mock_get.side_effect = [
+                _ok_response(bad),
+                _ok_response(_quote_payload("_VIX3M", 22.89, "2026-06-10T16:15:01")),
+            ]
+            result = client.get_market_internals()
+
+        assert result == [{"date": "2026-06-10", "vix3m": 22.89}]
+        assert result.failure_details[0]["symbol"] == "_VIX"
+        assert result.failure_details[0]["error_type"] == "ProviderError"
+
+    def test_mixed_quote_identity_is_a_typed_failure(self) -> None:
+        client = CboeClient()
+        mismatched = _quote_payload("_VIX", 22.22, "2026-06-10T16:15:01")
+        mismatched["data"]["symbol"] = "^VIX3M"
+        with patch.object(client.client, "get") as mock_get:
+            mock_get.side_effect = [
+                _ok_response(mismatched),
+                _ok_response(
+                    _quote_payload("_VIX3M", 22.89, "2026-06-10T16:15:01")
+                ),
+            ]
+            result = client.get_market_internals()
+
+        assert result == [{"date": "2026-06-10", "vix3m": 22.89}]
+        assert result.failure_details[0]["field"] == "vix"
+        assert "symbol does not match" in result.failure_details[0]["message"]
+
+    def test_strict_and_plausible_quote_dates_are_enforced(self) -> None:
+        client = CboeClient()
+        malformed = _quote_payload("_VIX", 22.22, "2026-6-10T16:15:01")
+        future = _quote_payload("_VIX3M", 22.89, "2999-01-01T16:15:01")
+        with patch.object(client.client, "get") as mock_get:
+            mock_get.side_effect = [_ok_response(malformed), _ok_response(future)]
+            result = client.get_market_internals()
+
+        assert result == []
+        assert result.all_quotes_failed is True
+        assert all(failure.error_type == "ProviderError" for failure in result.failures)
 
 
 class TestMergeCboeInternals:

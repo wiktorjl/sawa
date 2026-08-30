@@ -12,16 +12,18 @@ Handles all REST API calls for:
 import logging
 import time
 from typing import Any, cast
-from urllib.parse import urljoin
 
 import httpx
 
 from sawa.domain.exceptions import ProviderError
 from sawa.utils.constants import DEFAULT_HTTP_TIMEOUT
+from sawa.utils.security import redact_sensitive_text, validate_https_origin_url
 from sawa.utils.symbols import validate_ticker
 
 # Polygon rebranded to Massive, but API structure is similar
 BASE_URL = "https://api.polygon.io"
+MAX_PAGINATION_PAGES = 1_000
+MAX_PAGINATION_RESULTS = 1_000_000
 
 # Endpoint configurations
 ENDPOINTS = {
@@ -51,6 +53,17 @@ ENDPOINTS = {
 }
 
 
+def _validated_polygon_url(path_or_url: str) -> str:
+    """Resolve a Polygon path and reject credential-crossing origins."""
+    try:
+        return validate_https_origin_url(BASE_URL, path_or_url)
+    except ValueError as e:
+        raise ProviderError(
+            "Refusing Polygon URL outside the configured HTTPS API origin",
+            provider="polygon",
+        ) from e
+
+
 class PolygonClient:
     """Unified client for Polygon/Massive REST API."""
 
@@ -60,6 +73,7 @@ class PolygonClient:
         self.client = httpx.Client(
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=float(DEFAULT_HTTP_TIMEOUT),
+            follow_redirects=False,
         )
 
     def close(self) -> None:
@@ -101,24 +115,37 @@ class PolygonClient:
         if path_params:
             path = path.format(**path_params)
 
-        url = urljoin(BASE_URL, path)
-        params = params or {}
-        params["apiKey"] = self.api_key
+        if max_retries < 1:
+            raise ValueError("max_retries must be at least 1")
+
+        url = _validated_polygon_url(path)
+        request_params = dict(params or {})
+        request_params["apiKey"] = self.api_key
 
         self.logger.debug(f"GET {url}")
 
         for attempt in range(max_retries):
             try:
-                response = self.client.get(url, params=params, timeout=timeout)
+                response = self.client.get(url, params=request_params, timeout=timeout)
 
                 if response.status_code == 429:
+                    if attempt >= max_retries - 1:
+                        raise ProviderError(
+                            f"Rate limited after {max_retries} attempts",
+                            provider="polygon",
+                        )
                     wait = (attempt + 1) * 2
                     self.logger.warning(f"Rate limited. Waiting {wait}s...")
                     time.sleep(wait)
                     continue
 
                 response.raise_for_status()
-                data = cast(dict[str, Any], response.json())
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise ProviderError(
+                        "Invalid response object",
+                        provider="polygon",
+                    )
                 if data.get("status") not in ("OK", "DELAYED"):
                     error = data.get("error", data.get("message", "Unknown error"))
                     raise ProviderError(f"API error: {error}", provider="polygon")
@@ -127,7 +154,10 @@ class PolygonClient:
 
             except httpx.RequestError as e:
                 if attempt < max_retries - 1:
-                    self.logger.warning(f"Request failed: {e}. Retrying...")
+                    self.logger.warning(
+                        "Polygon request failed (%s); retrying",
+                        type(e).__name__,
+                    )
                     time.sleep(1)
                 else:
                     raise
@@ -135,7 +165,7 @@ class PolygonClient:
                 # Retry on transient 5xx; surface other 4xx/5xx as ProviderError.
                 if e.response.status_code >= 500 and attempt < max_retries - 1:
                     self.logger.warning(
-                        f"HTTP {e.response.status_code}: {e}. Retrying..."
+                        f"Polygon HTTP {e.response.status_code}; retrying"
                     )
                     time.sleep(1)
                     continue
@@ -174,12 +204,16 @@ class PolygonClient:
             List of all results across pages
         """
         path = ENDPOINTS.get(endpoint, endpoint)
-        url = urljoin(BASE_URL, path)
-        params = params or {}
-        params["apiKey"] = self.api_key
+        if max_retries < 1:
+            raise ValueError("max_retries must be at least 1")
+
+        url = _validated_polygon_url(path)
+        request_params = dict(params or {})
+        request_params["apiKey"] = self.api_key
 
         all_results: list[dict[str, Any]] = []
         page = 0
+        seen_urls = {url}
 
         while url:
             page += 1
@@ -188,12 +222,22 @@ class PolygonClient:
             response: httpx.Response | None = None
             for attempt in range(max_retries):
                 try:
-                    if page > 1:
-                        response = self.client.get(url, timeout=timeout)
-                    else:
-                        response = self.client.get(url, params=params, timeout=timeout)
+                    page_params = (
+                        {"apiKey": self.api_key} if page > 1 else request_params
+                    )
+                    response = self.client.get(
+                        url,
+                        params=page_params,
+                        timeout=timeout,
+                    )
 
                     if response.status_code == 429:
+                        if attempt >= max_retries - 1:
+                            raise ProviderError(
+                                f"Rate limited on page {page} after "
+                                f"{max_retries} attempts",
+                                provider="polygon",
+                            )
                         wait = (attempt + 1) * 2
                         self.logger.warning(
                             f"Rate limited on page {page}. Waiting {wait}s..."
@@ -207,19 +251,23 @@ class PolygonClient:
                     if attempt < max_retries - 1:
                         wait = attempt + 1
                         self.logger.warning(
-                            f"Request failed on page {page}: {e}. Retrying in {wait}s..."
+                            f"Polygon request failed on page {page} "
+                            f"({type(e).__name__}); retrying in {wait}s..."
                         )
                         time.sleep(wait)
                     else:
                         raise
                 except httpx.HTTPStatusError as e:
-                    # raise_for_status() raised on a non-429 4xx/5xx. This is NOT
-                    # a subclass of RequestError, so without this branch it would
-                    # escape as an uncaught httpx.HTTPStatusError (callers such as
-                    # the daily news path only catch RequestError/ProviderError).
-                    # Surface it as a domain ProviderError they already handle.
+                    if e.response.status_code >= 500 and attempt < max_retries - 1:
+                        wait = attempt + 1
+                        self.logger.warning(
+                            f"Polygon HTTP {e.response.status_code} on page "
+                            f"{page}; retrying in {wait}s..."
+                        )
+                        time.sleep(wait)
+                        continue
                     raise ProviderError(
-                        f"HTTP {e.response.status_code} on page {page}: {e}",
+                        f"HTTP {e.response.status_code} on page {page}",
                         provider="polygon",
                         original_error=e,
                     ) from e
@@ -231,21 +279,64 @@ class PolygonClient:
                 )
 
             assert response is not None  # for type checker; loop must have set it
-            data = response.json()
+            try:
+                data = response.json()
+            except (TypeError, ValueError) as e:
+                raise ProviderError(
+                    f"Invalid JSON response on page {page}",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
+
+            if not isinstance(data, dict):
+                raise ProviderError(
+                    f"Invalid response object on page {page}",
+                    provider="polygon",
+                )
 
             if data.get("status") not in ("OK", "DELAYED"):
                 error = data.get("error", data.get("message", "Unknown"))
                 raise ProviderError(f"API error: {error}", provider="polygon")
 
-            all_results.extend(data.get("results", []))
-            url = data.get("next_url")
+            results = data.get("results", [])
+            if not isinstance(results, list):
+                raise ProviderError(
+                    f"Invalid results array on page {page}",
+                    provider="polygon",
+                )
+            if len(all_results) + len(results) > MAX_PAGINATION_RESULTS:
+                raise ProviderError(
+                    "Pagination exceeded maximum of "
+                    f"{MAX_PAGINATION_RESULTS} results",
+                    provider="polygon",
+                )
+            all_results.extend(results)
 
-            if url:
-                # Append API key to pagination URL (Polygon doesn't include it in next_url)
-                separator = "&" if "?" in url else "?"
-                url = f"{url}{separator}apiKey={self.api_key}"
-                if not url.startswith("http"):
-                    url = urljoin(BASE_URL, url)
+            next_url = data.get("next_url")
+            if next_url is None or next_url == "":
+                url = ""
+            elif not isinstance(next_url, str):
+                raise ProviderError(
+                    f"Invalid pagination URL on page {page}",
+                    provider="polygon",
+                )
+            else:
+                # Validate before the shared bearer-auth client can issue the
+                # next request. Relative Polygon paths remain supported.
+                validated_next_url = _validated_polygon_url(next_url)
+                if validated_next_url in seen_urls:
+                    raise ProviderError(
+                        f"Repeated pagination URL after page {page}",
+                        provider="polygon",
+                    )
+                if page >= MAX_PAGINATION_PAGES:
+                    raise ProviderError(
+                        "Pagination exceeded maximum of "
+                        f"{MAX_PAGINATION_PAGES} pages",
+                        provider="polygon",
+                    )
+                seen_urls.add(validated_next_url)
+                url = validated_next_url
 
         self.logger.debug(f"Total results: {len(all_results)}")
         return all_results
@@ -271,11 +362,14 @@ class PolygonClient:
         Returns:
             Result data or None if not found
         """
+        if max_retries < 1:
+            raise ValueError("max_retries must be at least 1")
+
         path = ENDPOINTS.get(endpoint, endpoint)
         if path_params:
             path = path.format(**path_params)
 
-        url = urljoin(BASE_URL, path)
+        url = _validated_polygon_url(path)
 
         query_params: dict[str, Any] = {"apiKey": self.api_key}
         if params:
@@ -288,32 +382,75 @@ class PolygonClient:
                     params=query_params,
                     timeout=timeout,
                 )
+            except httpx.RequestError as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"Polygon request failed ({type(e).__name__}); retrying"
+                    )
+                    time.sleep(1)
+                    continue
+                raise ProviderError(
+                    f"Request failed after {max_retries} attempts",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
 
-                if response.status_code == 404:
-                    return None
+            if response.status_code == 404:
+                return None
 
-                if response.status_code == 429:
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
                     wait = (attempt + 1) * 2
                     self.logger.warning(f"Rate limited. Waiting {wait}s...")
                     time.sleep(wait)
                     continue
+                raise ProviderError(
+                    f"Rate limited after {max_retries} attempts",
+                    provider="polygon",
+                )
 
+            try:
                 response.raise_for_status()
-                data = cast(dict[str, Any], response.json())
-
-                if data.get("status") != "OK":
-                    return None
-
-                return cast(dict[str, Any] | None, data.get("results"))
-
-            except httpx.RequestError as e:
-                if attempt < max_retries - 1:
-                    self.logger.warning(f"Request failed: {e}. Retrying...")
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                if status_code >= 500 and attempt < max_retries - 1:
+                    self.logger.warning(f"Polygon HTTP {status_code}; retrying")
                     time.sleep(1)
-                else:
-                    raise
+                    continue
+                raise ProviderError(
+                    f"HTTP {status_code} request failed",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
 
-        return None
+            try:
+                data = response.json()
+            except (TypeError, ValueError) as e:
+                raise ProviderError(
+                    "Invalid JSON response",
+                    provider="polygon",
+                    original_error=e,
+                ) from e
+
+            if not isinstance(data, dict):
+                raise ProviderError("Invalid response object", provider="polygon")
+
+            if data.get("status") != "OK":
+                error = data.get("error", data.get("message", "Unknown error"))
+                raise ProviderError(
+                    f"API error: {redact_sensitive_text(error)}",
+                    provider="polygon",
+                )
+
+            results = data.get("results")
+            if not isinstance(results, dict):
+                raise ProviderError(
+                    "Invalid response: expected object results",
+                    provider="polygon",
+                )
+            return cast(dict[str, Any], results)
+
+        raise AssertionError("get_single retry loop exited unexpectedly")
 
     # Convenience methods for specific data types
 
