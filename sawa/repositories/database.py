@@ -292,6 +292,10 @@ class DatabaseFundamentalRepository(FundamentalRepository):
 
     def _row_to_income(self, row: dict[str, Any]) -> IncomeStatement:
         """Convert database row to IncomeStatement domain model."""
+        net_income = row.get("net_income_loss_attributable_common_shareholders")
+        if net_income is None:
+            net_income = row.get("consolidated_net_income_loss")
+
         return IncomeStatement(
             ticker=row["ticker"],
             period_end=row["period_end"],
@@ -304,9 +308,9 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             research_development=_to_decimal(row.get("research_development")),
             selling_general_administrative=_to_decimal(row.get("selling_general_administrative")),
             operating_income=_to_decimal(row.get("operating_income")),
-            net_income=_to_decimal(row.get("net_income")),
-            basic_eps=_to_decimal(row.get("basic_eps")),
-            diluted_eps=_to_decimal(row.get("diluted_eps")),
+            net_income=_to_decimal(net_income),
+            basic_eps=_to_decimal(row.get("basic_earnings_per_share")),
+            diluted_eps=_to_decimal(row.get("diluted_earnings_per_share")),
         )
 
     async def get_balance_sheets(
@@ -362,9 +366,11 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             cash_and_equivalents=_to_decimal(row.get("cash_and_equivalents")),
             total_liabilities=_to_decimal(row.get("total_liabilities")),
             total_current_liabilities=_to_decimal(row.get("total_current_liabilities")),
-            long_term_debt=_to_decimal(row.get("long_term_debt")),
+            long_term_debt=_to_decimal(
+                row.get("long_term_debt_and_capital_lease_obligations")
+            ),
             total_equity=_to_decimal(row.get("total_equity")),
-            retained_earnings=_to_decimal(row.get("retained_earnings")),
+            retained_earnings=_to_decimal(row.get("retained_earnings_deficit")),
         )
 
     async def get_cash_flows(
@@ -415,10 +421,14 @@ class DatabaseFundamentalRepository(FundamentalRepository):
             timeframe=row.get("timeframe", "quarterly"),
             fiscal_year=row.get("fiscal_year"),
             fiscal_quarter=row.get("fiscal_quarter"),
-            operating_cash_flow=_to_decimal(row.get("operating_cash_flow")),
-            capital_expenditure=_to_decimal(row.get("capital_expenditure")),
-            dividends_paid=_to_decimal(row.get("dividends_paid")),
-            free_cash_flow=_to_decimal(row.get("free_cash_flow")),
+            operating_cash_flow=_to_decimal(row.get("net_cash_from_operating_activities")),
+            capital_expenditure=_to_decimal(
+                row.get("purchase_of_property_plant_and_equipment")
+            ),
+            dividends_paid=_to_decimal(row.get("dividends")),
+            # cash_flows has no free-cash-flow column, and deriving it here
+            # would require a proven sign convention for stored capex values.
+            free_cash_flow=None,
         )
 
 
@@ -916,7 +926,7 @@ class DatabaseNewsRepository(NewsRepository):
             JOIN news_article_tickers nat ON na.id = nat.article_id
             LEFT JOIN news_sentiment ns ON na.id = ns.article_id AND nat.ticker = ns.ticker
             WHERE nat.ticker = %s
-              AND na.published_utc >= NOW() - INTERVAL '%s days'
+              AND na.published_utc >= NOW() - (%s * INTERVAL '1 day')
             ORDER BY na.published_utc DESC
             LIMIT %s
         """
@@ -972,7 +982,7 @@ class DatabaseNewsRepository(NewsRepository):
             FROM news_sentiment ns
             JOIN news_articles na ON ns.article_id = na.id
             WHERE ns.ticker = %s
-              AND na.published_utc >= NOW() - INTERVAL '%s days'
+              AND na.published_utc >= NOW() - (%s * INTERVAL '1 day')
             GROUP BY ns.sentiment
         """
         with _get_connection(self.database_url) as conn:
@@ -1043,6 +1053,9 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         "obv",
         "volume_sma_20",
         "volume_ratio",
+        "adx_14",
+        "bb_width_pct",
+        "dollar_volume_sma_20",
     }
 
     async def get_indicators(
@@ -1186,6 +1199,12 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
         limit: int,
     ) -> list[TechnicalIndicators]:
         """Synchronous implementation of screen_by_indicators."""
+        unknown_indicators = sorted(set(filters) - self.VALID_INDICATORS)
+        if unknown_indicators:
+            raise ValueError(
+                "Unknown technical indicators: " + ", ".join(unknown_indicators)
+            )
+
         limit = min(limit, 500)
 
         # Build WHERE conditions
@@ -1210,9 +1229,6 @@ class DatabaseTechnicalIndicatorsRepository(TechnicalIndicatorsRepository):
 
         # Add filter conditions
         for indicator, (min_val, max_val) in filters.items():
-            if indicator not in self.VALID_INDICATORS:
-                continue
-
             if min_val is not None and max_val is not None:
                 conditions.append(f"{indicator} BETWEEN %s AND %s")
                 params.extend([min_val, max_val])
