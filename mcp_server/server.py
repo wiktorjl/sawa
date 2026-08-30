@@ -13,20 +13,31 @@ import os
 import sys
 import time
 from functools import partial
-from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from mcp.server import Server
+from jsonschema import Draft202012Validator
+from mcp import MCPError
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    INVALID_PARAMS,
+    CallToolRequestParams,
+    CallToolResult,
+    ContentBlock,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
+from sawa.utils.logging import (  # noqa: E402
+    RedactingFilter,
+    RedactingFormatter,
+    install_redaction_filters,
+)
+from sawa.utils.security import redact_sensitive_text  # noqa: E402
 
-# Load environment variables from .env file in project root
-# Find .env relative to this file's location (mcp_server/server.py -> ../.env)
-_project_root = Path(__file__).parent.parent
-_env_file = _project_root / ".env"
-load_dotenv(_env_file)
-
+from . import database as database_runtime  # noqa: E402
 from .charts.config import ChartDetail, get_chart_config  # noqa: E402
 from .charts.core.layout import get_layout  # noqa: E402
 from .charts.core.modal import check_width_and_warn  # noqa: E402
@@ -38,7 +49,7 @@ from .charts.renderers import (  # noqa: E402
     render_ratios_chart,
 )
 from .charts.themes import get_theme  # noqa: E402
-from .database import execute_query  # noqa: E402
+from .monitoring import configure_file_logging, record_call_outcome  # noqa: E402
 from .tools.companies import (  # noqa: E402
     get_company_details,
     list_companies,
@@ -86,10 +97,15 @@ from .tools.multi_timeframe import (  # noqa: E402
     get_weekly_monthly_candles,
 )
 from .tools.news import get_recent_news_sentiment  # noqa: E402
-from .tools.patterns import detect_candlestick_patterns, detect_chart_patterns  # noqa: E402
+from .tools.patterns import (  # noqa: E402
+    SUPPORTED_PATTERNS,
+    detect_candlestick_patterns,
+    detect_chart_patterns,
+)
 from .tools.scanner import scan_ytd_performance_async  # noqa: E402
 from .tools.schema import describe_database, describe_table  # noqa: E402
 from .tools.screener import (  # noqa: E402
+    FILTER_SPECS,
     detect_crossovers,
     get_52week_extremes,
     get_daily_range_leaders,
@@ -103,19 +119,26 @@ from .tools.volume_analysis import (  # noqa: E402
     get_advanced_volume_indicators,
     get_volume_profile,
 )
-from .monitoring import configure_file_logging, record_call_outcome  # noqa: E402
+from .utils.json_values import normalize_json_value  # noqa: E402
 from .validation import validate_tool_arguments  # noqa: E402
 
 # Setup logging. stderr handler is kept so MCP clients (Claude Desktop / Code)
 # still see live diagnostics; configure_file_logging attaches a daily-rotated
 # file handler under ~/.sawa/logs/mcp.log so the audit trail survives the pipe.
 log_level = os.environ.get("MCP_LOG_LEVEL", "info").upper()
+_stderr_handler = logging.StreamHandler(sys.stderr)
+_stderr_handler.addFilter(RedactingFilter())
+_stderr_handler.setFormatter(
+    RedactingFormatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    )
+)
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    stream=sys.stderr,
+    handlers=[_stderr_handler],
 )
+install_redaction_filters()
 logger = logging.getLogger(__name__)
 _mcp_log_file = configure_file_logging(logger)
 
@@ -126,27 +149,82 @@ async def _run_sync(func, *args, **kwargs):
     return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 
-# Create MCP server
-app = Server(
-    "stock-data-server",
-    instructions=(
-        "PRICE DATA TOOL SELECTION:\n"
-        "- Current session / today's price action / intraday -> get_intraday_bars\n"
-        "- Historical daily OHLCV with chart -> get_stock_prices\n"
-        "- Quick latest closing price -> get_latest_price\n"
-        "- Real-time quote from API -> get_live_price\n"
-        "During market hours (Mon-Fri 9:30AM-4PM ET), prefer get_intraday_bars "
-        "for any question about today's prices.\n\n"
-        "TOOL RESPONSE FORMAT:\n"
-        "Successful tools return one JSON object with data, chart, warnings, and metadata. "
-        "Read data for machine processing; chart is optional display text."
-    ),
-)
+def _get_chart_runtime(arguments: dict[str, Any]) -> tuple[Any, Any, str | None]:
+    """Load chart-only configuration without coupling it to data tools."""
+    config = get_chart_config()
+    if chart_detail := arguments.get("chart_detail"):
+        config.detail = ChartDetail(chart_detail.lower())
+    layout = get_layout(config)
+    theme = get_theme(config.theme, colors_enabled=config.colors_enabled)
+    width_warning = check_width_and_warn(
+        layout.width,
+        config.get_min_width(),
+        theme,
+    )
+    return layout, theme, width_warning
 
 
 _RESPONSE_SCHEMA_VERSION = "sawa.mcp.tool_response.v1"
 _INDEX_CODE_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
 _INDEX_CODE_EXAMPLES = "sp500, nasdaq_listed, us_active, nasdaq100, dow30, russell1000, mag7"
+_SERVER_INSTRUCTIONS = (
+    "PRICE DATA TOOL SELECTION:\n"
+    "- Current session / today's price action / intraday -> get_intraday_bars\n"
+    "- Historical daily OHLCV with chart -> get_stock_prices\n"
+    "- Quick latest closing price -> get_latest_price\n"
+    "- Real-time quote from API -> get_live_price\n"
+    "During market hours (Mon-Fri 9:30AM-4PM ET), prefer get_intraday_bars "
+    "for any question about today's prices.\n\n"
+    "TOOL RESPONSE FORMAT:\n"
+    "Successful tools return one JSON object with data, chart, warnings, and metadata. "
+    "Read structuredContent for machine processing; content contains the same JSON "
+    "for compatibility."
+)
+_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "data": {},
+        "chart": {"type": ["string", "null"]},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "metadata": {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "schema_version": {"type": "string"},
+                "duration_ms": {"type": "number"},
+                "source": {"type": "string", "maxLength": 64},
+            },
+            "required": ["tool", "schema_version"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["data", "chart", "warnings", "metadata"],
+    "additionalProperties": False,
+}
+_OPEN_WORLD_TOOLS = {"get_live_price", "get_live_prices_batch"}
+_TICKER_INPUT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,9}$"
+_DATE_INPUT_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+_MAX_FREE_TEXT_INPUT_LENGTH = 256
+_MAX_TABLE_NAME_INPUT_LENGTH = 63
+_SCANNER_INDEX_CODES = [
+    "sp500",
+    "nasdaq_listed",
+    "us_active",
+    "both",
+]
+
+
+def _bound_input_strings(value: Any) -> Any:
+    """Return a schema copy with a finite bound on every input string."""
+    if isinstance(value, dict):
+        bounded = {key: _bound_input_strings(item) for key, item in value.items()}
+        if bounded.get("type") == "string":
+            bounded.setdefault("minLength", 1)
+            bounded.setdefault("maxLength", _MAX_FREE_TEXT_INPUT_LENGTH)
+        return bounded
+    if isinstance(value, list):
+        return [_bound_input_strings(item) for item in value]
+    return value
 
 
 def _index_schema_description(description: str, suffix: str = "") -> str:
@@ -174,6 +252,13 @@ def _index_filter_schema(
         "type": "string",
         "description": _index_schema_description(description, suffix),
         "pattern": _INDEX_CODE_PATTERN,
+        "not": {
+            "enum": [
+                "nasdaq5000",
+                *([] if allow_all else ["all"]),
+                *([] if allow_both else ["both"]),
+            ]
+        },
     }
     if default is not None:
         schema["default"] = default
@@ -186,6 +271,7 @@ def _index_code_schema() -> dict[str, Any]:
         "type": "string",
         "description": _index_schema_description("Index code"),
         "pattern": _INDEX_CODE_PATTERN,
+        "not": {"enum": ["all", "both", "nasdaq5000"]},
     }
 
 
@@ -208,16 +294,25 @@ def _tool_response(
     if metadata:
         response_metadata.update(metadata)
 
-    payload = {
-        "data": result,
-        "chart": chart,
-        "warnings": warnings or [],
-        "metadata": response_metadata,
-    }
+    payload = normalize_json_value(
+        {
+            "data": result,
+            "chart": chart,
+            "warnings": warnings or [],
+            "metadata": response_metadata,
+        }
+    )
+    rendered = json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False)
+    rendered_bytes = len(rendered.encode("utf-8"))
+    if rendered_bytes > database_runtime.MAX_RESULT_BYTES:
+        raise ValueError(
+            "Tool response exceeds maximum serialized size of "
+            f"{database_runtime.MAX_RESULT_BYTES} bytes"
+        )
     return [
         TextContent(
             type="text",
-            text=json.dumps(payload, indent=2, default=str, ensure_ascii=False),
+            text=rendered,
         )
     ]
 
@@ -231,9 +326,8 @@ def _success_response(
     warnings: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> list[TextContent]:
-    """Record a successful tool call and return a JSON envelope."""
+    """Return a successful JSON envelope; the protocol boundary records it."""
     duration_ms = (time.monotonic() - started) * 1000
-    record_call_outcome(name, success=True, duration_ms=duration_ms, logger=logger)
     return _tool_response(
         name,
         result,
@@ -244,14 +338,13 @@ def _success_response(
     )
 
 
-@app.list_tools()
 async def list_tools() -> list[Tool]:
     """List all available tools."""
-    return [
+    tools = [
         Tool(
             name="list_companies",
             description="List active companies with optional filtering by sector",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "limit": {
@@ -263,9 +356,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Number of results to skip",
+                        "description": "Number of results to skip (max: 10000)",
                         "default": 0,
                         "minimum": 0,
+                        "maximum": 10000,
                     },
                     "sector": {
                         "type": "string",
@@ -278,7 +372,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_company_details",
             description="Get detailed company information including latest price and metrics",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -292,7 +386,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="search_companies",
             description="Search companies by name, ticker, or sector",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
@@ -314,7 +408,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_live_price",
             description="Get live stock price from Polygon API (real-time, not from database). For intraday OHLCV bars and session summaries, use get_intraday_bars.",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -335,12 +429,19 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_live_prices_batch",
             description="Get live stock prices for multiple tickers from Polygon API (real-time batch query)",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "tickers": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 10,
+                            "pattern": r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,9}$",
+                        },
+                        "minItems": 1,
+                        "maxItems": 50,
                         "description": "List of stock ticker symbols (e.g., ['AAPL', 'MSFT', 'GOOGL'])",  # noqa: E501
                     },
                     "days": {
@@ -357,7 +458,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_latest_price",
             description="Get the most recent closing price from the database (fast). Returns yesterday's close or today's if market has closed. For current-session intraday prices during market hours, use get_intraday_bars.",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -376,7 +477,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_stock_prices",
             description="Get historical daily OHLCV prices with visual chart. Best for multi-day/week/month/year ranges. For current trading session data during market hours, use get_intraday_bars instead.",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -415,7 +516,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_financial_ratios",
             description="Get time-series financial ratios (P/E, ROE, debt/equity, etc.) with visual chart",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -449,7 +550,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_fundamentals",
             description="Get latest balance sheet, cash flow, and income statement data with visual charts",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -481,7 +582,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_technical_indicators",
             description="Get technical indicators (SMA, RSI, MACD, Bollinger Bands, etc.) for a ticker",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -510,7 +611,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_latest_technical_indicators",
             description="Get the most recent technical indicators for a ticker",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -523,8 +624,8 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_intraday_bars",
-            description="Get today's intraday price data as 5-minute bars (15-min delayed). PREFERRED tool for any current-session or today's price queries during market hours. Supports multiple tickers and daily OHLCV aggregation via aggregate=true.",  # noqa: E501
-            inputSchema={
+            description="Get today's stored intraday price bars (15-min delayed). PREFERRED tool for any current-session or today's price queries during market hours. Supports multiple tickers, selectable stored bar sizes, and daily OHLCV aggregation via aggregate=true.",  # noqa: E501
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -533,7 +634,14 @@ async def list_tools() -> list[Tool]:
                     },
                     "tickers": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 10,
+                            "pattern": r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,9}$",
+                        },
+                        "minItems": 1,
+                        "maxItems": 20,
                         "description": "Multiple ticker symbols (e.g., ['SPY', 'QQQ', 'DIA']). Use instead of ticker for multi-stock queries.",  # noqa: E501
                     },
                     "date": {
@@ -546,6 +654,12 @@ async def list_tools() -> list[Tool]:
                         "default": 100,
                         "minimum": 1,
                         "maximum": 500,
+                    },
+                    "bar_size_minutes": {
+                        "type": "integer",
+                        "description": "Stored bar interval to query",
+                        "enum": [1, 5, 15, 30, 60],
+                        "default": 5,
                     },
                     "aggregate": {
                         "type": "boolean",
@@ -562,7 +676,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="screen_technical_indicators",
             description="Screen stocks by technical indicator values (e.g., RSI < 30)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "rsi_14_max": {
@@ -603,7 +717,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_economy_data",
             description="Get economic indicators for a date range with visual charts",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "indicator_type": {
@@ -644,7 +758,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_economy_dashboard",
             description="Get a visual summary of recent economic indicators",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "limit": {
@@ -671,7 +785,7 @@ async def list_tools() -> list[Tool]:
                 "SMA/stddev of VIX, and 252-day percentile ranks for VIX and "
                 "HY spread. One row per trading day."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "start_date": {
@@ -695,8 +809,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="scan_ytd_performance",
-            description="Scan a market index for YTD performance analysis with sector grouping",
-            inputSchema={
+            description=(
+                "Scan stored prices and index membership for performance analysis "
+                "with sector grouping"
+            ),
+            input_schema={
                 "type": "object",
                 "properties": {
                     "start_date": {
@@ -707,99 +824,37 @@ async def list_tools() -> list[Tool]:
                         "type": "number",
                         "description": "Market cap threshold in billions (default: 100)",
                         "default": 100,
+                        "minimum": 0,
+                        "maximum": 1000000,
                     },
                     "top_n": {
                         "type": "integer",
-                        "description": "Number of top winners/losers to show (default: 10)",
+                        "description": "Number of top winners to show (default: 10)",
                         "default": 10,
-                        "minimum": 5,
+                        "minimum": 1,
                         "maximum": 50,
                     },
-                    "index": _index_filter_schema(
-                        description="Index to scan",
-                        allow_both=True,
-                        default="sp500",
-                    ),
-                },
-            },
-        ),
-        Tool(
-            name="execute_query",
-            description=(
-                "Execute a custom read-only SQL query (SELECT only). "
-                "Use describe_database and describe_table tools first to discover schema.\n\n"
-                "TABLES:\n"
-                "  companies(ticker PK, name, sic_code, sic_description, market_cap, active, ...)\n"
-                "  stock_prices(ticker, date PK, open, high, low, close, volume)\n"
-                "  stock_prices_intraday(ticker, timestamp PK, open, high, low, close, volume)\n"
-                "  financial_ratios(ticker, date PK, price_to_earnings, debt_to_equity, "
-                "return_on_equity, dividend_yield, ...)\n"
-                "  balance_sheets(ticker, period_end, timeframe PK, total_assets, "
-                "total_liabilities, total_equity, ...)\n"
-                "  cash_flows(ticker, period_end, timeframe PK, "
-                "net_cash_from_operating_activities, ...)\n"
-                "  income_statements(ticker, period_end, timeframe PK, revenue, operating_income, "
-                "diluted_earnings_per_share, ...)\n"
-                "  technical_indicators(ticker, date PK, sma_50, sma_150, sma_200, rsi_14, "
-                "macd_line, macd_histogram, bb_upper, bb_lower, atr_14, volume_ratio, ...)\n"
-                "  indices(id PK, code, name) - use list_indices for current codes\n"
-                "  index_constituents(index_id, ticker PK) - JOIN with indices on id\n"
-                "  sic_gics_mapping(sic_code PK, gics_sector, gics_industry) - "
-                "JOIN with companies on sic_code\n"
-                "  treasury_yields(date PK, yield_1_month, yield_2_year, "
-                "yield_10_year, yield_30_year, ...)\n"
-                "  inflation(date PK, cpi, cpi_year_over_year, pce, ...)\n"
-                "  inflation_expectations(date PK, market_5_year, market_10_year, ...)\n"
-                "  labor_market(date PK, unemployment_rate, job_openings, ...)\n"
-                "  market_internals(date PK, vix, vix3m, hy_spread) - FRED daily\n"
-                "  stock_splits(ticker, execution_date, split_from, split_to)\n"
-                "  dividends(ticker, ex_dividend_date, cash_amount, frequency, ...)\n"
-                "  earnings(ticker, report_date, fiscal_year, fiscal_quarter, eps_estimate, "
-                "eps_actual, surprise_pct, timing)\n"
-                "  news_articles(id PK, title, published_utc, ...)\n"
-                "  news_article_tickers(article_id, ticker)\n"
-                "  news_sentiment(article_id, ticker, sentiment)\n\n"
-                "VIEWS:\n"
-                "  stock_prices_live - union of historical EOD + today's intraday data\n"
-                "  v_company_summary - companies with latest price and ratios\n"
-                "  v_company_with_indices - companies with index membership "
-                "(in_sp500, in_nasdaq_listed)\n"
-                "  v_latest_fundamentals - latest quarterly fundamentals per company\n"
-                "  v_economy_dashboard - combined economy indicators\n"
-                "  v_sector_summary - sector aggregates by SIC code\n\n"
-                "COMMON MISTAKES (these DO NOT exist):\n"
-                "  daily_prices -> use stock_prices\n"
-                "  price_metrics -> no such table, compute from stock_prices\n"
-                "  intraday_bars -> use stock_prices_intraday\n"
-                "  index_members -> use index_constituents JOIN indices\n"
-                "  market_indexes -> use indices\n"
-                "  companies.sp500 -> use index_constituents JOIN indices WHERE code='sp500'\n"
-                "  companies.gics_sector -> use sic_gics_mapping JOIN on sic_code"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "sql": {
+                    "bottom_n": {
+                        "type": "integer",
+                        "description": "Number of bottom performers to show (default: 10)",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 50,
+                    },
+                    "index": {
                         "type": "string",
-                        "description": "SQL SELECT statement to execute",
-                    },
-                    "params": {
-                        "type": "object",
-                        "description": (
-                            "Optional named SQL parameters for psycopg placeholders, "
-                            "for example {'ticker': 'AAPL'} with %(ticker)s"
-                        ),
-                        "additionalProperties": True,
+                        "description": "Supported stored constituent universe",
+                        "enum": _SCANNER_INDEX_CODES,
+                        "default": "sp500",
                     },
                 },
-                "required": ["sql"],
             },
         ),
         # Schema discovery tools
         Tool(
             name="describe_database",
             description="List all tables with column counts, row counts, and descriptions",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {},
             },
@@ -807,7 +862,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="describe_table",
             description="Get detailed table info: columns, types, samples, foreign keys, indexes",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "table_name": {
@@ -822,7 +877,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_sectors",
             description="List all sectors/industries with stock counts",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "taxonomy": {
@@ -845,7 +900,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_sector_performance",
             description="Get sector performance across multiple time periods (1d, 1w, 1m, YTD)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "taxonomy": {
@@ -869,7 +924,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_top_movers",
             description="Get top gaining or losing stocks",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "direction": {
@@ -910,7 +965,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_volume_leaders",
             description="Get stocks with highest trading volume",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "metric": {
@@ -941,7 +996,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_market_breadth",
             description="Get market breadth: advancers, decliners, unchanged, A/D ratio",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "date": {
@@ -955,7 +1010,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_technical_indicators",
             description="List available technical indicators with descriptions",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "category": {
@@ -970,7 +1025,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="screen_stocks",
             description="Multi-criteria screener with price, volume, and technical filters",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "filters": {
@@ -1161,7 +1216,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_52week_extremes",
             description="Find stocks at or near 52-week highs or lows",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "extreme": {
@@ -1203,7 +1258,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_daily_range_leaders",
             description="Find stocks with high intraday volatility (daily range %)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "min_range_pct": {
@@ -1242,12 +1297,20 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_ytd_returns",
             description="Get YTD percentage returns for a list of tickers (database-based)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "tickers": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 10,
+                            "pattern": _TICKER_INPUT_PATTERN,
+                        },
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "uniqueItems": True,
                         "description": "List of ticker symbols (e.g., ['AAPL', 'MSFT'])",
                     },
                     "start_date": {
@@ -1262,7 +1325,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="detect_crossovers",
             description="Detect stocks that recently crossed above or below a moving average (SMA crossover scanner)",  # noqa: E501
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "sma_period": {
@@ -1303,7 +1366,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_indices",
             description="List all market indices with constituent counts",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {},
             },
@@ -1311,7 +1374,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_index_constituents",
             description="Get all constituent stocks of a market index",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "code": _index_code_schema(),
@@ -1322,7 +1385,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="check_index_membership",
             description="Check which market indices a stock belongs to",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1336,7 +1399,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_index_with_prices",
             description="Get index constituents with latest price data, sorted by market cap",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "code": _index_code_schema(),
@@ -1355,7 +1418,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_stock_splits",
             description="Get stock split history",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1372,8 +1435,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results (default: 100)",
+                        "description": "Maximum results (default: 100, max: 500)",
                         "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                 },
             },
@@ -1381,7 +1446,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_dividends",
             description="Get dividend history or upcoming dividends",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1403,8 +1468,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results (default: 100)",
+                        "description": "Maximum results (default: 100, max: 500)",
                         "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                 },
             },
@@ -1412,7 +1479,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_ex_dividend_calendar",
             description="Get ex-dividend calendar for a date range",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "start_date": {
@@ -1426,8 +1493,10 @@ async def list_tools() -> list[Tool]:
                     "index": _index_filter_schema(allow_all=True, default="all"),
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results (default: 200)",
+                        "description": "Maximum results (default: 200, max: 500)",
                         "default": 200,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                 },
                 "required": ["start_date", "end_date"],
@@ -1436,13 +1505,15 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_recent_splits",
             description="Get recent stock splits",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "days": {
                         "type": "integer",
-                        "description": "Days to look back (default: 30)",
+                        "description": "Days to look back (default: 30, max: 30)",
                         "default": 30,
+                        "minimum": 1,
+                        "maximum": 30,
                     },
                     "index": _index_filter_schema(allow_all=True, default="all"),
                 },
@@ -1451,7 +1522,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_dividend_yield_leaders",
             description="Get stocks with highest dividend yields",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "index": _index_filter_schema(allow_all=True, default="all"),
@@ -1462,8 +1533,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results (default: 50)",
+                        "description": "Maximum results (default: 50, max: 200)",
                         "default": 50,
+                        "minimum": 1,
+                        "maximum": 200,
                     },
                 },
             },
@@ -1471,7 +1544,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_earnings_calendar",
             description="Get earnings calendar for a date range",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "start_date": {
@@ -1491,8 +1564,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results (default: 200)",
+                        "description": "Maximum results (default: 200, max: 500)",
                         "default": 200,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                 },
                 "required": ["start_date", "end_date"],
@@ -1501,7 +1576,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_earnings_history",
             description="Get historical earnings for a ticker",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1510,8 +1585,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Number of quarters (default: 12)",
+                        "description": "Number of quarters (default: 12, max: 40)",
                         "default": 12,
+                        "minimum": 1,
+                        "maximum": 40,
                     },
                 },
                 "required": ["ticker"],
@@ -1522,7 +1599,7 @@ async def list_tools() -> list[Tool]:
             name="get_data_status",
             description="Check latest stock price data in the database"
             " (daily, intraday, and live tables)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {},
             },
@@ -1531,7 +1608,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_recent_news_sentiment",
             description="Get recent news articles with sentiment analysis for a ticker",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1563,7 +1640,7 @@ async def list_tools() -> list[Tool]:
                 "Calculate support and resistance levels using "
                 "pivot points, price clustering, or volume analysis"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1604,7 +1681,7 @@ async def list_tools() -> list[Tool]:
                 "Detect candlestick patterns "
                 "(hammer, engulfing, doji, stars, soldiers, etc.)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1620,7 +1697,13 @@ async def list_tools() -> list[Tool]:
                     },
                     "patterns_to_detect": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "enum": sorted(SUPPORTED_PATTERNS),
+                        },
+                        "minItems": 1,
+                        "maxItems": len(SUPPORTED_PATTERNS),
+                        "uniqueItems": True,
                         "description": (
                             "Optional list of specific patterns to detect "
                             "(default: all patterns)"
@@ -1636,7 +1719,7 @@ async def list_tools() -> list[Tool]:
                 "Detect chart patterns "
                 "(cup & handle, head & shoulders, triangles, channels, etc.)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1655,6 +1738,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Minimum days for pattern formation (default: 10)",
                         "default": 10,
                         "minimum": 5,
+                        "maximum": 252,
                     },
                 },
                 "required": ["ticker"],
@@ -1667,7 +1751,7 @@ async def list_tools() -> list[Tool]:
                 "Get TTM Squeeze indicators (Bollinger Bands, Keltner Channels, "
                 "momentum histogram, squeeze status)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1678,7 +1762,7 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Number of days to analyze (default: 60, max: 252)",
                         "default": 60,
-                        "minimum": 1,
+                        "minimum": 20,
                         "maximum": 252,
                     },
                 },
@@ -1688,7 +1772,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_momentum_indicators",
             description="Get advanced momentum indicators (ADX, DMI, Stochastic, Williams %R, ROC)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1713,7 +1797,7 @@ async def list_tools() -> list[Tool]:
                 "Get volume distribution by price level "
                 "(POC, value area, volume by price bins)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1729,10 +1813,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "price_bins": {
                         "type": "integer",
-                        "description": "Number of price bins (default: 20, max: 100)",
+                        "description": "Number of price bins (default: 20, max: 50)",
                         "default": 20,
                         "minimum": 5,
-                        "maximum": 100,
+                        "maximum": 50,
                     },
                 },
                 "required": ["ticker"],
@@ -1741,7 +1825,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="detect_volume_anomalies",
             description="Detect unusual volume patterns (spikes, drops, price-volume divergences)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1752,14 +1836,14 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Number of days to analyze (default: 90, max: 252)",
                         "default": 90,
-                        "minimum": 1,
+                        "minimum": 20,
                         "maximum": 252,
                     },
                     "threshold_multiplier": {
                         "type": "number",
                         "description": "Volume spike threshold multiplier (default: 2.0)",
                         "default": 2.0,
-                        "minimum": 1.0,
+                        "minimum": 1.1,
                     },
                 },
                 "required": ["ticker"],
@@ -1768,7 +1852,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_advanced_volume_indicators",
             description="Get advanced volume indicators (OBV, A/D line, CMF, VWAP)",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1779,7 +1863,7 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Number of days to analyze (default: 60, max: 252)",
                         "default": 60,
-                        "minimum": 1,
+                        "minimum": 5,
                         "maximum": 252,
                     },
                 },
@@ -1794,7 +1878,7 @@ async def list_tools() -> list[Tool]:
                 "newest candle may be the still-forming current period — check the "
                 "is_partial flag (true = period in progress, not yet complete)."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1808,12 +1892,26 @@ async def list_tools() -> list[Tool]:
                     },
                     "periods": {
                         "type": "integer",
-                        "description": "Number of periods (default: 52 for weekly, 12 for monthly)",
+                        "description": (
+                            "Number of periods (default: 52 weekly/12 monthly; "
+                            "max: 260 weekly/120 monthly)"
+                        ),
                         "minimum": 1,
                         "maximum": 260,
                     },
                 },
                 "required": ["ticker", "timeframe"],
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {"timeframe": {"const": "monthly"}},
+                            "required": ["timeframe"],
+                        },
+                        "then": {
+                            "properties": {"periods": {"maximum": 120}}
+                        },
+                    }
+                ],
             },
         ),
         Tool(
@@ -1822,7 +1920,7 @@ async def list_tools() -> list[Tool]:
                 "Check indicator alignment across multiple timeframes "
                 "(daily, weekly, monthly)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1831,12 +1929,26 @@ async def list_tools() -> list[Tool]:
                     },
                     "indicators": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Indicators to check (sma, rsi, macd)",
+                        "items": {
+                            "type": "string",
+                            "enum": ["sma", "sma_trend", "rsi", "macd"],
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": True,
+                        "description": (
+                            "Indicators to check (sma or sma_trend, rsi, macd)"
+                        ),
                     },
                     "timeframes": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "enum": ["daily", "weekly", "monthly"],
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": True,
                         "description": "Timeframes to analyze (daily, weekly, monthly)",
                     },
                 },
@@ -1849,7 +1961,7 @@ async def list_tools() -> list[Tool]:
                 "Calculate relative strength vs benchmark "
                 "(RS line, trend, beta, outperformance)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "ticker": {
@@ -1873,41 +1985,102 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
+    # Arbitrary PostgreSQL SELECT statements can invoke volatile user-defined
+    # or extension functions with side effects. A keyword blocklist cannot
+    # make that surface safe, so raw SQL is never exposed as an MCP tool.
+    listed_tools: list[Tool] = []
+    for tool in tools:
+        input_schema = _bound_input_strings(
+            {**tool.input_schema, "additionalProperties": False}
+        )
+        root_properties = dict(input_schema.get("properties", {}))
+        for ticker_field in ("ticker", "benchmark"):
+            if ticker_field not in root_properties:
+                continue
+            ticker_schema = dict(root_properties[ticker_field])
+            ticker_schema.update(
+                {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10,
+                    "pattern": _TICKER_INPUT_PATTERN,
+                }
+            )
+            root_properties[ticker_field] = ticker_schema
+            input_schema["properties"] = root_properties
+        for date_field in (
+            "date",
+            "start_date",
+            "end_date",
+            "target_date",
+            "since_date",
+        ):
+            if date_field in root_properties:
+                date_schema = dict(root_properties[date_field])
+                date_schema.update(
+                    {
+                        "type": "string",
+                        "minLength": 10,
+                        "maxLength": 10,
+                        "pattern": _DATE_INPUT_PATTERN,
+                    }
+                )
+                root_properties[date_field] = date_schema
+                input_schema["properties"] = root_properties
+        if "table_name" in root_properties:
+            table_schema = dict(root_properties["table_name"])
+            table_schema["maxLength"] = _MAX_TABLE_NAME_INPUT_LENGTH
+            root_properties["table_name"] = table_schema
+            input_schema["properties"] = root_properties
+        if tool.name == "screen_stocks":
+            filters_schema = dict(root_properties["filters"])
+            described_filters = dict(filters_schema["properties"])
+            generic_range_schema = {
+                "type": "array",
+                "items": {"type": ["number", "null"]},
+                "minItems": 2,
+                "maxItems": 2,
+            }
+            filters_schema["properties"] = {
+                name: described_filters.get(name, generic_range_schema)
+                for name in sorted(FILTER_SPECS)
+            }
+            filters_schema["additionalProperties"] = False
+            root_properties["filters"] = filters_schema
+            input_schema["properties"] = root_properties
+
+        listed_tools.append(
+            tool.model_copy(
+                update={
+                    "annotations": ToolAnnotations(
+                        read_only_hint=True,
+                        destructive_hint=False,
+                        open_world_hint=tool.name in _OPEN_WORLD_TOOLS,
+                    ),
+                    "input_schema": input_schema,
+                    "output_schema": _TOOL_OUTPUT_SCHEMA,
+                }
+            )
+        )
+    return listed_tools
 
 
-@app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
-    logger.info(f"Calling function: {name}")
-    if arguments:
-        logger.info(f"  Arguments: {arguments}")
+    logger.info("Calling function: %s", name)
 
     started = time.monotonic()
     try:
         # Validate common arguments (tickers, dates, limits, etc.)
         arguments = validate_tool_arguments(name, arguments)
-
-        # Get chart configuration
-        config = get_chart_config()
-
-        # Override detail level if specified in arguments
-        if chart_detail := arguments.get("chart_detail"):
-            try:
-                config.detail = ChartDetail(chart_detail.lower())
-            except ValueError:
-                pass
-
-        layout = get_layout(config)
-        theme = get_theme(config.theme)
-
-        # Check terminal width and get warning if needed
-        width_warning = check_width_and_warn(
-            layout.width,
-            config.get_min_width(),
-            theme,
-        )
+        if arguments:
+            # Values can be large or private even for read-only tools. Schema
+            # and domain validation happen first; logs retain only bounded
+            # diagnostic shape instead of copying user payloads.
+            logger.info("  Validated argument fields: %d", len(arguments))
 
         chart: str | None = None
+        width_warning: str | None = None
         warnings: list[str] = []
         result: Any = None
 
@@ -1946,6 +2119,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 tickers=arguments["tickers"],
                 days=arguments.get("days", 7),
             )
+            provider_failed_tickers = [
+                ticker
+                for ticker, value in result.items()
+                if isinstance(value, dict)
+                and value.get("error_type") == "provider_error"
+            ]
+            no_data_tickers = [
+                ticker
+                for ticker, value in result.items()
+                if isinstance(value, dict) and value.get("error_type") == "no_data"
+            ]
+            if result and len(provider_failed_tickers) == len(result):
+                raise RuntimeError(
+                    "Live-price provider failed for every requested ticker"
+                )
+            if provider_failed_tickers:
+                warnings.append(
+                    f"Live-price provider failed for {len(provider_failed_tickers)}/"
+                    f"{len(result)} tickers: {', '.join(provider_failed_tickers)}"
+                )
+            if no_data_tickers:
+                warnings.append(
+                    f"No live-price data for {len(no_data_tickers)}/"
+                    f"{len(result)} tickers: {', '.join(no_data_tickers)}"
+                )
         elif name == "get_latest_price":
             logger.info("  Executing: get_latest_price")
             result = await _run_sync(
@@ -1966,9 +2164,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 use_live=arguments.get("use_live", True),
             )
             try:
+                layout, theme, width_warning = _get_chart_runtime(arguments)
                 chart = render_price_chart(result, arguments["ticker"], layout, theme)
             except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
-                logger.warning(f"  Chart render failed for {name}: {render_err}")
+                logger.warning(
+                    "  Chart render failed for %s: %s: %s",
+                    name,
+                    type(render_err).__name__,
+                    _truncate_utf8(redact_sensitive_text(render_err), 500),
+                )
         elif name == "get_financial_ratios":
             logger.info("  Executing: get_financial_ratios")
             result = await _run_sync(
@@ -1979,9 +2183,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=arguments.get("limit", 100),
             )
             try:
+                layout, theme, width_warning = _get_chart_runtime(arguments)
                 chart = render_ratios_chart(result, arguments["ticker"], layout, theme)
             except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
-                logger.warning(f"  Chart render failed for {name}: {render_err}")
+                logger.warning(
+                    "  Chart render failed for %s: %s: %s",
+                    name,
+                    type(render_err).__name__,
+                    _truncate_utf8(redact_sensitive_text(render_err), 500),
+                )
         elif name == "get_fundamentals":
             logger.info("  Executing: get_fundamentals")
             result = await _run_sync(
@@ -1991,9 +2201,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=arguments.get("limit", 4),
             )
             try:
+                layout, theme, width_warning = _get_chart_runtime(arguments)
                 chart = render_fundamentals_chart(result, arguments["ticker"], layout, theme)
             except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
-                logger.warning(f"  Chart render failed for {name}: {render_err}")
+                logger.warning(
+                    "  Chart render failed for %s: %s: %s",
+                    name,
+                    type(render_err).__name__,
+                    _truncate_utf8(redact_sensitive_text(render_err), 500),
+                )
         elif name == "get_technical_indicators":
             logger.info("  Executing: get_technical_indicators")
             result = await _run_sync(
@@ -2018,6 +2234,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 date=arguments.get("date"),
                 limit=arguments.get("limit", 100),
                 aggregate=arguments.get("aggregate", False),
+                bar_size_minutes=arguments.get("bar_size_minutes", 5),
             )
             if not result:
                 ticker_desc = arguments.get("ticker") or arguments.get("tickers", "")
@@ -2056,16 +2273,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 limit=arguments.get("limit", 100),
             )
             try:
+                layout, theme, width_warning = _get_chart_runtime(arguments)
                 chart = render_economy_chart(result, arguments["indicator_type"], layout, theme)
             except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
-                logger.warning(f"  Chart render failed for {name}: {render_err}")
+                logger.warning(
+                    "  Chart render failed for %s: %s: %s",
+                    name,
+                    type(render_err).__name__,
+                    _truncate_utf8(redact_sensitive_text(render_err), 500),
+                )
         elif name == "get_economy_dashboard":
             logger.info("  Executing: get_economy_dashboard")
             result = await _run_sync(get_economy_dashboard, limit=arguments.get("limit", 10))
             try:
+                layout, theme, width_warning = _get_chart_runtime(arguments)
                 chart = render_economy_dashboard(result, layout, theme)
             except Exception as render_err:  # noqa: BLE001 - never fail the tool on a chart-render error
-                logger.warning(f"  Chart render failed for {name}: {render_err}")
+                logger.warning(
+                    "  Chart render failed for %s: %s: %s",
+                    name,
+                    type(render_err).__name__,
+                    _truncate_utf8(redact_sensitive_text(render_err), 500),
+                )
         elif name == "get_market_internals":
             logger.info("  Executing: get_market_internals")
             result = await _run_sync(
@@ -2080,6 +2309,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 start_date=arguments.get("start_date"),
                 large_cap_threshold=arguments.get("large_cap_threshold", 100.0),
                 top_n=arguments.get("top_n", 10),
+                bottom_n=arguments.get("bottom_n", 10),
                 index=arguments.get("index", "sp500"),
             )
             if isinstance(result, dict) and result.get("error"):
@@ -2089,34 +2319,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result,
                 started,
                 warnings=warnings,
-                metadata={"source": "sawa.scanner"},
-            )
-        elif name == "execute_query":
-            logger.info("  Executing: execute_query")
-            from .database import log_execute_query, log_execute_query_result
-
-            sql_query = arguments["sql"]
-            params = arguments.get("params")
-            log_execute_query(sql_query, params)
-            query_started = time.monotonic()
-            try:
-                result = await _run_sync(execute_query, sql_query, params)
-            except Exception as e:
-                log_execute_query_result(
-                    sql_query,
-                    params,
-                    duration_ms=(time.monotonic() - query_started) * 1000,
-                    row_count=None,
-                    success=False,
-                    error=str(e),
-                )
-                raise
-            log_execute_query_result(
-                sql_query,
-                params,
-                duration_ms=(time.monotonic() - query_started) * 1000,
-                row_count=len(result) if isinstance(result, list) else None,
-                success=True,
+                metadata={"source": "database"},
             )
         # Schema discovery tools
         elif name == "describe_database":
@@ -2430,10 +2633,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        duration_ms = (time.monotonic() - started) * 1000
-        logger.error(f"Error executing tool {name}: {e}", exc_info=True)
-        record_call_outcome(
-            name, success=False, duration_ms=duration_ms, logger=logger, error=e
+        logger.error(
+            "Error executing tool %s: %s: %s",
+            _truncate_utf8(name, 64),
+            type(e).__name__,
+            _truncate_utf8(redact_sensitive_text(e), 2048),
         )
         raise
 
@@ -2453,6 +2657,242 @@ def _market_hours_hint() -> str | None:
     return None
 
 
+def _structured_payload(content: list[TextContent]) -> dict[str, Any]:
+    """Recover the compatibility JSON envelope as v2 structured content."""
+    if len(content) != 1:
+        raise RuntimeError("Tool returned an invalid content envelope")
+    payload: object = json.loads(content[0].text)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Tool returned a non-object content envelope")
+    return {str(key): value for key, value in payload.items()}
+
+
+def _truncate_utf8(text: str, max_bytes: int, *, suffix: str = "…") -> str:
+    """Truncate text without splitting a UTF-8 code point."""
+    if max_bytes <= 0:
+        return ""
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    suffix_bytes = len(suffix.encode("utf-8"))
+    if suffix_bytes > max_bytes:
+        return ""
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(text[:middle].encode("utf-8")) + suffix_bytes <= max_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + suffix
+
+
+def _bounded_error_payload(
+    name: str,
+    error: BaseException,
+    duration_ms: float,
+) -> tuple[dict[str, Any], str]:
+    """Build a redacted error envelope within the configured response cap."""
+    maximum = max(2, database_runtime.MAX_RESULT_BYTES)
+    safe_tool = _truncate_utf8(str(name), 64)
+    safe_type = _truncate_utf8(type(error).__name__, 64)
+    safe_message = redact_sensitive_text(error)
+
+    def build(message: str, *, include_duration: bool) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "tool": safe_tool,
+            "schema_version": _RESPONSE_SCHEMA_VERSION,
+        }
+        if include_duration:
+            metadata["duration_ms"] = round(duration_ms, 2)
+        return {
+            "error": {"type": safe_type, "message": message},
+            "metadata": metadata,
+        }
+
+    def render(payload: dict[str, Any]) -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+
+    # Keep the complete diagnostic whenever it fits, dropping optional timing
+    # metadata before shortening the useful error message.
+    for include_duration in (True, False):
+        payload = build(safe_message, include_duration=include_duration)
+        rendered = render(payload)
+        if len(rendered.encode("utf-8")) <= maximum:
+            return payload, rendered
+
+    def build_without_duration(message: str) -> dict[str, Any]:
+        return build(message, include_duration=False)
+
+    empty_payload = build_without_duration("")
+    if len(render(empty_payload).encode("utf-8")) <= maximum:
+        low, high = 0, len(safe_message)
+        best_payload = empty_payload
+        best_rendered = render(empty_payload)
+        while low <= high:
+            middle = (low + high) // 2
+            candidate_message = safe_message
+            if middle < len(safe_message):
+                candidate_message = safe_message[:middle] + "…"
+            candidate = build_without_duration(candidate_message)
+            candidate_rendered = render(candidate)
+            if len(candidate_rendered.encode("utf-8")) <= maximum:
+                best_payload = candidate
+                best_rendered = candidate_rendered
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best_payload, best_rendered
+
+    # Extremely small operator-configured caps cannot hold standard metadata.
+    # Errors use compatibility TextContent only, so a minimal JSON fallback is
+    # valid even though successful structured output has a closed schema.
+    fallbacks: list[dict[str, Any]] = [
+        {"error": {"type": safe_type, "message": ""}},
+        {"error": {"message": ""}},
+        {"error": ""},
+        {},
+    ]
+    for fallback_payload in fallbacks:
+        rendered = render(fallback_payload)
+        if len(rendered.encode("utf-8")) <= maximum:
+            return fallback_payload, rendered
+    return {}, "{}"
+
+
+def _record_call_outcome_safely(
+    name: str,
+    *,
+    success: bool,
+    duration_ms: float,
+    error: BaseException | None = None,
+) -> None:
+    """Keep best-effort monitoring from changing a protocol result."""
+    try:
+        bounded_error: BaseException | None = None
+        error_type: str | None = None
+        if error is not None:
+            error_type = type(error).__name__
+            bounded_error = RuntimeError(
+                _truncate_utf8(redact_sensitive_text(error), 2048)
+            )
+        record_call_outcome(
+            name,
+            success=success,
+            duration_ms=duration_ms,
+            logger=logger,
+            # Pass a bounded, redacted exception plus explicit source type so
+            # monitoring retains diagnostic fidelity without holding an
+            # arbitrarily large or sensitive provider exception.
+            error=bounded_error,
+            error_type=error_type,
+        )
+    except Exception as monitoring_error:  # noqa: BLE001 - monitoring is best-effort
+        logger.warning(
+            "MCP outcome monitoring failed for %s: %s: %s",
+            name,
+            type(monitoring_error).__name__,
+            redact_sensitive_text(monitoring_error),
+        )
+
+
+async def _validate_protocol_arguments(name: str, arguments: dict[str, Any]) -> None:
+    """Validate v2 low-level calls against the schema advertised for the tool."""
+    tool = next((item for item in await list_tools() if item.name == name), None)
+    if tool is None:
+        # Tool discovery failures are JSON-RPC invalid-params errors, not
+        # execution results. Do not echo or monitor the attacker-controlled name.
+        raise MCPError(code=INVALID_PARAMS, message="Unknown tool")
+    errors = sorted(
+        Draft202012Validator(tool.input_schema).iter_errors(arguments),
+        key=lambda error: list(error.absolute_path),
+    )
+    if errors:
+        error = errors[0]
+        location = ".".join(str(part) for part in error.absolute_path) or "arguments"
+        # Do not echo the rejected value: protocol arguments may contain data
+        # that should not be copied into logs or tool-error responses.
+        raise ValueError(
+            f"Invalid arguments for {name} at {location}: {error.validator} constraint failed"
+        )
+
+
+async def _handle_list_tools(
+    _ctx: ServerRequestContext,
+    _params: PaginatedRequestParams | None,
+) -> ListToolsResult:
+    """MCP v2 low-level list handler."""
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _handle_call_tool(
+    _ctx: ServerRequestContext,
+    params: CallToolRequestParams,
+) -> CallToolResult:
+    """MCP v2 low-level call handler with explicit success/error results."""
+    name = params.name
+    arguments = params.arguments or {}
+    started = time.monotonic()
+    try:
+        await _validate_protocol_arguments(name, arguments)
+        content = await call_tool(name, arguments)
+        protocol_content: list[ContentBlock] = list(content)
+        response = CallToolResult(
+            content=protocol_content,
+            structured_content=_structured_payload(content),
+            is_error=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except MCPError:
+        raise
+    except Exception as error:  # noqa: BLE001 - converted to an MCP tool error
+        safe_name = _truncate_utf8(name, 64)
+        _payload, rendered = _bounded_error_payload(
+            safe_name,
+            error,
+            (time.monotonic() - started) * 1000,
+        )
+        response = CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=rendered,
+                )
+            ],
+            is_error=True,
+        )
+        await _run_sync(
+            _record_call_outcome_safely,
+            safe_name,
+            success=False,
+            duration_ms=(time.monotonic() - started) * 1000,
+            error=error,
+        )
+        return response
+
+    await _run_sync(
+        _record_call_outcome_safely,
+        name,
+        success=True,
+        duration_ms=(time.monotonic() - started) * 1000,
+    )
+    return response
+
+
+app = Server(
+    "stock-data-server",
+    version="0.3.0",
+    instructions=_SERVER_INSTRUCTIONS,
+    on_list_tools=_handle_list_tools,
+    on_call_tool=_handle_call_tool,
+)
+
+
 async def main():
     """Main entry point."""
     logger.info("Starting Stock Data MCP Server")
@@ -2464,7 +2904,11 @@ async def main():
         if warning := load_cached_query_warning():
             logger.warning(warning)
     except Exception as e:
-        logger.debug("Could not load cached MCP query insights: %s", e)
+        logger.debug(
+            "Could not load cached MCP query insights: %s: %s",
+            type(e).__name__,
+            _truncate_utf8(redact_sensitive_text(e), 500),
+        )
     logger.info("Press Ctrl-C to exit gracefully")
 
     # Verify database connection
@@ -2474,7 +2918,11 @@ async def main():
         get_database_url()
         logger.info("Database configuration verified")
     except ValueError as e:
-        logger.error(f"Configuration error: {e}")
+        logger.error(
+            "Configuration error: %s: %s",
+            type(e).__name__,
+            _truncate_utf8(redact_sensitive_text(e), 500),
+        )
         sys.exit(1)
 
     # Run server with stdio transport
@@ -2489,7 +2937,11 @@ async def main():
         logger.info("Shutting down gracefully...")
         sys.exit(0)
     except Exception as e:
-        logger.error(f"Server error: {e}", exc_info=True)
+        logger.error(
+            "Server error: %s: %s",
+            type(e).__name__,
+            _truncate_utf8(redact_sensitive_text(e), 500),
+        )
         sys.exit(1)
 
 
@@ -2499,5 +2951,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nExiting...")
+        logger.info("Exiting...")
         sys.exit(0)

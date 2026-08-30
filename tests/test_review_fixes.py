@@ -1,6 +1,5 @@
 """Regression tests for review-driven bug fixes."""
 
-import json
 from datetime import date
 from decimal import Decimal
 
@@ -70,7 +69,12 @@ def test_intraday_multi_ticker_limit_is_applied_per_ticker(monkeypatch) -> None:
 
     monkeypatch.setattr(market_data, "execute_query", fake_execute_query)
 
-    market_data.get_intraday_bars(tickers=["AAPL", "MSFT"], date="2026-05-15", limit=3)
+    market_data.get_intraday_bars(
+        tickers=["AAPL", "MSFT"],
+        date="2026-05-15",
+        limit=3,
+        bar_size_minutes=15,
+    )
 
     query = captured["query"]
     assert isinstance(query, str)
@@ -88,46 +92,29 @@ def test_intraday_multi_ticker_limit_is_applied_per_ticker(monkeypatch) -> None:
         "tickers": ["AAPL", "MSFT"],
         "date": "2026-05-15",
         "limit": 3,
+        "bar_size_minutes": 15,
     }
 
 
 @pytest.mark.asyncio
-async def test_execute_query_tool_passes_params_and_returns_envelope(monkeypatch) -> None:
+async def test_execute_query_tool_is_always_hidden_and_rejected(
+    monkeypatch,
+    tmp_path,
+) -> None:
     pytest.importorskip("dotenv")
     pytest.importorskip("mcp")
 
-    import mcp_server.database as mcp_database
+    monkeypatch.setenv("MCP_LOG_DIR", str(tmp_path))
+
     import mcp_server.server as mcp_server
 
-    captured: dict[str, object] = {}
+    # A deployment flag must not reopen the unsafe arbitrary-function surface.
+    monkeypatch.setenv("MCP_ENABLE_EXECUTE_QUERY", "true")
+    tools = await mcp_server.list_tools()
 
-    def fake_execute_query(query: str, params: dict[str, object] | None = None):
-        captured["query"] = query
-        captured["params"] = params
-        return [{"ticker": params["ticker"] if params else None}]
-
-    monkeypatch.setattr(mcp_server, "execute_query", fake_execute_query)
-    monkeypatch.setattr(mcp_database, "log_execute_query", lambda query, params=None: None)
-
-    response = await mcp_server.call_tool(
-        "execute_query",
-        {
-            "sql": "SELECT %(ticker)s AS ticker",
-            "params": {"ticker": "AAPL"},
-        },
-    )
-
-    assert captured == {
-        "query": "SELECT %(ticker)s AS ticker",
-        "params": {"ticker": "AAPL"},
-    }
-
-    payload = json.loads(response[0].text)
-    assert payload["data"] == [{"ticker": "AAPL"}]
-    assert payload["chart"] is None
-    assert payload["warnings"] == []
-    assert payload["metadata"]["tool"] == "execute_query"
-    assert payload["metadata"]["schema_version"] == "sawa.mcp.tool_response.v1"
+    assert "execute_query" not in {tool.name for tool in tools}
+    with pytest.raises(ValueError, match="Unknown tool"):
+        await mcp_server.call_tool("execute_query", {"sql": "SELECT 1"})
 
 
 def test_database_ratio_mapping_uses_schema_column_names() -> None:

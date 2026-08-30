@@ -21,8 +21,7 @@ async def main():
     print("MCP Tools Enhancement Validation")
     print("=" * 80)
 
-    # Get the list_tools function from the server module
-    # Find the function with @app.list_tools() decorator
+    # Get the list_tools compatibility function used by the v2 handler.
     list_tools_fn = None
     for name, obj in inspect.getmembers(server_module):
         if inspect.isfunction(obj) and name == "list_tools":
@@ -60,7 +59,7 @@ async def main():
         if tool_name in tool_names:
             # Get the tool definition
             tool = next(t for t in tools if t.name == tool_name)
-            has_schema = tool.inputSchema is not None
+            has_schema = tool.input_schema is not None
             has_description = bool(tool.description)
 
             status = "✓ PASS" if (has_schema and has_description) else "✗ FAIL"
@@ -70,8 +69,8 @@ async def main():
             if has_description:
                 print(f"    Description: {tool.description[:80]}...")
             if has_schema:
-                required = tool.inputSchema.get("required", [])
-                properties = list(tool.inputSchema.get("properties", {}).keys())
+                required = tool.input_schema.get("required", [])
+                properties = list(tool.input_schema.get("properties", {}).keys())
                 print(f"    Parameters: {', '.join(properties)}")
                 print(f"    Required: {', '.join(required) if required else 'none'}")
             print()
