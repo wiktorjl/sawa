@@ -20,6 +20,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sawa.api.async_client import AsyncPolygonClient
+from sawa.domain.exceptions import ProviderError
 from sawa.utils.config import get_env
 from sawa.utils.sic_mapping import map_sic_to_gics
 from sawa.utils.symbols import fetch_index_symbols
@@ -77,9 +78,20 @@ async def scan_ytd_performance(
     if index.lower() == "both":
         sp500 = fetch_index_symbols("sp500", logger)
         nasdaq_listed = fetch_index_symbols("nasdaq_listed", logger)
+        if not sp500 or not nasdaq_listed:
+            raise ProviderError(
+                "One or more index constituent sources returned no symbols",
+                provider="index_constituents",
+            )
         symbols = list(set(sp500 + nasdaq_listed))  # Remove duplicates
     else:
         symbols = fetch_index_symbols(index, logger)
+
+    if not symbols:
+        raise ProviderError(
+            "Index constituent source returned no symbols",
+            provider="index_constituents",
+        )
 
     logger.info(f"Fetching data for {len(symbols)} symbols...")
 
@@ -91,6 +103,12 @@ async def scan_ytd_performance(
         end_date=end,
         concurrency=concurrency,
     )
+    batch_failures: dict[str, str] = getattr(price_data, "failures", {})
+    if symbols and len(batch_failures) == len(symbols):
+        raise ProviderError(
+            f"All {len(symbols)} price requests failed",
+            provider="polygon",
+        )
 
     # Fetch company details for sector/market cap
     logger.info("Fetching company details...")
@@ -106,10 +124,18 @@ async def scan_ytd_performance(
         if isinstance(res, BaseException) or res is None:
             continue
         ticker_details[ticker] = res
+    if symbols and not ticker_details:
+        raise ProviderError(
+            f"All {len(symbols)} company detail requests failed",
+            provider="polygon",
+        )
 
     # Process results
     results: list[dict[str, Any]] = []
-    errors: list[str] = []
+    errors: list[str] = [
+        f"{ticker}: Price request failed ({reason})"
+        for ticker, reason in batch_failures.items()
+    ]
 
     for ticker, prices in price_data.items():
         if not prices or len(prices) < 2:

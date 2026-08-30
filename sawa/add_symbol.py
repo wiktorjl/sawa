@@ -14,10 +14,34 @@ import psycopg
 from psycopg import sql
 
 from sawa.api import PolygonClient
+from sawa.daily import fetch_prices_via_api, insert_prices
+from sawa.domain.exceptions import ProviderError
+from sawa.provider_downloads import bind_provider_record
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
-from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
+from sawa.utils.dates import DATE_FORMAT
+from sawa.utils.security import redact_sensitive_text
+from sawa.utils.symbols import validate_ticker
+
+
+class FundamentalLoadResult(dict[str, int]):
+    """Per-table counts plus endpoint failures that ordinary dict callers ignore."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures: dict[str, str] = {}
+
+
+class RatioLoadResult(int):
+    """Committed ratio count with row-level persistence failures attached."""
+
+    failed_rows: int
+
+    def __new__(cls, value: int, failed_rows: int = 0) -> "RatioLoadResult":
+        result = super().__new__(cls, value)
+        result.failed_rows = failed_rows
+        return result
 
 
 def get_existing_symbols(conn) -> set[str]:
@@ -99,16 +123,21 @@ def fetch_and_insert_ratios(
     client: PolygonClient,
     symbol: str,
     logger: logging.Logger,
-) -> int:
+) -> RatioLoadResult:
     """Fetch ratios via API and insert into database."""
-    try:
-        ratios = client.get_ratios(symbol)
-    except Exception as e:
-        logger.warning(f"  Failed to fetch ratios: {e}")
-        return 0
+    symbol = validate_ticker(symbol)
+    ratios = client.get_ratios(symbol)
 
-    if not ratios:
-        return 0
+    if not isinstance(ratios, list):
+        raise ProviderError("Invalid ratios response", provider="polygon")
+
+    bound_ratios = [
+        bind_provider_record(record, symbol, output_field="ticker")
+        for record in ratios
+    ]
+
+    if not bound_ratios:
+        return RatioLoadResult(0)
 
     query = sql.SQL("""
         INSERT INTO financial_ratios (
@@ -129,9 +158,10 @@ def fetch_and_insert_ratios(
     """)
 
     inserted = 0
+    failed_rows = 0
     with conn.cursor() as cur:
-        for r in ratios:
-            r["ticker"] = symbol
+        for r in bound_ratios:
+            cur.execute("SAVEPOINT ratio_row")
             try:
                 cur.execute(
                     query,
@@ -160,12 +190,17 @@ def fetch_and_insert_ratios(
                         r.get("return_on_equity"),
                     ),
                 )
-                inserted += 1
-            except Exception as e:
-                logger.debug(f"  Ratio insert error: {e}")
-                conn.rollback()
+                affected = max(cur.rowcount, 0)
+            except psycopg.Error as e:
+                cur.execute("ROLLBACK TO SAVEPOINT ratio_row")
+                cur.execute("RELEASE SAVEPOINT ratio_row")
+                failed_rows += 1
+                logger.debug(f"  Ratio insert error: {redact_sensitive_text(e)}")
+            else:
+                cur.execute("RELEASE SAVEPOINT ratio_row")
+                inserted += affected
     conn.commit()
-    return inserted
+    return RatioLoadResult(inserted, failed_rows)
 
 
 def fetch_and_insert_fundamentals(
@@ -175,9 +210,11 @@ def fetch_and_insert_fundamentals(
     start_date: str,
     end_date: str,
     logger: logging.Logger,
-) -> dict[str, int]:
+    rate_limiter: SyncRateLimiter | None = None,
+) -> FundamentalLoadResult:
     """Fetch fundamentals via API and insert into database."""
-    stats: dict[str, int] = {}
+    symbol = validate_ticker(symbol)
+    stats = FundamentalLoadResult()
 
     endpoints = {
         "balance-sheets": "balance_sheets",
@@ -187,6 +224,8 @@ def fetch_and_insert_fundamentals(
 
     for api_endpoint, table_name in endpoints.items():
         try:
+            if rate_limiter is not None:
+                rate_limiter.acquire()
             data = client.get_fundamentals(
                 api_endpoint,
                 ticker=symbol,
@@ -194,8 +233,19 @@ def fetch_and_insert_fundamentals(
                 end_date=end_date,
             )
         except Exception as e:
-            logger.debug(f"  Failed to fetch {api_endpoint}: {e}")
+            message = redact_sensitive_text(e)
+            logger.debug(f"  Failed to fetch {api_endpoint}: {message}")
             stats[table_name] = 0
+            stats.failures[table_name] = message
+            continue
+
+        if not isinstance(data, list) or any(
+            not isinstance(record, dict) for record in data
+        ):
+            message = "invalid provider response"
+            logger.debug(f"  Failed to fetch {api_endpoint}: {message}")
+            stats[table_name] = 0
+            stats.failures[table_name] = message
             continue
 
         if not data:
@@ -214,46 +264,72 @@ def fetch_and_insert_fundamentals(
             db_columns = {row[0] for row in cur.fetchall()}
 
         inserted = 0
-        for record in data:
-            # Clean up tickers field
-            if "tickers" in record and isinstance(record["tickers"], list):
-                record["ticker"] = record["tickers"][0] if record["tickers"] else symbol
-            elif "tickers" not in record:
-                record["ticker"] = symbol
+        failed_rows = 0
+        with conn.cursor() as cur:
+            for record in data:
+                try:
+                    bound_record = bind_provider_record(
+                        record,
+                        symbol,
+                        output_field="ticker",
+                    )
+                except ProviderError:
+                    failed_rows += 1
+                    logger.debug(
+                        f"  {table_name} row has invalid or mismatched ticker identity"
+                    )
+                    continue
 
-            # Map record to columns
-            row_data = {}
-            for key, value in record.items():
-                col_name = key.lower().replace(" ", "_").replace("-", "_")
-                if col_name in db_columns:
-                    row_data[col_name] = value
-                elif key == "tickers":
-                    row_data["ticker"] = value if isinstance(value, str) else symbol
+                # Map record to columns
+                row_data: dict[str, Any] = {}
+                for key, value in bound_record.items():
+                    if key in {"ticker", "tickers"}:
+                        continue
+                    col_name = key.lower().replace(" ", "_").replace("-", "_")
+                    if col_name in db_columns:
+                        row_data[col_name] = value
+                if "ticker" in db_columns:
+                    row_data["ticker"] = symbol
 
-            if not row_data:
-                continue
+                if not row_data:
+                    failed_rows += 1
+                    continue
 
-            # Build upsert query
-            cols = list(row_data.keys())
-            cols_sql = sql.SQL(", ").join(map(sql.Identifier, cols))
-            vals_sql = sql.SQL(", ").join([sql.Placeholder()] * len(cols))
+                # Build upsert query
+                cols = list(row_data.keys())
+                cols_sql = sql.SQL(", ").join(map(sql.Identifier, cols))
+                vals_sql = sql.SQL(", ").join([sql.Placeholder()] * len(cols))
 
-            query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING").format(
-                sql.Identifier(table_name),
-                cols_sql,
-                vals_sql,
-            )
+                query = sql.SQL(
+                    "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
+                ).format(
+                    sql.Identifier(table_name),
+                    cols_sql,
+                    vals_sql,
+                )
 
-            try:
-                with conn.cursor() as cur:
+                cur.execute("SAVEPOINT fundamental_row")
+                try:
                     cur.execute(query, list(row_data.values()))
-                inserted += 1
-            except Exception as e:
-                logger.debug(f"  {table_name} insert error: {e}")
-                conn.rollback()
+                    affected = max(cur.rowcount, 0)
+                except psycopg.Error as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT fundamental_row")
+                    cur.execute("RELEASE SAVEPOINT fundamental_row")
+                    failed_rows += 1
+                    logger.debug(
+                        f"  {table_name} insert error: {redact_sensitive_text(e)}"
+                    )
+                else:
+                    cur.execute("RELEASE SAVEPOINT fundamental_row")
+                    inserted += affected
 
         conn.commit()
         stats[table_name] = inserted
+        if failed_rows:
+            stats.failures[table_name] = (
+                f"{failed_rows} of {len(data)} provider rows were rejected "
+                "or failed to persist"
+            )
 
     return stats
 
@@ -266,52 +342,26 @@ def fetch_and_insert_prices(
     end_date: str,
     logger: logging.Logger,
 ) -> int:
-    """Fetch prices via API and insert into database."""
-    try:
-        data = client.get(
-            "aggregates",
-            path_params={"ticker": symbol, "start": start_date, "end": end_date},
-            params={"adjusted": "true", "limit": 50000},
+    """Fetch validated prices and insert them through the shared daily loader."""
+    provider_stats: dict[str, Any] = {}
+    prices = fetch_prices_via_api(
+        client,
+        [symbol],
+        start_date,
+        end_date,
+        logger,
+        stats=provider_stats,
+    )
+    if provider_stats.get("fetch_errors"):
+        raise ProviderError("Price history request failed", provider="polygon")
+    if not prices:
+        message = (
+            "Price history contained no valid rows"
+            if provider_stats.get("provider_price_rows", 0)
+            else "Price history returned no rows"
         )
-    except Exception as e:
-        logger.warning(f"  Failed to fetch prices: {e}")
-        return 0
-
-    results = data.get("results", [])
-    if not results:
-        return 0
-
-    query = sql.SQL("""
-        INSERT INTO stock_prices (ticker, date, open, high, low, close, volume)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ticker, date) DO UPDATE SET
-            open = EXCLUDED.open,
-            high = EXCLUDED.high,
-            low = EXCLUDED.low,
-            close = EXCLUDED.close,
-            volume = EXCLUDED.volume
-    """)
-
-    inserted = 0
-    with conn.cursor() as cur:
-        for r in results:
-            if r.get("t"):
-                price_date = timestamp_to_date(r["t"]).strftime(DATE_FORMAT)
-                cur.execute(
-                    query,
-                    (
-                        symbol,
-                        price_date,
-                        r.get("o"),
-                        r.get("h"),
-                        r.get("l"),
-                        r.get("c"),
-                        r.get("v"),
-                    ),
-                )
-                inserted += 1
-    conn.commit()
-    return inserted
+        raise ProviderError(message, provider="polygon")
+    return insert_prices(conn, prices, logger)
 
 
 def run_add_symbols(
@@ -337,20 +387,48 @@ def run_add_symbols(
         Statistics dictionary
     """
     logger = logger or setup_logging()
-    stats: dict[str, Any] = {"success": False, "added": [], "failed": [], "skipped": []}
+    stats: dict[str, Any] = {
+        "success": False,
+        "added": [],
+        "failed": [],
+        "skipped": [],
+        "degraded": False,
+        "degraded_symbols": [],
+        "feed_failures": {},
+    }
+
+    if isinstance(years, bool) or not isinstance(years, int) or not 1 <= years <= 50:
+        raise ValueError("years must be an integer between 1 and 50")
+
+    normalized_symbols: list[str] = []
+    seen: set[str] = set()
+    for candidate in symbols:
+        label = redact_sensitive_text(candidate).replace("\n", " ").replace("\r", " ")[:32]
+        try:
+            if not isinstance(candidate, str):
+                raise ValueError("ticker must be a string")
+            symbol = validate_ticker(candidate)
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("Rejected invalid ticker input")
+            stats["failed"].append(label or "<invalid>")
+            continue
+        if symbol not in seen:
+            seen.add(symbol)
+            normalized_symbols.append(symbol)
+    symbols = normalized_symbols
 
     logger.info("=" * 60)
     logger.info("ADD SYMBOLS")
     logger.info("=" * 60)
-    logger.info(f"Symbols to add: {', '.join(symbols)}")
-
-    # Initialize client
-    client = PolygonClient(api_key, logger)
-    rate_limiter = SyncRateLimiter(DEFAULT_API_RATE_LIMIT)
+    logger.info(f"Symbols to add: {', '.join(symbols) if symbols else '(none valid)'}")
 
     # Calculate date range
     end_date = date.today()
-    start_date = date(end_date.year - years, end_date.month, end_date.day)
+    try:
+        start_date = date(end_date.year - years, end_date.month, end_date.day)
+    except ValueError:
+        # A leap-day run replaying to a non-leap year starts on February 28.
+        start_date = date(end_date.year - years, end_date.month, 28)
     start_str = start_date.strftime(DATE_FORMAT)
     end_str = end_date.strftime(DATE_FORMAT)
     logger.info(f"Price history: {start_str} to {end_str} ({years} years)")
@@ -359,9 +437,26 @@ def run_add_symbols(
         logger.info("\n[DRY RUN] Would add:")
         for sym in symbols:
             logger.info(f"  - {sym}")
-        stats["success"] = True
+        stats["success"] = bool(symbols)
+        stats["degraded"] = bool(stats["failed"])
         stats["dry_run"] = True
         return stats
+
+    if not symbols:
+        stats["degraded"] = bool(stats["failed"])
+        return stats
+
+    # Initialize the provider only after validation and the dry-run exit.
+    client = PolygonClient(api_key, logger)
+    rate_limiter = SyncRateLimiter(DEFAULT_API_RATE_LIMIT)
+
+    def record_feed_failure(symbol: str, feed: str, error: object) -> None:
+        message = redact_sensitive_text(error)
+        failures = stats["feed_failures"].setdefault(symbol, {})
+        failures[feed] = message
+        if symbol not in stats["degraded_symbols"]:
+            stats["degraded_symbols"].append(symbol)
+        logger.warning(f"  {symbol}: {feed} failed: {message}")
 
     try:
         with psycopg.connect(database_url) as conn:
@@ -369,7 +464,6 @@ def run_add_symbols(
             logger.info(f"Existing symbols in database: {len(existing)}")
 
         for i, symbol in enumerate(symbols, 1):
-            symbol = symbol.upper().strip()
             logger.info(f"\n[{i}/{len(symbols)}] Processing {symbol}...")
 
             if symbol in existing:
@@ -381,17 +475,30 @@ def run_add_symbols(
                 logger.info("  Fetching company details...")
                 company_data = client.get_ticker_details(symbol)
 
-                if not company_data:
-                    logger.warning(f"  Could not fetch company details for {symbol}")
-                    stats["failed"].append(symbol)
-                    continue
+                if not isinstance(company_data, dict) or not company_data:
+                    raise ProviderError(
+                        "Company details unavailable", provider="polygon"
+                    )
+                company_data = bind_provider_record(
+                    company_data,
+                    symbol,
+                    output_field="ticker",
+                )
 
                 # Insert company
                 with psycopg.connect(database_url) as conn:
-                    insert_company(conn, company_data, logger)
+                    if not insert_company(conn, company_data, logger):
+                        raise RuntimeError("Company record was not persisted")
                 logger.info(f"  Inserted company: {company_data.get('name', symbol)}")
 
-                # Fetch and insert prices
+            except Exception as company_error:
+                record_feed_failure(symbol, "company", company_error)
+                if symbol not in existing:
+                    stats["failed"].append(symbol)
+                    continue
+
+            primary_failed = False
+            try:
                 rate_limiter.acquire()
                 logger.info(f"  Fetching {years} years of price history...")
                 with psycopg.connect(database_url) as conn:
@@ -399,45 +506,69 @@ def run_add_symbols(
                         conn, client, symbol, start_str, end_str, logger
                     )
                 logger.info(f"  Inserted {price_count} price records")
+            except Exception as price_error:
+                primary_failed = True
+                record_feed_failure(symbol, "prices", price_error)
 
-                # Fetch and insert ratios
+            try:
                 rate_limiter.acquire()
                 logger.info("  Fetching financial ratios...")
                 with psycopg.connect(database_url) as conn:
                     ratio_count = fetch_and_insert_ratios(conn, client, symbol, logger)
                 logger.info(f"  Inserted {ratio_count} ratio records")
+                failed_ratio_rows = getattr(ratio_count, "failed_rows", 0)
+                if failed_ratio_rows:
+                    record_feed_failure(
+                        symbol,
+                        "ratios",
+                        f"{failed_ratio_rows} of "
+                        f"{failed_ratio_rows + int(ratio_count)} ratio rows "
+                        "failed to persist",
+                    )
+            except Exception as ratio_error:
+                record_feed_failure(symbol, "ratios", ratio_error)
 
-                # Fetch and insert fundamentals
-                rate_limiter.acquire()
+            try:
                 logger.info("  Fetching fundamentals...")
                 with psycopg.connect(database_url) as conn:
                     fund_stats = fetch_and_insert_fundamentals(
-                        conn, client, symbol, start_str, end_str, logger
+                        conn,
+                        client,
+                        symbol,
+                        start_str,
+                        end_str,
+                        logger,
+                        rate_limiter,
                     )
                 total_fund = sum(fund_stats.values())
                 logger.info(f"  Inserted {total_fund} fundamental records")
+                for feed, message in fund_stats.failures.items():
+                    record_feed_failure(symbol, feed, message)
+            except Exception as fundamentals_error:
+                record_feed_failure(symbol, "fundamentals", fundamentals_error)
 
-                if symbol in existing:
-                    stats["skipped"].append(symbol)  # Updated existing
-                else:
-                    stats["added"].append(symbol)
-
-            except Exception as ticker_err:
-                logger.warning(f"  {symbol}: {ticker_err}")
+            if primary_failed:
                 stats["failed"].append(symbol)
-                continue
+            elif symbol in existing:
+                stats["skipped"].append(symbol)  # Updated existing
+            else:
+                stats["added"].append(symbol)
 
-        stats["success"] = True
+        stats["success"] = bool(stats["added"] or stats["skipped"])
+        stats["degraded"] = bool(stats["failed"] or stats["feed_failures"])
+        stats["success_count"] = len(stats["added"]) + len(stats["skipped"])
         logger.info("\n" + "=" * 60)
         logger.info("ADD SYMBOLS COMPLETE")
         logger.info("=" * 60)
         logger.info(f"  Added: {len(stats['added'])}")
         logger.info(f"  Updated: {len(stats['skipped'])}")
         logger.info(f"  Failed: {len(stats['failed'])}")
+        logger.info(f"  Degraded: {len(stats['degraded_symbols'])}")
 
     except Exception as e:
-        logger.error(f"Add symbols failed: {e}")
-        stats["error"] = str(e)
+        message = redact_sensitive_text(e)
+        logger.error(f"Add symbols failed: {message}")
+        stats["error"] = message
         raise
 
     return stats
