@@ -87,7 +87,9 @@ def _days_old(value: date | datetime | None, today: date) -> int | None:
 
 def _within_days(value: date | datetime | None, today: date, max_days: int) -> bool:
     age = _days_old(value, today)
-    return age is not None and age <= max_days
+    # A future-dated row is not "extra fresh": it is corrupt or clock-skewed
+    # data and must fail the freshness check instead of masking stale feeds.
+    return age is not None and 0 <= age <= max_days
 
 
 def _required_coverage_count(expected_count: int, min_coverage: float) -> int:
@@ -291,11 +293,10 @@ def _price_checks(
         FROM stock_prices
         """,
     )
-    latest_age = _days_old(latest_date, today)
     checks.append(
         _check(
             "stock_prices.latest_date",
-            latest_age is not None and latest_age <= max_staleness_days,
+            _within_days(latest_date, today, max_staleness_days),
             (
                 f"latest stock_prices date is {latest_date}"
                 if latest_date is not None
@@ -538,19 +539,31 @@ def _daily_checks(
             checks.append(_post_split_ta_check(conn))
 
     if _table_exists(conn, "market_internals"):
-        latest_market = _fetchone(conn, "SELECT MAX(date) FROM market_internals")[0]
-        # Refreshed by every daily run (FRED + same-day CBOE); promote to FAIL
-        # so a silently-skipped internals step is caught and retried.
-        checks.append(
-            _check(
-                "market_internals.latest_date",
-                _within_days(latest_market, today, 5),
-                f"latest market_internals date is {latest_market}",
-                severity="fail",
-                observed=latest_market,
-                expected=f"within 5 days of {today}",
-            )
+        latest_values = _fetchone(
+            conn,
+            """
+            SELECT
+                MAX(date) FILTER (WHERE vix IS NOT NULL),
+                MAX(date) FILTER (WHERE vix3m IS NOT NULL),
+                MAX(date) FILTER (WHERE hy_spread IS NOT NULL)
+            FROM public.market_internals
+            """,
         )
+        # A fresh value in one column must not mask a failed/stale independent
+        # provider series in another column.
+        for field, latest_value in zip(
+            ("vix", "vix3m", "hy_spread"), latest_values, strict=True
+        ):
+            checks.append(
+                _check(
+                    f"market_internals.{field}.latest_date",
+                    _within_days(latest_value, today, 5),
+                    f"latest market_internals.{field} date is {latest_value}",
+                    severity="fail",
+                    observed=latest_value,
+                    expected=f"within 5 days of {today}",
+                )
+            )
 
     if _table_exists(conn, "news_articles"):
         latest_news, news_rows = _fetchone(
@@ -577,19 +590,22 @@ def _daily_checks(
                 (SELECT MAX(date) FROM mv_52week_extremes)
             """,
         )
+        extremes_age = _days_old(extremes_latest, today)
         checks.append(
             _check(
                 "mv_52week_extremes.freshness",
                 price_latest is not None
                 and extremes_latest is not None
-                and extremes_latest >= price_latest,
+                and extremes_latest == price_latest
+                and extremes_age is not None
+                and extremes_age >= 0,
                 (
                     "mv_52week_extremes latest date is "
                     f"{extremes_latest}; stock_prices latest date is {price_latest}"
                 ),
                 severity="warn",
                 observed=extremes_latest,
-                expected=f">= {price_latest}",
+                expected=f"equal to {price_latest} and not future-dated",
             )
         )
 
