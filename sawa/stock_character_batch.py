@@ -13,12 +13,15 @@ import psycopg
 
 from sawa.calculation.stock_character_scorecard import analyze_stock
 from sawa.database.stock_character import (
+    StockCharacterWriteError,
     load_baseline,
     load_classification,
-    load_flags,
     load_scorecard,
+    replace_flags,
 )
 from sawa.database.ta_load import get_tickers_with_prices
+from sawa.utils.security import redact_sensitive_text
+from sawa.utils.symbols import validate_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -76,25 +79,92 @@ def _process_ticker(ticker: str) -> dict[str, Any]:
                 elapsed = time.time() - start
                 return {"ticker": ticker, "classified": False, "time": elapsed}
 
-            # Persist all stages
-            load_classification(conn, result["classification"])
-            load_baseline(conn, result["baseline"])
-            load_flags(conn, result["flags"])
-            load_scorecard(conn, result["scorecard"])
+            classification = result["classification"]
+            flags = result["flags"]
+            scorecard = result["scorecard"]
+            computed_flag_names = tuple(sorted(flag.flag for flag in flags))
+            if scorecard.flag_count != len(flags):
+                raise StockCharacterWriteError(
+                    "scorecard flag_count does not match the computed flag set: "
+                    f"{scorecard.flag_count}/{len(flags)}"
+                )
+            if tuple(sorted(scorecard.flags)) != computed_flag_names:
+                raise StockCharacterWriteError(
+                    "scorecard flag identities do not match the computed flag set"
+                )
+
+            # All four artifacts are one logical per-ticker transaction. The
+            # loaders neither commit nor suppress errors in strict mode.
+            writes = (
+                (
+                    "classification",
+                    load_classification(
+                        conn,
+                        classification,
+                        commit=False,
+                        strict=True,
+                    ),
+                    1,
+                ),
+                (
+                    "baseline",
+                    load_baseline(
+                        conn,
+                        result["baseline"],
+                        commit=False,
+                        strict=True,
+                    ),
+                    1,
+                ),
+                (
+                    "flags",
+                    replace_flags(
+                        conn,
+                        classification.ticker,
+                        classification.run_date,
+                        flags,
+                        commit=False,
+                        strict=True,
+                    ),
+                    len(flags),
+                ),
+                (
+                    "scorecard",
+                    load_scorecard(
+                        conn,
+                        scorecard,
+                        commit=False,
+                        strict=True,
+                    ),
+                    1,
+                ),
+            )
+            for artifact, persisted, expected in writes:
+                if persisted != expected:
+                    raise StockCharacterWriteError(
+                        f"{artifact} persisted only {persisted}/{expected} rows"
+                    )
+            conn.commit()
 
             elapsed = time.time() - start
             return {
                 "ticker": ticker,
                 "classified": True,
-                "character": result["classification"].character,
-                "confidence": result["classification"].confidence,
-                "flags": result["scorecard"].flag_count,
+                "character": classification.character,
+                "confidence": classification.confidence,
+                "flags": scorecard.flag_count,
                 "time": elapsed,
             }
 
     except Exception as e:
         elapsed = time.time() - start
-        return {"ticker": ticker, "classified": False, "error": str(e), "time": elapsed}
+        safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
+        return {
+            "ticker": ticker,
+            "classified": False,
+            "error": safe_error,
+            "time": elapsed,
+        }
 
 
 def _fetch_benchmark_prices(db_url: str) -> dict[str, list[dict[str, Any]]]:
@@ -152,10 +222,12 @@ def run_stock_character_batch(
 
     # Get tickers
     with psycopg.connect(database_url) as conn:
-        if tickers:
-            all_tickers = [t.upper() for t in tickers]
+        if tickers is not None:
+            all_tickers = list(dict.fromkeys(validate_ticker(t) for t in tickers))
         else:
-            all_tickers = get_tickers_with_prices(conn)
+            all_tickers = list(
+                dict.fromkeys(validate_ticker(t) for t in get_tickers_with_prices(conn))
+            )
 
     log.info(f"Tickers to process: {len(all_tickers)}")
     log.info(f"Workers: {workers}")
@@ -213,17 +285,19 @@ def run_stock_character_batch(
     log.info("BATCH COMPLETE")
     log.info("=" * 60)
     log.info(f"  Total tickers:    {len(all_tickers)}")
+    total = len(all_tickers)
+    classified_percent = 100 * len(classified_results) / total if total else 0.0
+    unclassifiable_percent = 100 * len(unclassifiable) / total if total else 0.0
     log.info(
-        f"  Classified:       {len(classified_results)} "
-        f"({100 * len(classified_results) / len(all_tickers):.1f}%)"
+        f"  Classified:       {len(classified_results)} ({classified_percent:.1f}%)"
     )
     log.info(
-        f"  Unclassifiable:   {len(unclassifiable)} "
-        f"({100 * len(unclassifiable) / len(all_tickers):.1f}%)"
+        f"  Unclassifiable:   {len(unclassifiable)} ({unclassifiable_percent:.1f}%)"
     )
     log.info(f"  Errors:           {len(errors)}")
     log.info(f"  Time:             {elapsed:.1f}s ({elapsed/60:.1f} min)")
-    log.info(f"  Rate:             {len(all_tickers)/elapsed:.1f} tickers/sec")
+    rate = total / elapsed if elapsed > 0 else 0.0
+    log.info(f"  Rate:             {rate:.1f} tickers/sec")
     log.info("\n  Character breakdown:")
     for char, count in sorted(char_counts.items()):
         log.info(f"    {char:15s} {count:5d}")
@@ -234,11 +308,16 @@ def run_stock_character_batch(
             log.warning(f"    {err['ticker']}: {err.get('error', 'unknown')}")
 
     return {
-        "success": True,
-        "total": len(all_tickers),
+        "success": total > 0 and bool(classified_results) and not errors,
+        "degraded": bool(errors),
+        "total": total,
         "classified": len(classified_results),
         "unclassifiable": len(unclassifiable),
         "errors": len(errors),
         "elapsed_seconds": round(elapsed, 1),
         "character_counts": char_counts,
+        "ticker_errors": [
+            {"ticker": item.get("ticker"), "error": item.get("error")}
+            for item in errors
+        ],
     }

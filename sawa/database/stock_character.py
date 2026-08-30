@@ -17,11 +17,41 @@ from sawa.domain.stock_character import (
     CharacterScorecard,
 )
 from sawa.utils.constants import DEFAULT_BATCH_SIZE
+from sawa.utils.security import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
 
-def load_classification(conn, classification: CharacterClassification, log=None) -> int:
+class StockCharacterWriteError(RuntimeError):
+    """A stock-character artifact could not be fully persisted."""
+
+
+def _write_failed(
+    conn,
+    log: logging.Logger,
+    context: str,
+    error: Exception,
+    *,
+    commit: bool,
+    strict: bool,
+) -> int:
+    if commit:
+        conn.rollback()
+    safe_error = f"{type(error).__name__}: {redact_sensitive_text(error)}"
+    log.warning("%s: %s", context, safe_error)
+    if strict:
+        raise StockCharacterWriteError(f"{context}: {safe_error}") from None
+    return 0
+
+
+def load_classification(
+    conn,
+    classification: CharacterClassification,
+    log=None,
+    *,
+    commit: bool = True,
+    strict: bool = False,
+) -> int:
     """Insert/upsert a single CharacterClassification into stock_character_classification.
 
     Args:
@@ -56,18 +86,29 @@ def load_classification(conn, classification: CharacterClassification, log=None)
     try:
         with conn.cursor() as cur:
             cur.execute(query, classification.to_tuple())
-        conn.commit()
+        if commit:
+            conn.commit()
         return 1
     except Exception as e:
-        conn.rollback()
-        log.warning(
-            f"Insert failed for classification "
-            f"{classification.ticker}/{classification.run_date}: {e}"
+        return _write_failed(
+            conn,
+            log,
+            "Insert failed for classification "
+            f"{classification.ticker}/{classification.run_date}",
+            e,
+            commit=commit,
+            strict=strict,
         )
-        return 0
 
 
-def load_baseline(conn, baseline: CharacterBaseline, log=None) -> int:
+def load_baseline(
+    conn,
+    baseline: CharacterBaseline,
+    log=None,
+    *,
+    commit: bool = True,
+    strict: bool = False,
+) -> int:
     """Insert/upsert a single CharacterBaseline into stock_character_baseline.
 
     hvn_levels and lvn_levels are PostgreSQL arrays. The to_tuple() method
@@ -105,14 +146,18 @@ def load_baseline(conn, baseline: CharacterBaseline, log=None) -> int:
     try:
         with conn.cursor() as cur:
             cur.execute(query, baseline.to_tuple())
-        conn.commit()
+        if commit:
+            conn.commit()
         return 1
     except Exception as e:
-        conn.rollback()
-        log.warning(
-            f"Insert failed for baseline {baseline.ticker}/{baseline.run_date}: {e}"
+        return _write_failed(
+            conn,
+            log,
+            f"Insert failed for baseline {baseline.ticker}/{baseline.run_date}",
+            e,
+            commit=commit,
+            strict=strict,
         )
-        return 0
 
 
 def load_flags(
@@ -120,6 +165,9 @@ def load_flags(
     flags: list[CharacterFlag],
     log=None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    *,
+    commit: bool = True,
+    strict: bool = False,
 ) -> int:
     """Bulk insert CharacterFlag records into stock_character_flags.
 
@@ -176,13 +224,24 @@ def load_flags(
                     cur.execute("ROLLBACK TO SAVEPOINT row_insert")
                     cur.execute("RELEASE SAVEPOINT row_insert")
                     errors += 1
+                    safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
                     if errors <= 3:
                         log.warning(
-                            f"Insert failed for flag {flag.ticker}/{flag.run_date}/{flag.flag}: {e}"
+                            "Insert failed for flag %s/%s/%s: %s",
+                            flag.ticker,
+                            flag.run_date,
+                            flag.flag,
+                            safe_error,
                         )
                     elif errors == 4:
                         log.warning("(suppressing further errors...)")
-            conn.commit()
+                    if strict:
+                        raise StockCharacterWriteError(
+                            "Insert failed for flag "
+                            f"{flag.ticker}/{flag.run_date}/{flag.flag}: {safe_error}"
+                        ) from None
+            if commit:
+                conn.commit()
 
             if (i + batch_size) % 10000 == 0:
                 log.info(
@@ -195,7 +254,99 @@ def load_flags(
     return inserted
 
 
-def load_scorecard(conn, scorecard: CharacterScorecard, log=None) -> int:
+def replace_flags(
+    conn,
+    ticker: str,
+    run_date: date,
+    flags: list[CharacterFlag],
+    log=None,
+    *,
+    commit: bool = True,
+    strict: bool = False,
+) -> int:
+    """Replace one ticker/run's complete flag set and verify it exactly.
+
+    Upserting only the newly computed flags cannot remove a flag that was
+    present in an earlier computation for the same run identity.  This helper
+    therefore performs an identity-scoped delete, inserts the new set (which
+    may be empty), and verifies the exact persisted flag names in the caller's
+    transaction.
+    """
+    log = log or logger
+    normalized_ticker = ticker.upper()
+    expected_names = [flag.flag for flag in flags]
+
+    try:
+        if len(expected_names) != len(set(expected_names)):
+            raise StockCharacterWriteError(
+                f"duplicate flags supplied for {normalized_ticker}/{run_date}"
+            )
+        if any(
+            flag.ticker != normalized_ticker or flag.run_date != run_date
+            for flag in flags
+        ):
+            raise StockCharacterWriteError(
+                "flag identity does not match replacement identity "
+                f"{normalized_ticker}/{run_date}"
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM public.stock_character_flags "
+                "WHERE ticker = %s AND run_date = %s",
+                (normalized_ticker, run_date),
+            )
+
+        inserted = load_flags(
+            conn,
+            flags,
+            log,
+            commit=False,
+            strict=True,
+        )
+        if inserted != len(flags):
+            raise StockCharacterWriteError(
+                "flags persisted only "
+                f"{inserted}/{len(flags)} rows for {normalized_ticker}/{run_date}"
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT flag FROM public.stock_character_flags "
+                "WHERE ticker = %s AND run_date = %s ORDER BY flag",
+                (normalized_ticker, run_date),
+            )
+            persisted_names = [str(row[0]) for row in cur.fetchall()]
+
+        if persisted_names != sorted(expected_names):
+            raise StockCharacterWriteError(
+                "flag replacement verification failed for "
+                f"{normalized_ticker}/{run_date}: expected {len(expected_names)} "
+                f"identity row(s), found {len(persisted_names)}"
+            )
+
+        if commit:
+            conn.commit()
+        return len(persisted_names)
+    except Exception as e:
+        return _write_failed(
+            conn,
+            log,
+            f"Flag replacement failed for {normalized_ticker}/{run_date}",
+            e,
+            commit=commit,
+            strict=strict,
+        )
+
+
+def load_scorecard(
+    conn,
+    scorecard: CharacterScorecard,
+    log=None,
+    *,
+    commit: bool = True,
+    strict: bool = False,
+) -> int:
     """Insert/upsert a single CharacterScorecard into stock_character_scorecard.
 
     Args:
@@ -230,14 +381,18 @@ def load_scorecard(conn, scorecard: CharacterScorecard, log=None) -> int:
     try:
         with conn.cursor() as cur:
             cur.execute(query, scorecard.to_tuple())
-        conn.commit()
+        if commit:
+            conn.commit()
         return 1
     except Exception as e:
-        conn.rollback()
-        log.warning(
-            f"Insert failed for scorecard {scorecard.ticker}/{scorecard.run_date}: {e}"
+        return _write_failed(
+            conn,
+            log,
+            f"Insert failed for scorecard {scorecard.ticker}/{scorecard.run_date}",
+            e,
+            commit=commit,
+            strict=strict,
         )
-        return 0
 
 
 def get_latest_classification(conn, ticker: str) -> CharacterClassification | None:

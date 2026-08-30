@@ -9,28 +9,131 @@ Usage:
 
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import psycopg
 from psycopg import sql
 
 from sawa.api.client import PolygonClient
+from sawa.domain.exceptions import ProviderError
 from sawa.utils import setup_logging
 from sawa.utils.cli import add_common_args, create_parser
 from sawa.utils.config import get_polygon_api_key
+from sawa.utils.security import redact_sensitive_text
 
 from .connection import get_connection, get_connection_params
 
 logger = logging.getLogger(__name__)
 
 
-def load_news_article(conn, article: dict[str, Any]) -> None:
+@dataclass(frozen=True, slots=True)
+class NewsRequestFailure:
+    """Safe failure details for one news provider request."""
+
+    ticker: str | None
+    error_type: str
+    message: str
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "ticker": self.ticker,
+            "error_type": self.error_type,
+            "message": self.message,
+        }
+
+
+class NewsLoadResult(int):
+    """Distinct loaded articles plus request and persistence provenance."""
+
+    requested: int
+    succeeded: int
+    empty: int
+    fetched_articles: int
+    persisted_articles: int
+    rejected_articles: int
+    failures: tuple[NewsRequestFailure, ...]
+
+    def __new__(
+        cls,
+        loaded: int,
+        *,
+        requested: int,
+        succeeded: int,
+        empty: int,
+        fetched_articles: int,
+        persisted_articles: int,
+        rejected_articles: int,
+        failures: tuple[NewsRequestFailure, ...] = (),
+    ) -> "NewsLoadResult":
+        result = super().__new__(cls, loaded)
+        result.requested = requested
+        result.succeeded = succeeded
+        result.empty = empty
+        result.fetched_articles = fetched_articles
+        result.persisted_articles = persisted_articles
+        result.rejected_articles = rejected_articles
+        result.failures = failures
+        return result
+
+    @property
+    def failed(self) -> int:
+        return len(self.failures)
+
+    @property
+    def all_requests_failed(self) -> bool:
+        return self.requested > 0 and self.failed == self.requested
+
+    @property
+    def all_successful_empty(self) -> bool:
+        return (
+            self.requested > 0
+            and self.succeeded == self.requested
+            and self.failed == 0
+            and self.fetched_articles == 0
+        )
+
+    @property
+    def no_articles_fetched(self) -> bool:
+        """Whether successful requests still produced no usable fresh articles."""
+        return self.requested > 0 and self.succeeded > 0 and self.fetched_articles == 0
+
+    @property
+    def persistence_failed(self) -> bool:
+        return self.rejected_articles > 0
+
+    @property
+    def total_persistence_failure(self) -> bool:
+        return self.fetched_articles > 0 and self.persisted_articles == 0
+
+    @property
+    def partial_persistence_failure(self) -> bool:
+        return self.rejected_articles > 0 and self.persisted_articles > 0
+
+    @property
+    def failure_details(self) -> list[dict[str, str | None]]:
+        return [failure.to_dict() for failure in self.failures]
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "requested": self.requested,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "empty": self.empty,
+            "fetched_articles": self.fetched_articles,
+            "persisted_articles": self.persisted_articles,
+            "rejected_articles": self.rejected_articles,
+            "unique_loaded_articles": int(self),
+            "failures": self.failure_details,
+        }
+
+
+def load_news_article(conn, article: dict[str, Any]) -> bool:
     """Load a single news article and its related data."""
     article_id = article.get("id")
     if not article_id:
-        return
+        return False
 
     # Insert or update article
     article_sql = sql.SQL("""
@@ -102,6 +205,7 @@ def load_news_article(conn, article: dict[str, Any]) -> None:
         if sentiment_data:
             with conn.cursor() as cur:
                 cur.executemany(sentiment_sql, sentiment_data)
+    return True
 
 
 def fetch_and_load_news(
@@ -112,7 +216,7 @@ def fetch_and_load_news(
     limit: int = 1000,
     log: logging.Logger | None = None,
     loaded_ids: set[str] | None = None,
-) -> int:
+) -> NewsLoadResult:
     """
     Fetch news from API and load into database.
 
@@ -149,6 +253,8 @@ def fetch_and_load_news(
         published_utc_lte=end_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
         limit=limit,
     )
+    if not isinstance(articles, list):
+        raise ProviderError("Provider returned a non-list news response", provider="polygon")
 
     log.info(f"Fetched {len(articles)} articles")
 
@@ -157,17 +263,26 @@ def fetch_and_load_news(
     # Track distinct ids loaded this call so the reported total is a real
     # article count rather than a sum of per-ticker upserts.
     call_ids: set[str] = set()
+    persisted_articles = 0
+    rejected_articles = 0
     with conn.cursor() as sp_cur:
         for article in articles:
-            article_id = article.get("id")
+            article_id = article.get("id") if isinstance(article, dict) else None
             try:
                 sp_cur.execute("SAVEPOINT article_insert")
-                load_news_article(conn, article)
+                if not isinstance(article, dict) or not load_news_article(conn, article):
+                    raise ValueError("news article has no usable identity")
                 sp_cur.execute("RELEASE SAVEPOINT article_insert")
+                persisted_articles += 1
                 if article_id is not None:
-                    call_ids.add(article_id)
-            except psycopg.Error as e:
-                log.warning(f"Failed to load article {article_id}: {e}")
+                    call_ids.add(str(article_id))
+            except Exception as e:
+                rejected_articles += 1
+                safe_error = redact_sensitive_text(e)
+                log.warning(
+                    f"Failed to load article {article_id}: "
+                    f"{type(e).__name__}: {safe_error}"
+                )
                 sp_cur.execute("ROLLBACK TO SAVEPOINT article_insert")
                 sp_cur.execute("RELEASE SAVEPOINT article_insert")
                 continue
@@ -177,7 +292,15 @@ def fetch_and_load_news(
         loaded_ids.update(call_ids)
     loaded = len(call_ids)
     log.info(f"Loaded {loaded} articles")
-    return loaded
+    return NewsLoadResult(
+        loaded,
+        requested=1,
+        succeeded=1,
+        empty=int(not articles),
+        fetched_articles=len(articles),
+        persisted_articles=persisted_articles,
+        rejected_articles=rejected_articles,
+    )
 
 
 def fetch_news_for_symbols(
@@ -187,7 +310,7 @@ def fetch_news_for_symbols(
     days: int = 30,
     limit_per_symbol: int = 100,
     log: logging.Logger | None = None,
-) -> int:
+) -> NewsLoadResult:
     """
     Fetch news for multiple symbols.
 
@@ -207,10 +330,16 @@ def fetch_news_for_symbols(
     """
     log = log or logger
     loaded_ids: set[str] = set()
+    succeeded = 0
+    empty = 0
+    fetched_articles = 0
+    persisted_articles = 0
+    rejected_articles = 0
+    failures: list[NewsRequestFailure] = []
     for i, symbol in enumerate(symbols, 1):
         log.info(f"[{i}/{len(symbols)}] Fetching news for {symbol}")
         try:
-            fetch_and_load_news(
+            result = fetch_and_load_news(
                 conn,
                 client,
                 ticker=symbol,
@@ -219,11 +348,40 @@ def fetch_news_for_symbols(
                 log=log,
                 loaded_ids=loaded_ids,
             )
+            succeeded += 1
+            empty += result.empty
+            fetched_articles += result.fetched_articles
+            persisted_articles += result.persisted_articles
+            rejected_articles += result.rejected_articles
         except Exception as e:
-            log.error(f"Failed to fetch news for {symbol}: {e}")
+            safe_error = redact_sensitive_text(e)
+            failures.append(
+                NewsRequestFailure(
+                    ticker=symbol,
+                    error_type=type(e).__name__,
+                    message=safe_error,
+                )
+            )
+            log.error(
+                f"Failed to fetch news for {symbol}: "
+                f"{type(e).__name__}: {safe_error}"
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             continue
 
-    return len(loaded_ids)
+    return NewsLoadResult(
+        len(loaded_ids),
+        requested=len(symbols),
+        succeeded=succeeded,
+        empty=empty,
+        fetched_articles=fetched_articles,
+        persisted_articles=persisted_articles,
+        rejected_articles=rejected_articles,
+        failures=tuple(failures),
+    )
 
 
 def main() -> int:
@@ -307,10 +465,19 @@ Environment: POLYGON_API_KEY, PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
 
         conn.close()
         log.info(f"\nTotal articles loaded: {total}")
+        if isinstance(total, NewsLoadResult) and (
+            total.all_requests_failed
+            or total.no_articles_fetched
+            or total.total_persistence_failure
+        ):
+            log.error("News run produced no trustworthy fresh result")
+            return 1
         return 0
 
     except Exception as e:
-        log.error(f"Error: {e}")
+        log.error(
+            f"Error: {type(e).__name__}: {redact_sensitive_text(e)}"
+        )
         if args.verbose:
             raise
         return 1
