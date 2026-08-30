@@ -10,6 +10,8 @@ from ._index_filter import build_index_filter
 
 logger = logging.getLogger(__name__)
 
+MAX_COMPANY_OFFSET = 10_000
+
 
 def list_companies(
     limit: int = 100,
@@ -29,7 +31,8 @@ def list_companies(
     Returns:
         List of company records with indices array
     """
-    limit = min(limit, 1000)
+    limit = max(1, min(limit, 1000))
+    offset = max(0, min(offset, MAX_COMPANY_OFFSET))
 
     # Build WHERE clauses
     where_clauses = ["c.active = TRUE"]

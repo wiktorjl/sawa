@@ -5,6 +5,7 @@ and advanced volume indicators (OBV, CMF, A/D line, VWAP).
 """
 
 import logging
+import math
 from datetime import date, timedelta
 from typing import Any
 
@@ -41,8 +42,12 @@ def get_volume_profile(
         - value_area_high/low: 70% volume range bounds
         - bins: List of {price_low, price_high, price_mid, volume, pct_of_total}
     """
-    lookback_days = min(max(lookback_days, 1), 252)
-    price_bins = min(max(price_bins, 5), 50)
+    if not 1 <= lookback_days <= 252:
+        raise ValueError(
+            f"lookback_days must be between 1 and 252, got {lookback_days}"
+        )
+    if not 5 <= price_bins <= 50:
+        raise ValueError(f"price_bins must be between 5 and 50, got {price_bins}")
 
     start_date = (date.today() - timedelta(days=int(lookback_days * 1.5))).isoformat()
 
@@ -194,8 +199,20 @@ def detect_volume_anomalies(
         - divergences: List of price-volume divergences
         - summary: Counts of each anomaly type
     """
-    lookback_days = min(max(lookback_days, 20), 252)
-    threshold_multiplier = max(threshold_multiplier, 1.1)
+    if (
+        isinstance(lookback_days, bool)
+        or not isinstance(lookback_days, int)
+        or not 20 <= lookback_days <= 252
+    ):
+        raise ValueError("lookback_days must be an integer between 20 and 252")
+    if (
+        isinstance(threshold_multiplier, bool)
+        or not isinstance(threshold_multiplier, (int, float))
+        or not math.isfinite(float(threshold_multiplier))
+        or threshold_multiplier < 1.1
+    ):
+        raise ValueError("threshold_multiplier must be a finite number >= 1.1")
+    threshold_multiplier = float(threshold_multiplier)
 
     # Fetch extra days for moving average warmup
     fetch_days = lookback_days + 30
@@ -337,7 +354,12 @@ def get_advanced_volume_indicators(
         - latest: Most recent indicator values
         - signals: Interpretation of current indicator values
     """
-    lookback_days = min(max(lookback_days, 5), 252)
+    if (
+        isinstance(lookback_days, bool)
+        or not isinstance(lookback_days, int)
+        or not 5 <= lookback_days <= 252
+    ):
+        raise ValueError("lookback_days must be an integer between 5 and 252")
 
     # Fetch extra days for warmup (CMF needs 20-day window)
     fetch_days = lookback_days + 25

@@ -14,6 +14,9 @@ from ..database import execute_query
 
 logger = logging.getLogger(__name__)
 
+_ALIGNMENT_INDICATORS = {"sma", "sma_trend", "rsi", "macd"}
+_ALIGNMENT_TIMEFRAMES = {"daily", "weekly", "monthly"}
+
 
 def get_weekly_monthly_candles(
     ticker: str,
@@ -34,11 +37,20 @@ def get_weekly_monthly_candles(
         is the still-forming current week/month; is_partial=True flags it so
         callers don't treat the in-progress period as a finished candle.
     """
+    if timeframe not in {"weekly", "monthly"}:
+        raise ValueError("timeframe must be 'weekly' or 'monthly'")
     if periods is None:
         periods = 52 if timeframe == "weekly" else 12
-
-    max_periods = 520 if timeframe == "weekly" else 120
-    periods = min(periods, max_periods)
+    max_periods = 260 if timeframe == "weekly" else 120
+    if (
+        isinstance(periods, bool)
+        or not isinstance(periods, int)
+        or not 1 <= periods <= max_periods
+    ):
+        raise ValueError(
+            f"periods must be an integer between 1 and {max_periods} "
+            f"for {timeframe} candles"
+        )
 
     trunc_unit = "week" if timeframe == "weekly" else "month"
 
@@ -123,10 +135,40 @@ def get_multi_timeframe_alignment(
         indicators = ["sma_trend", "rsi", "macd"]
     if timeframes is None:
         timeframes = ["daily", "weekly", "monthly"]
+    if (
+        not isinstance(indicators, list)
+        or not indicators
+        or len(indicators) > 3
+        or any(not isinstance(indicator, str) for indicator in indicators)
+        or any(indicator not in _ALIGNMENT_INDICATORS for indicator in indicators)
+    ):
+        raise ValueError(
+            "indicators must be a unique non-empty list containing only "
+            "sma (alias: sma_trend), rsi, and macd"
+        )
+    indicators = [
+        "sma_trend" if indicator == "sma" else indicator
+        for indicator in indicators
+    ]
+    if len(set(indicators)) != len(indicators):
+        raise ValueError("indicators must not contain duplicate aliases")
+    if (
+        not isinstance(timeframes, list)
+        or not timeframes
+        or len(timeframes) > len(_ALIGNMENT_TIMEFRAMES)
+        or any(not isinstance(timeframe, str) for timeframe in timeframes)
+        or len(set(timeframes)) != len(timeframes)
+        or any(timeframe not in _ALIGNMENT_TIMEFRAMES for timeframe in timeframes)
+    ):
+        raise ValueError(
+            "timeframes must be a unique non-empty list containing only "
+            "daily, weekly, and monthly"
+        )
 
     ticker = ticker.upper()
     result: dict[str, Any] = {
         "ticker": ticker,
+        "indicators": indicators,
         "timeframes": {},
         "alignment_score": 0,
         "trend_consistency": False,
@@ -156,21 +198,27 @@ def get_multi_timeframe_alignment(
     result["analysis_date"] = str(daily["date"])
 
     if "daily" in timeframes:
-        result["timeframes"]["daily"] = _analyze_daily_signals(daily)
+        result["timeframes"]["daily"] = _select_indicator_signals(
+            _analyze_daily_signals(daily), indicators
+        )
 
     # Weekly signals from aggregated candle data
     if "weekly" in timeframes:
         weekly_start = (date.today() - timedelta(days=210 * 7)).isoformat()
         weekly_candles = _fetch_aggregated_candles(ticker, "week", weekly_start)
         if weekly_candles:
-            result["timeframes"]["weekly"] = _compute_signals_from_candles(weekly_candles)
+            result["timeframes"]["weekly"] = _select_indicator_signals(
+                _compute_signals_from_candles(weekly_candles), indicators
+            )
 
     # Monthly signals from aggregated candle data
     if "monthly" in timeframes:
         monthly_start = (date.today() - timedelta(days=60 * 31)).isoformat()
         monthly_candles = _fetch_aggregated_candles(ticker, "month", monthly_start)
         if monthly_candles:
-            result["timeframes"]["monthly"] = _compute_signals_from_candles(monthly_candles)
+            result["timeframes"]["monthly"] = _select_indicator_signals(
+                _compute_signals_from_candles(monthly_candles), indicators
+            )
 
     _calculate_alignment(result)
     return result
@@ -187,7 +235,7 @@ def calculate_relative_strength(
     Args:
         ticker: Stock ticker symbol
         benchmark: Benchmark ticker (default: "SPY")
-        lookback_days: Calendar days to analyze (default: 90, max: 365)
+        lookback_days: Calendar days to analyze (default: 90, max: 500)
 
     Returns:
         Dict with ticker/benchmark returns, relative_return, rs_trend,
@@ -195,7 +243,10 @@ def calculate_relative_strength(
     """
     ticker = ticker.upper()
     benchmark = benchmark.upper()
-    lookback_days = min(lookback_days, 365)
+    if not 20 <= lookback_days <= 500:
+        raise ValueError(
+            f"lookback_days must be between 20 and 500, got {lookback_days}"
+        )
 
     start_date = (date.today() - timedelta(days=lookback_days)).isoformat()
 
@@ -384,6 +435,18 @@ def _analyze_daily_signals(data: dict[str, Any]) -> dict[str, Any]:
 
     signals["direction"] = _overall_direction(signals)
     return signals
+
+
+def _select_indicator_signals(
+    signals: dict[str, Any], indicators: list[str]
+) -> dict[str, Any]:
+    """Keep only requested indicators and derive direction from that subset."""
+    selected: dict[str, Any] = {"price": signals.get("price")}
+    for indicator in indicators:
+        if indicator in signals:
+            selected[indicator] = signals[indicator]
+    selected["direction"] = _overall_direction(selected)
+    return selected
 
 
 def _compute_signals_from_candles(candles: list[dict[str, Any]]) -> dict[str, Any]:

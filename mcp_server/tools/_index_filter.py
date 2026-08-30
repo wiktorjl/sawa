@@ -7,13 +7,24 @@ corporate_actions, etc. With this helper any index code in the
 (nasdaq100, dow30, mag7, ...) no longer requires touching every tool.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import sql
 
+IndexCode = Literal[
+    "sp500",
+    "nasdaq_listed",
+    "us_active",
+    "nasdaq100",
+    "dow30",
+    "russell1000",
+    "mag7",
+    "all",
+]
+
 
 def build_index_filter(
-    index: str,
+    index: str | None,
     table_alias: str,
     params: dict[str, Any],
     *,

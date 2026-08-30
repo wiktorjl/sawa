@@ -1096,14 +1096,26 @@ def detect_chart_patterns(
 
     Args:
         ticker: Stock ticker symbol
-        lookback_days: Days of data to analyze (default: 60, max: 504)
+        lookback_days: Days of data to analyze (default: 60, max: 252)
         min_pattern_days: Minimum formation period in days (default: 10)
 
     Returns:
         Dict with ticker, patterns list, and summary
     """
-    lookback_days = min(lookback_days, 504)
-    min_pattern_days = max(5, min(min_pattern_days, lookback_days // 2))
+    if (
+        isinstance(lookback_days, bool)
+        or not isinstance(lookback_days, int)
+        or not 20 <= lookback_days <= 252
+    ):
+        raise ValueError("lookback_days must be an integer between 20 and 252")
+    if (
+        isinstance(min_pattern_days, bool)
+        or not isinstance(min_pattern_days, int)
+        or not 5 <= min_pattern_days <= lookback_days
+    ):
+        raise ValueError(
+            "min_pattern_days must be an integer between 5 and lookback_days"
+        )
     ticker = ticker.upper()
 
     end_date = date.today()
