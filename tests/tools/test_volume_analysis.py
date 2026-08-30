@@ -3,6 +3,8 @@
 from datetime import date, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from mcp_server.tools.volume_analysis import (
     _generate_volume_signals,
     detect_volume_anomalies,
@@ -120,14 +122,15 @@ class TestGetVolumeProfile:
         assert result["bins"] == []
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
-    def test_volume_profile_clamps_params(self, mock_query):
-        """Parameters are clamped to valid ranges."""
-        rows = _make_price_rows(10)
-        mock_query.return_value = rows
+    def test_volume_profile_rejects_out_of_range_params(self, mock_query):
+        """Out-of-contract parameters fail before querying the database."""
+        with pytest.raises(ValueError, match="lookback_days must be between 1 and 252"):
+            get_volume_profile("AAPL", lookback_days=500)
 
-        # lookback_days clamped to 252
-        result = get_volume_profile("AAPL", lookback_days=500, price_bins=100)
-        assert len(result["bins"]) == 50  # clamped to max
+        with pytest.raises(ValueError, match="price_bins must be between 5 and 50"):
+            get_volume_profile("AAPL", price_bins=100)
+
+        mock_query.assert_not_called()
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
     def test_volume_profile_flat_price(self, mock_query):
@@ -239,14 +242,12 @@ class TestDetectVolumeAnomalies:
         assert len(climactic) > 0
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
-    def test_threshold_clamped_minimum(self, mock_query):
-        """Threshold multiplier should be at least 1.1."""
-        rows = _make_price_rows(60)
-        mock_query.return_value = rows
+    def test_threshold_below_minimum_rejected_before_query(self, mock_query):
+        """Threshold multiplier below 1.1 is an invalid request."""
+        with pytest.raises(ValueError, match=">= 1.1"):
+            detect_volume_anomalies("AAPL", threshold_multiplier=0.5)
 
-        result = detect_volume_anomalies("AAPL", threshold_multiplier=0.5)
-
-        assert result["threshold_multiplier"] == 1.1
+        mock_query.assert_not_called()
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
     def test_summary_counts_match(self, mock_query):
@@ -376,14 +377,12 @@ class TestGetAdvancedVolumeIndicators:
             assert "description" in signal
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
-    def test_lookback_clamp(self, mock_query):
-        """lookback_days should be clamped to [5, 252]."""
-        rows = _make_price_rows(10)
-        mock_query.return_value = rows
+    def test_lookback_below_minimum_rejected_before_query(self, mock_query):
+        """lookback_days below five is an invalid request."""
+        with pytest.raises(ValueError, match="between 5 and 252"):
+            get_advanced_volume_indicators("AAPL", lookback_days=1)
 
-        result = get_advanced_volume_indicators("AAPL", lookback_days=1)
-        # Clamped to 5, but only 10 rows available, so result limited by data
-        assert result["ticker"] == "AAPL"
+        mock_query.assert_not_called()
 
     @patch("mcp_server.tools.volume_analysis.execute_query")
     def test_cumulative_series_anchored_at_window_start(self, mock_query):

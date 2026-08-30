@@ -478,13 +478,19 @@ class TestGetWeeklyMonthlyCandles:
         assert params["periods"] == 12
 
     @patch("mcp_server.tools.multi_timeframe.execute_query")
-    def test_custom_periods_clamped(self, mock_query):
+    def test_out_of_range_periods_rejected_before_query(self, mock_query):
         mock_query.return_value = []
-        get_weekly_monthly_candles("AAPL", timeframe="weekly", periods=9999)
+        with pytest.raises(ValueError, match="between 1 and 260"):
+            get_weekly_monthly_candles("AAPL", timeframe="weekly", periods=9999)
 
-        _, kwargs = mock_query.call_args
-        params = kwargs.get("params") or mock_query.call_args[0][1]
-        assert params["periods"] == 520
+        mock_query.assert_not_called()
+
+    @patch("mcp_server.tools.multi_timeframe.execute_query")
+    def test_monthly_period_limit_rejected_before_query(self, mock_query):
+        with pytest.raises(ValueError, match="between 1 and 120"):
+            get_weekly_monthly_candles("AAPL", timeframe="monthly", periods=121)
+
+        mock_query.assert_not_called()
 
     @patch("mcp_server.tools.multi_timeframe.execute_query")
     def test_ticker_uppercased(self, mock_query):
@@ -538,6 +544,35 @@ class TestGetMultiTimeframeAlignment:
         result = get_multi_timeframe_alignment("AAPL")
         assert result["ticker"] == "AAPL"
         assert "error" in result
+
+    @patch("mcp_server.tools.multi_timeframe._fetch_aggregated_candles")
+    @patch("mcp_server.tools.multi_timeframe.execute_query")
+    def test_indicator_subset_and_sma_alias_are_honored(
+        self, mock_query, mock_fetch_candles
+    ):
+        mock_query.return_value = [{
+            "date": date(2025, 1, 15),
+            "price": 150.0,
+            "sma_20": 145.0,
+            "sma_50": 140.0,
+            "sma_200": 130.0,
+            "rsi_14": 55.0,
+            "macd_line": 1.5,
+            "macd_signal": 1.0,
+            "macd_histogram": 0.5,
+        }]
+        mock_fetch_candles.return_value = []
+
+        result = get_multi_timeframe_alignment(
+            "AAPL", indicators=["sma"], timeframes=["daily"]
+        )
+
+        assert result["indicators"] == ["sma_trend"]
+        assert set(result["timeframes"]["daily"]) == {
+            "price",
+            "sma_trend",
+            "direction",
+        }
 
     @patch("mcp_server.tools.multi_timeframe._fetch_aggregated_candles")
     @patch("mcp_server.tools.multi_timeframe.execute_query")
@@ -671,10 +706,11 @@ class TestCalculateRelativeStrength:
         assert result["rs_trend"] == "declining"
 
     @patch("mcp_server.tools.multi_timeframe.execute_query")
-    def test_lookback_clamped(self, mock_query):
-        mock_query.return_value = []
-        result = calculate_relative_strength("AAPL", lookback_days=9999)
-        assert "error" in result
+    def test_lookback_out_of_range_is_rejected(self, mock_query):
+        with pytest.raises(ValueError, match="lookback_days must be between 20 and 500"):
+            calculate_relative_strength("AAPL", lookback_days=9999)
+
+        mock_query.assert_not_called()
 
     @patch("mcp_server.tools.multi_timeframe.execute_query")
     def test_tickers_uppercased(self, mock_query):

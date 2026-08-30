@@ -1,12 +1,14 @@
 """Market data MCP tools (prices, financial ratios, and technical indicators)."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from psycopg import sql
+from sawa.utils.dates import timestamp_to_date
 from sawa.utils.market_hours import get_market_date
+from sawa.utils.security import redact_sensitive_text
 
 from ..database import execute_query
 from ._index_filter import build_index_filter
@@ -281,7 +283,7 @@ async def get_live_price_async(ticker: str, days: int = 7) -> dict[str, Any]:
             "change_percent": result["change_percent"],
             "history": [
                 {
-                    "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                    "date": timestamp_to_date(bar["t"]).isoformat(),
                     "open": bar["o"],
                     "high": bar["h"],
                     "low": bar["l"],
@@ -291,10 +293,14 @@ async def get_live_price_async(ticker: str, days: int = 7) -> dict[str, Any]:
                 for bar in history
             ],
             "source": "polygon_api",
-            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
-        logger.error(f"Live price error: {e}")
+        logger.error(
+            "Live price error: %s: %s",
+            type(e).__name__,
+            redact_sensitive_text(e),
+        )
         raise
 
 
@@ -315,7 +321,7 @@ async def get_live_prices_batch_async(
 
     try:
         results = await sawa_get_live_prices_batch(tickers=tickers, days=days)
-        fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fetched_at = datetime.now(timezone.utc).isoformat()
 
         # Format each result for MCP display
         output: dict[str, dict[str, Any]] = {}
@@ -323,7 +329,8 @@ async def get_live_prices_batch_async(
             if result.get("error"):
                 output[ticker] = {
                     "ticker": ticker,
-                    "error": result["error"],
+                    "error": redact_sensitive_text(result["error"])[:500],
+                    "error_type": result.get("error_type", "unknown"),
                     "source": "polygon_api",
                     "fetched_at": fetched_at,
                 }
@@ -344,7 +351,7 @@ async def get_live_prices_batch_async(
                 "change_percent": result["change_percent"],
                 "history": [
                     {
-                        "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                        "date": timestamp_to_date(bar["t"]).isoformat(),
                         "open": bar["o"],
                         "high": bar["h"],
                         "low": bar["l"],
@@ -359,7 +366,11 @@ async def get_live_prices_batch_async(
 
         return output
     except Exception as e:
-        logger.error(f"Live prices batch error: {e}")
+        logger.error(
+            "Live prices batch error: %s: %s",
+            type(e).__name__,
+            redact_sensitive_text(e),
+        )
         raise
 
 
@@ -483,7 +494,8 @@ def screen_by_technical_indicators(
     Returns:
         List of tickers matching all filters with their indicator values and indices
     """
-    limit = min(limit, 500)
+    if not 1 <= limit <= 500:
+        raise ValueError(f"limit must be between 1 and 500, got {limit}")
 
     # Valid indicator columns
     valid_indicators = {
@@ -659,6 +671,7 @@ def get_intraday_bars(
     date: str | None = None,
     limit: int = 100,
     aggregate: bool = False,
+    bar_size_minutes: int = 5,
 ) -> list[dict[str, Any]]:
     """
     Get intraday 5-minute bars for one or more tickers.
@@ -669,6 +682,7 @@ def get_intraday_bars(
         date: Date in YYYY-MM-DD format (defaults to today)
         limit: Maximum bars per ticker to return (default: 100, max: 500)
         aggregate: If True, return daily OHLCV summary instead of individual bars
+        bar_size_minutes: Stored bar interval to query (1, 5, 15, 30, or 60)
 
     Returns:
         If aggregate=False: List of intraday bars with timestamp, OHLCV
@@ -679,12 +693,17 @@ def get_intraday_bars(
     if date is None:
         date = dt_module.now(ZoneInfo("America/New_York")).date().isoformat()
 
-    limit = min(limit, 500)
+    if not 1 <= limit <= 500:
+        raise ValueError(f"limit must be between 1 and 500, got {limit}")
+    if bar_size_minutes not in {1, 5, 15, 30, 60}:
+        raise ValueError("bar_size_minutes must be one of 1, 5, 15, 30, or 60")
 
     # Build ticker list
     ticker_list: list[str] = []
     if tickers:
-        ticker_list = [t.upper() for t in tickers[:20]]  # Cap at 20
+        if len(tickers) > 20:
+            raise ValueError(f"too many tickers: {len(tickers)} (max 20)")
+        ticker_list = [t.upper() for t in tickers]
     elif ticker:
         ticker_list = [ticker.upper()]
     else:
@@ -694,6 +713,7 @@ def get_intraday_bars(
         "tickers": ticker_list,
         "date": date,
         "limit": limit,
+        "bar_size_minutes": bar_size_minutes,
     }
 
     if aggregate:
@@ -710,6 +730,7 @@ def get_intraday_bars(
                 COUNT(*) as bar_count
             FROM stock_prices_intraday
             WHERE ticker = ANY(%(tickers)s)
+              AND bar_size_minutes = %(bar_size_minutes)s
               AND (timestamp AT TIME ZONE 'America/New_York')::date = %(date)s
               AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
               AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
@@ -733,12 +754,14 @@ def get_intraday_bars(
                     low,
                     close,
                     volume,
+                    bar_size_minutes,
                     ROW_NUMBER() OVER (
                         PARTITION BY ticker
                         ORDER BY timestamp DESC
                     ) AS rn
                 FROM stock_prices_intraday
                 WHERE ticker = ANY(%(tickers)s)
+                  AND bar_size_minutes = %(bar_size_minutes)s
                   AND (timestamp AT TIME ZONE 'America/New_York')::date = %(date)s
                   AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30:00'
                   AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00:00'
@@ -750,7 +773,8 @@ def get_intraday_bars(
                 high,
                 low,
                 close,
-                volume
+                volume,
+                bar_size_minutes
             FROM ranked_bars
             WHERE rn <= %(limit)s
             ORDER BY ticker, timestamp ASC

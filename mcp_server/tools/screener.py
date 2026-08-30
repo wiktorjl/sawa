@@ -12,7 +12,7 @@ from psycopg import sql
 
 from ..database import execute_query
 from ._dates import get_eod_date_refs, get_price_date_refs
-from ._index_filter import build_index_filter
+from ._index_filter import IndexCode, build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +305,8 @@ def screen_stocks(
         - volume, dollar_volume, volume_ratio
         - Key technical indicators based on filters used
     """
-    limit = min(limit, 500)
+    if not 1 <= limit <= 500:
+        raise ValueError(f"limit must be between 1 and 500, got {limit}")
 
     # Reference dates are computed up front and passed as bind parameters so
     # the planner can push them into stock_prices_live's UNION ALL arms;
@@ -348,14 +349,18 @@ def screen_stocks(
     for filter_name, bounds in filters.items():
         filter_spec = FILTER_SPECS.get(filter_name)
         if filter_spec is None:
-            logger.warning(f"Unknown filter: {filter_name}, skipping")
-            continue
+            raise ValueError(f"Unknown screener filter: {filter_name}")
 
         if not isinstance(bounds, list) or len(bounds) != 2:
-            logger.warning(f"Invalid bounds for {filter_name}: {bounds}, skipping")
-            continue
+            raise ValueError(
+                f"Filter {filter_name} must be a two-item [minimum, maximum] list"
+            )
 
         min_val, max_val = bounds
+        if min_val is not None and max_val is not None and min_val > max_val:
+            raise ValueError(
+                f"Filter {filter_name} minimum cannot exceed its maximum"
+            )
 
         col_ident = sql.Identifier(filter_spec.alias)
 
@@ -717,7 +722,7 @@ def detect_crossovers(
 def get_52week_extremes(
     extreme: Literal["highs", "lows", "both"] = "both",
     threshold_pct: float = 2.0,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
+    index: IndexCode = "all",
     min_volume: int | None = None,
     since_date: str | None = None,
     include_fundamentals: bool = False,

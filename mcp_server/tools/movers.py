@@ -10,7 +10,7 @@ from psycopg import sql
 
 from ..database import execute_query
 from ._dates import get_eod_date_refs, get_price_date_refs
-from ._index_filter import build_index_filter
+from ._index_filter import IndexCode, build_index_filter
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +318,7 @@ def get_volume_leaders(
 
 def get_market_breadth(
     date: str | None = None,
-    index: Literal["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7", "all"] = "all",
+    index: IndexCode = "all",
 ) -> dict[str, Any]:
     """
     Get market breadth statistics (advancers vs decliners, MA breadth).
