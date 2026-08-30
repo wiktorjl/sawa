@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from sawa.utils import monitored_run, setup_logging
 from sawa.utils.dates import parse_date
+from sawa.utils.symbols import validate_ticker
 
 # Load .env file from current directory or parent directories
 load_dotenv()
@@ -32,24 +33,25 @@ def get_log_dir(args) -> Path | None:
 
 
 def _redact_database_url(db_url: str) -> str:
-    """Return DATABASE_URL with password removed for logs."""
+    """Return only non-secret DATABASE_URL location fields for logs."""
     try:
         parts = urlsplit(db_url)
     except ValueError:
         return "<unparseable DATABASE_URL>"
 
     if not parts.scheme or not parts.netloc:
-        return db_url
+        return "<redacted DATABASE_URL>"
 
-    host = parts.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    port = f":{parts.port}" if parts.port else ""
-    auth = f"{parts.username}:***@" if parts.username else ""
+    try:
+        host = parts.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<unparseable DATABASE_URL>"
 
-    return urlunsplit(
-        (parts.scheme, f"{auth}{host}{port}", parts.path, parts.query, parts.fragment)
-    )
+    # User info, query parameters, and fragments can all contain credentials.
+    return urlunsplit((parts.scheme, f"{host}{port}", parts.path, "", ""))
 
 
 def _log_schema_only_warning(logger, db_url: str) -> None:
@@ -86,8 +88,15 @@ def cmd_coldstart(args) -> int:
     load_only = args.load_only
     skip_downloads = args.skip_downloads
 
-    # Schema-only mode rebuilds the schema, so it needs to drop existing tables
-    # If user wants to preserve data, they should not use --schema-only at all
+    if load_only and args.drop_existing:
+        logger.error("❌ ERROR: --load-only and --drop-existing are incompatible")
+        logger.error("   --load-only never changes the database schema")
+        return 1
+    if sum(bool(value) for value in (drop_only, schema_only, load_only)) > 1:
+        logger.error("❌ ERROR: choose only one of --drop-only, --schema-only, --load-only")
+        return 1
+
+    # Schema-only mode rebuilds the schema, so it needs to drop existing tables.
     if schema_only and args.no_drop:
         logger.error("❌ ERROR: --schema-only and --no-drop are incompatible")
         logger.error("   --schema-only rebuilds the schema by dropping and recreating tables")
@@ -122,7 +131,7 @@ def cmd_coldstart(args) -> int:
                 output_dir=Path(args.output_dir),
                 years=args.years,
                 symbols_file=args.symbols_file,
-                drop_tables=not args.no_drop,
+                drop_tables=args.drop_existing or schema_only,
                 drop_only=drop_only,
                 confirm_drop=args.confirm_drop,
                 schema_only=schema_only,
@@ -170,6 +179,7 @@ def cmd_daily(args) -> int:
                 skip_ta=args.skip_ta or args.news_only,
                 skip_prices=args.news_only,
                 skip_market_internals=args.skip_market_internals or args.news_only,
+                news_only=args.news_only,
                 dry_run=args.dry_run,
                 logger=logger,
             )
@@ -548,13 +558,14 @@ def cmd_index_show(args) -> int:
 
 
 def cmd_index_update(args) -> int:
-    """Update index constituents from Wikipedia."""
+    """Update index constituents from configured current sources."""
     import psycopg
 
     from sawa.coldstart import populate_index_constituents
 
     logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="index_update")
     db_url = args.database_url or os.environ.get("DATABASE_URL")
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
 
     if not db_url:
         logger.error("DATABASE_URL required (env var or --database-url)")
@@ -562,12 +573,18 @@ def cmd_index_update(args) -> int:
 
     try:
         with psycopg.connect(db_url) as conn:
-            stats = populate_index_constituents(conn, logger)
+            stats = populate_index_constituents(conn, logger, api_key=api_key)
 
         print("\nIndex update complete:")
         for code, count in stats.items():
             print(f"  {code}: {count} constituents")
 
+        if stats.failures:
+            logger.error(
+                "Index refresh failed for: %s",
+                ", ".join(sorted(stats.failures)),
+            )
+            return 1
         return 0
     except Exception as e:
         logger.error(f"Failed to update indices: {e}")
@@ -629,7 +646,11 @@ def cmd_corporate_actions(args) -> int:
     start_date = parse_date(args.start_date) if args.start_date else None
 
     # Parse ticker(s)
-    tickers = [args.ticker.upper()] if args.ticker else None
+    try:
+        tickers = [validate_ticker(args.ticker)] if args.ticker else None
+    except ValueError as e:
+        logger.error("Invalid ticker: %s", e)
+        return 1
 
     # Determine what to include
     # --splits-only and --dividends-only exclude earnings
@@ -703,11 +724,15 @@ def cmd_adjust_splits(args) -> int:
                     f"Recomputing technical indicators for {len(adjusted)} "
                     f"adjusted ticker(s)..."
                 )
-                stats["ta_recompute"] = recompute_ta_for_tickers(
+                ta_stats = recompute_ta_for_tickers(
                     database_url=db_url,
                     tickers=adjusted,
                     log=logger,
                 )
+                stats["ta_recompute"] = ta_stats
+                if not ta_stats.get("success"):
+                    stats["success"] = False
+                    stats["error"] = "technical indicator recompute failed"
         return 0 if ctx["stats"].get("success") else 1
     except Exception:
         if args.verbose:
@@ -776,12 +801,12 @@ def cmd_logs(args) -> int:
         return 0
 
     if action == "tail":
-        entry = latest_run(run_type=args.type)
-        if entry is None:
+        tail_entry = latest_run(run_type=args.type)
+        if tail_entry is None:
             print("No matching log files.")
             return 1
-        print(f"# {entry.filename} ({entry.when:%Y-%m-%d %H:%M:%S})")
-        for line in tail_lines(entry.path, args.lines):
+        print(f"# {tail_entry.filename} ({tail_entry.when:%Y-%m-%d %H:%M:%S})")
+        for line in tail_lines(tail_entry.path, args.lines):
             print(line, end="" if line.endswith("\n") else "\n")
         return 0
 
@@ -1018,7 +1043,10 @@ Environment Variables:
     cold_parser = subparsers.add_parser(
         "coldstart",
         help="Full database setup from scratch",
-        description="Drop database, create schema, download all historical data.",
+        description=(
+            "Create/upgrade schema and download historical data. Existing data "
+            "is preserved unless a destructive mode is explicitly requested."
+        ),
     )
     cold_parser.add_argument("--years", type=int, default=5, help="Years of history (default: 5)")
     cold_parser.add_argument("--schema-dir", default="sqlschema", help="SQL schema directory")
@@ -1026,10 +1054,22 @@ Environment Variables:
     cold_parser.add_argument(
         "--symbols-file", type=Path, help="File with symbols to use (one per line)"
     )
-    cold_parser.add_argument(
+    cold_drop_group = cold_parser.add_mutually_exclusive_group()
+    cold_drop_group.add_argument(
+        "--drop-existing",
+        action="store_true",
+        help=(
+            "DANGER: drop all existing public tables before setup; requires "
+            "confirmation when tables exist"
+        ),
+    )
+    cold_drop_group.add_argument(
         "--no-drop",
         action="store_true",
-        help="Don't drop existing tables (RECOMMENDED for schema updates)",
+        help=(
+            "Preserve existing tables/data (the default; retained for "
+            "backward-compatible scripts)"
+        ),
     )
     cold_parser.add_argument("--api-key", help="Polygon API key")
     cold_parser.add_argument("--s3-access-key", help="Polygon S3 access key")
@@ -1090,12 +1130,15 @@ Environment Variables:
     )
     daily_parser.add_argument("--api-key", help="Polygon API key")
     daily_parser.add_argument("--database-url", help="PostgreSQL URL")
-    daily_parser.add_argument("--skip-news", action="store_true", help="Skip news update")
+    daily_news_group = daily_parser.add_mutually_exclusive_group()
+    daily_news_group.add_argument(
+        "--skip-news", action="store_true", help="Skip news update"
+    )
     daily_parser.add_argument("--skip-ta", action="store_true", help="Skip technical indicators")
     daily_parser.add_argument(
         "--skip-market-internals", action="store_true", help="Skip market internals (FRED)"
     )
-    daily_parser.add_argument(
+    daily_news_group.add_argument(
         "--news-only", action="store_true", help="Only update news (skip prices and TA)"
     )
     daily_parser.add_argument("--log-dir", help="Directory for log files")
@@ -1294,7 +1337,15 @@ Environment Variables:
     )
     ta_screen_parser.add_argument(
         "--index",
-        choices=["sp500", "nasdaq_listed", "us_active", "nasdaq100", "dow30", "russell1000", "mag7"],
+        choices=[
+            "sp500",
+            "nasdaq_listed",
+            "us_active",
+            "nasdaq100",
+            "dow30",
+            "russell1000",
+            "mag7",
+        ],
         help="Filter by index membership",
     )
     ta_screen_parser.add_argument(
@@ -1335,9 +1386,10 @@ Environment Variables:
 
     index_update_parser = subparsers.add_parser(
         "index-update",
-        help="Update index constituents from Wikipedia",
-        description="Refresh index constituent lists from Wikipedia.",
+        help="Update index constituents from current sources",
+        description="Refresh index constituent lists from configured current sources.",
     )
+    index_update_parser.add_argument("--api-key", help="Polygon API key")
     index_update_parser.add_argument("--database-url", help="PostgreSQL URL")
     index_update_parser.add_argument("--log-dir", help="Directory for log files")
     index_update_parser.add_argument("-v", "--verbose", action="store_true")
@@ -1362,9 +1414,14 @@ Environment Variables:
     )
     corp_parser.add_argument("--start-date", help="Fetch data from this date (default: 1 year ago)")
     corp_parser.add_argument("--ticker", help="Single ticker to fetch (default: all active)")
-    corp_parser.add_argument("--splits-only", action="store_true", help="Only fetch splits")
-    corp_parser.add_argument("--dividends-only", action="store_true", help="Only fetch dividends")
-    corp_parser.add_argument(
+    corp_feed_group = corp_parser.add_mutually_exclusive_group()
+    corp_feed_group.add_argument(
+        "--splits-only", action="store_true", help="Only fetch splits"
+    )
+    corp_feed_group.add_argument(
+        "--dividends-only", action="store_true", help="Only fetch dividends"
+    )
+    corp_feed_group.add_argument(
         "--include-earnings",
         action="store_true",
         help="Include earnings (experimental, Polygon API may not provide data)",
