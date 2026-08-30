@@ -4,12 +4,14 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 
 from sawa.utils.resources import packaged_resource_path, project_root
+from sawa.utils.security import validate_https_origin_url
 
 # Polygon ticker types Sawa tracks across the broad US universe.
 # - CS:   Common Stock
@@ -20,8 +22,17 @@ from sawa.utils.resources import packaged_resource_path, project_root
 #         under the '40 Act but trade like them and matter for macro
 #         exposure tracking).
 NASDAQ_POLYGON_TYPES = ("CS", "ETF", "ADRC", "ETV")
+MAX_PAGINATION_PAGES = 1_000
+MAX_PAGINATION_RESULTS = 1_000_000
 
 TICKER_PATTERN = re.compile(r"^[A-Z]{1,7}(\.[A-Z])?$")
+
+
+def _polygon_pagination_error(message: str) -> Exception:
+    """Build a provider error without introducing a module-import cycle."""
+    from sawa.domain.exceptions import ProviderError
+
+    return ProviderError(message, provider="polygon")
 
 
 def validate_ticker(ticker: str) -> str:
@@ -127,7 +138,10 @@ def _fetch_wikipedia_constituents(
     if not table:
         raise ValueError(f"Could not find {name} constituents table (id={table_id})")
 
-    header_cells = table.find("tr").find_all(["th", "td"])
+    header_row = table.find("tr")
+    if header_row is None:
+        raise ValueError(f"Could not find a header row in the {name} constituents table")
+    header_cells = header_row.find_all(["th", "td"])
     ticker_col = next(
         (i for i, c in enumerate(header_cells)
          if _TICKER_HEADER_PATTERN.match(c.get_text(strip=True))),
@@ -262,19 +276,33 @@ def fetch_nasdaq_active_from_polygon(
             "limit": 1000,
             "apiKey": api_key,
         }
-        url: str | None = base_url
+        url: str | None = validate_https_origin_url(base_url, base_url)
         page = 0
+        result_count = 0
+        seen_urls = {url}
         type_count = 0
         while url:
             page += 1
             resp = requests.get(
                 url,
-                params=params if page == 1 else None,
+                params=params if page == 1 else {"apiKey": api_key},
                 timeout=30,
+                allow_redirects=False,
             )
             resp.raise_for_status()
             data = resp.json()
-            for row in data.get("results", []):
+            results = data.get("results", [])
+            if not isinstance(results, list):
+                raise _polygon_pagination_error(
+                    f"Invalid Polygon results array on page {page}"
+                )
+            if result_count + len(results) > MAX_PAGINATION_RESULTS:
+                raise _polygon_pagination_error(
+                    "Polygon pagination exceeded maximum of "
+                    f"{MAX_PAGINATION_RESULTS} results"
+                )
+            result_count += len(results)
+            for row in results:
                 ticker = row.get("ticker")
                 if ticker:
                     seen.add(ticker.upper())
@@ -282,8 +310,20 @@ def fetch_nasdaq_active_from_polygon(
             next_url = data.get("next_url")
             if not next_url:
                 break
-            sep = "&" if "?" in next_url else "?"
-            url = f"{next_url}{sep}apiKey={api_key}"
+            if not isinstance(next_url, str):
+                raise ValueError("Polygon next_url must be a string")
+            validated_next_url = validate_https_origin_url(base_url, next_url)
+            if validated_next_url in seen_urls:
+                raise _polygon_pagination_error(
+                    f"Repeated Polygon pagination URL after page {page}"
+                )
+            if page >= MAX_PAGINATION_PAGES:
+                raise _polygon_pagination_error(
+                    "Polygon pagination exceeded maximum of "
+                    f"{MAX_PAGINATION_PAGES} pages"
+                )
+            seen_urls.add(validated_next_url)
+            url = validated_next_url
             time.sleep(0.05)
         logger.info(f"  Polygon XNAS type={ticker_type}: {type_count} tickers")
 
@@ -344,20 +384,34 @@ def fetch_us_active_from_polygon(
             "limit": 1000,
             "apiKey": api_key,
         }
-        url: str | None = base_url
+        url: str | None = validate_https_origin_url(base_url, base_url)
         page = 0
+        result_count = 0
+        seen_urls = {url}
         type_count = 0
         type_dropped = 0
         while url:
             page += 1
             resp = requests.get(
                 url,
-                params=params if page == 1 else None,
+                params=params if page == 1 else {"apiKey": api_key},
                 timeout=30,
+                allow_redirects=False,
             )
             resp.raise_for_status()
             data = resp.json()
-            for row in data.get("results", []):
+            results = data.get("results", [])
+            if not isinstance(results, list):
+                raise _polygon_pagination_error(
+                    f"Invalid Polygon results array on page {page}"
+                )
+            if result_count + len(results) > MAX_PAGINATION_RESULTS:
+                raise _polygon_pagination_error(
+                    "Polygon pagination exceeded maximum of "
+                    f"{MAX_PAGINATION_RESULTS} results"
+                )
+            result_count += len(results)
+            for row in results:
                 ticker = row.get("ticker")
                 if not ticker:
                     continue
@@ -370,8 +424,20 @@ def fetch_us_active_from_polygon(
             next_url = data.get("next_url")
             if not next_url:
                 break
-            sep = "&" if "?" in next_url else "?"
-            url = f"{next_url}{sep}apiKey={api_key}"
+            if not isinstance(next_url, str):
+                raise ValueError("Polygon next_url must be a string")
+            validated_next_url = validate_https_origin_url(base_url, next_url)
+            if validated_next_url in seen_urls:
+                raise _polygon_pagination_error(
+                    f"Repeated Polygon pagination URL after page {page}"
+                )
+            if page >= MAX_PAGINATION_PAGES:
+                raise _polygon_pagination_error(
+                    "Polygon pagination exceeded maximum of "
+                    f"{MAX_PAGINATION_PAGES} pages"
+                )
+            seen_urls.add(validated_next_url)
+            url = validated_next_url
             time.sleep(0.05)
         suffix = f", dropped {type_dropped} from XASE" if type_dropped else ""
         logger.info(f"  Polygon type={ticker_type} (any exchange): {type_count} tickers{suffix}")
@@ -381,7 +447,12 @@ def fetch_us_active_from_polygon(
     return symbols
 
 
-def fetch_nasdaq_listed_symbols(logger: logging.Logger) -> list[str]:
+def fetch_nasdaq_listed_symbols(
+    logger: logging.Logger,
+    api_key: str | None = None,
+    *,
+    allow_fallback: bool = True,
+) -> list[str]:
     """
     Load NASDAQ-listed tickers, primary source Polygon REST.
 
@@ -397,13 +468,17 @@ def fetch_nasdaq_listed_symbols(logger: logging.Logger) -> list[str]:
 
     Args:
         logger: Logger instance
+        api_key: Polygon API key. Falls back to ``POLYGON_API_KEY`` when absent.
+        allow_fallback: Whether a failed live request may use the bundled snapshot.
 
     Returns:
         List of ticker symbols
     """
     try:
-        return fetch_nasdaq_active_from_polygon(logger)
+        return fetch_nasdaq_active_from_polygon(logger, api_key=api_key)
     except Exception as e:
+        if not allow_fallback:
+            raise
         logger.warning(
             f"Polygon NASDAQ fetch failed ({e}); falling back to bundled file"
         )
@@ -430,7 +505,7 @@ def fetch_nasdaq_listed_symbols(logger: logging.Logger) -> list[str]:
     return symbols
 
 
-_INDEX_FETCHERS: dict[str, "callable[[logging.Logger], list[str]]"] = {
+_INDEX_FETCHERS: dict[str, Callable[[logging.Logger], list[str]]] = {
     "sp500": fetch_sp500_symbols,
     "nasdaq_listed": fetch_nasdaq_listed_symbols,
     "us_active": fetch_us_active_from_polygon,

@@ -31,6 +31,7 @@ from sawa.api.fred import FredClient  # noqa: E402
 from sawa.database.load import load_market_internals  # noqa: E402
 from sawa.utils import alert_missing_api_key, setup_logging  # noqa: E402
 from sawa.utils.dates import DATE_FORMAT  # noqa: E402
+from sawa.utils.security import redact_sensitive_text  # noqa: E402
 
 
 def main() -> int:
@@ -116,10 +117,20 @@ def main() -> int:
     # Fetch data from FRED
     fred_client = FredClient(fred_api_key, logger)
     try:
-        rows = fred_client.get_market_internals(start_date, end_date)
+        result = fred_client.get_market_internals(start_date, end_date)
     finally:
         fred_client.close()
 
+    if result.failures:
+        failed = ", ".join(
+            f"{failure.field} ({failure.error_type})" for failure in result.failures
+        )
+        logger.warning(f"FRED series failures: {failed}")
+    if result.all_series_failed:
+        logger.error("All FRED market-internals series failed")
+        return 1
+
+    rows = result.rows
     if not rows:
         logger.warning("No data returned from FRED")
         return 1
@@ -139,8 +150,15 @@ def main() -> int:
         return 0
 
     # Load into database
-    with psycopg.connect(database_url) as conn:
-        loaded = load_market_internals(conn, rows, logger)
+    try:
+        with psycopg.connect(database_url) as conn:
+            loaded = load_market_internals(conn, rows, logger)
+    except Exception as exc:
+        safe_error = redact_sensitive_text(exc)
+        logger.error(
+            f"Market internals persistence failed: {type(exc).__name__}: {safe_error}"
+        )
+        return 1
 
     logger.info(f"\nBackfill complete: {loaded} rows loaded into market_internals")
     return 0
