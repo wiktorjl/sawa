@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sawa.mcp_query_insights import (
@@ -9,6 +10,8 @@ from sawa.mcp_query_insights import (
     load_cached_query_warning,
     normalize_sql,
 )
+
+NOW = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
 
 
 def _append(path: Path, record: dict) -> None:
@@ -43,6 +46,7 @@ def test_query_insights_incrementally_analyzes_structured_log(tmp_path: Path) ->
         log_dir=tmp_path,
         window_days=30,
         warning_threshold=2,
+        now=NOW,
     )
 
     summary = cache["summary"]
@@ -53,7 +57,9 @@ def test_query_insights_incrementally_analyzes_structured_log(tmp_path: Path) ->
     assert summary["top_filter_columns"][0] == {"value": "ticker", "count": 2}
     assert summary["top_query_patterns"][0]["count"] == 2
 
-    unchanged = analyze_query_log(log_dir=tmp_path, window_days=30, warning_threshold=2)
+    unchanged = analyze_query_log(
+        log_dir=tmp_path, window_days=30, warning_threshold=2, now=NOW
+    )
     assert unchanged["summary"]["new_records"] == 0
     assert unchanged["summary"]["total_queries"] == 2
 
@@ -68,7 +74,9 @@ def test_query_insights_incrementally_analyzes_structured_log(tmp_path: Path) ->
         },
     )
 
-    updated = analyze_query_log(log_dir=tmp_path, window_days=30, warning_threshold=2)
+    updated = analyze_query_log(
+        log_dir=tmp_path, window_days=30, warning_threshold=2, now=NOW
+    )
     assert updated["summary"]["new_records"] == 1
     assert updated["summary"]["total_queries"] == 3
     assert updated["summary"]["failed_queries"] == 1
@@ -85,7 +93,7 @@ def test_cached_query_warning_reads_summary_without_log_scan(tmp_path: Path) -> 
         },
     )
 
-    analyze_query_log(log_dir=tmp_path, window_days=30, warning_threshold=1)
+    analyze_query_log(log_dir=tmp_path, window_days=30, warning_threshold=1, now=NOW)
     warning = load_cached_query_warning(tmp_path)
 
     assert warning is not None
@@ -94,13 +102,19 @@ def test_cached_query_warning_reads_summary_without_log_scan(tmp_path: Path) -> 
 
 def test_classify_query_separates_forensic_from_analytical() -> None:
     # Genuine agent-style lookups.
-    assert classify_query("SELECT ticker, close FROM stock_prices WHERE ticker = 'AAPL'") == "analytical"
+    assert (
+        classify_query("SELECT ticker, close FROM stock_prices WHERE ticker = 'AAPL'")
+        == "analytical"
+    )
     assert classify_query("SELECT * FROM companies WHERE active = true") == "analytical"
     # Introspection / data-quality audit / EXPLAIN / comments -> forensic.
     assert classify_query("SELECT * FROM information_schema.columns") == "forensic"
     assert classify_query("SELECT pg_get_viewdef('stock_prices_live'::regclass)") == "forensic"
     assert classify_query("EXPLAIN ANALYZE SELECT 1") == "forensic"
-    assert classify_query("SELECT COUNT(*) FILTER (WHERE vix IS NULL) FROM market_internals") == "forensic"
+    assert (
+        classify_query("SELECT COUNT(*) FILTER (WHERE vix IS NULL) FROM market_internals")
+        == "forensic"
+    )
     assert classify_query("-- audit\nSELECT COUNT(*) FROM stock_prices") == "forensic"
     # Explicit source override forces forensic even for an analytical-looking query.
     assert classify_query("SELECT close FROM stock_prices", source="review") == "forensic"
@@ -128,7 +142,9 @@ def test_forensic_queries_excluded_from_tool_gap_signal(tmp_path: Path) -> None:
         "success": True,
     })
 
-    summary = analyze_query_log(log_dir=tmp_path, window_days=30, warning_threshold=2)["summary"]
+    summary = analyze_query_log(
+        log_dir=tmp_path, window_days=30, warning_threshold=2, now=NOW
+    )["summary"]
 
     assert summary["total_queries"] == 3
     assert summary["category_counts"] == {"analytical": 1, "forensic": 2}
@@ -146,4 +162,3 @@ def test_sql_fingerprint_normalizes_literals() -> None:
 
     assert normalize_sql(first) == normalize_sql(second)
     assert fingerprint_sql(first) == fingerprint_sql(second)
-

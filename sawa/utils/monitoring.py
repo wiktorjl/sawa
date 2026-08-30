@@ -19,14 +19,19 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 from sawa.utils.notify import (
+    MAX_NOTIFICATION_BODY_BYTES,
+    MAX_NOTIFICATION_TITLE_BYTES,
     NotificationLevel,
     Notifier,
     get_notifier,
+    sanitize_notification_text,
 )
+from sawa.utils.security import redact_sensitive_text
 
 
 def _success_enabled() -> bool:
@@ -90,9 +95,12 @@ def monitored_run(
         yield ctx
     except BaseException as exc:
         elapsed = time.monotonic() - start
-        logger.exception("[%s] failed after %.1fs", name, elapsed)
+        safe_error = f"{type(exc).__name__}: {redact_sensitive_text(exc)}"
+        # Do not attach the original traceback: logging formats exception text
+        # after filters run, which could reintroduce a credential from str(exc).
+        logger.error("[%s] failed after %.1fs: %s", name, elapsed, safe_error)
         body_parts = [
-            f"{type(exc).__name__}: {exc}",
+            safe_error,
             "",
             f"Ran {elapsed:.1f}s before failure.",
         ]
@@ -100,19 +108,51 @@ def monitored_run(
         if partial and partial != "(no stats)":
             body_parts.extend(["", "Partial stats:", partial])
         notif.send(
-            title=f"Sawa: {name} FAILED",
-            body="\n".join(body_parts),
+            title=sanitize_notification_text(
+                f"Sawa: {name} FAILED",
+                MAX_NOTIFICATION_TITLE_BYTES,
+                allow_newlines=False,
+            ),
+            body=sanitize_notification_text(
+                "\n".join(body_parts), MAX_NOTIFICATION_BODY_BYTES
+            ),
             level=NotificationLevel.ERROR,
             tags=["rotating_light", name],
         )
         raise
 
     elapsed = time.monotonic() - start
+    stats = ctx.get("stats") or {}
+    if stats.get("success") is False:
+        logger.error("[%s] returned unsuccessful status after %.1fs", name, elapsed)
+        notif.send(
+            title=sanitize_notification_text(
+                f"Sawa: {name} FAILED",
+                MAX_NOTIFICATION_TITLE_BYTES,
+                allow_newlines=False,
+            ),
+            body=sanitize_notification_text(
+                f"Run returned an unsuccessful status after {elapsed:.1f}s.\n\n"
+                f"{_format_stats(stats)}",
+                MAX_NOTIFICATION_BODY_BYTES,
+            ),
+            level=NotificationLevel.ERROR,
+            tags=["rotating_light", name],
+        )
+        return
+
     logger.info("[%s] complete in %.1fs", name, elapsed)
     if notify_success:
         notif.send(
-            title=f"Sawa: {name} complete",
-            body=f"Ran {elapsed:.1f}s.\n\n{_format_stats(ctx.get('stats') or {})}",
+            title=sanitize_notification_text(
+                f"Sawa: {name} complete",
+                MAX_NOTIFICATION_TITLE_BYTES,
+                allow_newlines=False,
+            ),
+            body=sanitize_notification_text(
+                f"Ran {elapsed:.1f}s.\n\n{_format_stats(ctx.get('stats') or {})}",
+                MAX_NOTIFICATION_BODY_BYTES,
+            ),
             level=NotificationLevel.INFO,
             tags=["white_check_mark", name],
         )

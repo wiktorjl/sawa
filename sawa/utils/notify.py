@@ -18,17 +18,62 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from enum import Enum
 from typing import Protocol
 
 import httpx
 
+from sawa.utils.security import redact_sensitive_text
+
 # Delivery attempts for a single notification before giving up. A transient
 # backend blip should not lose an alert; the dead-man's-switch heartbeat in the
 # scheduler covers a fully unreachable backend.
 _SEND_ATTEMPTS = 3
 _SEND_RETRY_BACKOFF = 1.0
+MAX_NOTIFICATION_TITLE_BYTES = 256
+MAX_NOTIFICATION_BODY_BYTES = 4096
+MAX_NOTIFICATION_TAG_BYTES = 256
+_MAX_NOTIFICATION_TAGS = 8
+_SAFE_TAG_RE = re.compile(r"^[A-Za-z0-9_+.-]{1,32}$")
+
+
+def sanitize_notification_text(
+    value: object, max_bytes: int, *, allow_newlines: bool = True
+) -> str:
+    """Redact credentials and enforce an exact UTF-8 notification bound."""
+    if max_bytes < 1:
+        return ""
+    safe = redact_sensitive_text(value)
+    if not allow_newlines:
+        safe = re.sub(r"[\x00-\x1f\x7f]+", " ", safe)
+    encoded = safe.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return safe
+
+    suffix = "…".encode()
+    if max_bytes < len(suffix):
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    prefix = encoded[: max_bytes - len(suffix)].decode("utf-8", errors="ignore")
+    return prefix + suffix.decode()
+
+
+def sanitize_notification_tags(tags: list[str] | None) -> list[str]:
+    """Keep a small set of canonical ntfy tag names; omit unsafe values."""
+    safe_tags: list[str] = []
+    total_bytes = 0
+    for value in (tags or [])[:_MAX_NOTIFICATION_TAGS]:
+        safe = redact_sensitive_text(value).strip()
+        encoded = safe.encode()
+        separator_bytes = 1 if safe_tags else 0
+        if not _SAFE_TAG_RE.fullmatch(safe):
+            continue
+        if total_bytes + separator_bytes + len(encoded) > MAX_NOTIFICATION_TAG_BYTES:
+            break
+        safe_tags.append(safe)
+        total_bytes += separator_bytes + len(encoded)
+    return safe_tags
 
 
 class NotificationLevel(str, Enum):
@@ -110,12 +155,16 @@ class NtfyNotifier:
         level: NotificationLevel = NotificationLevel.INFO,
         tags: list[str] | None = None,
     ) -> bool:
+        title = sanitize_notification_text(
+            title, MAX_NOTIFICATION_TITLE_BYTES, allow_newlines=False
+        )
+        body = sanitize_notification_text(body, MAX_NOTIFICATION_BODY_BYTES)
         headers = {
             "Title": title,
             "Priority": self._PRIORITY[level],
         }
-        if tags:
-            headers["Tags"] = ",".join(tags)
+        if safe_tags := sanitize_notification_tags(tags):
+            headers["Tags"] = ",".join(safe_tags)
 
         last_exc: Exception | None = None
         for attempt in range(1, _SEND_ATTEMPTS + 1):
@@ -141,9 +190,18 @@ class NtfyNotifier:
             "NTFY notification failed after %d attempts (%s): %s",
             _SEND_ATTEMPTS,
             title,
-            last_exc,
+            _safe_notification_error(last_exc),
         )
         return False
+
+
+def _safe_notification_error(exc: Exception | None) -> str:
+    """Describe a publish failure without logging the capability-bearing URL."""
+    if exc is None:
+        return "unknown notification error"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__} (HTTP {exc.response.status_code})"
+    return type(exc).__name__
 
 
 def get_notifier(logger: logging.Logger | None = None) -> Notifier:

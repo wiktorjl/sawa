@@ -43,6 +43,22 @@ class TestProviderError:
         assert error.original_error == original
         assert "caused by" in str(error)
 
+    def test_redacts_credentials_from_original_error(self) -> None:
+        original = ValueError("GET https://example.test/?apiKey=secret-token failed")
+        error = ProviderError("API failed", "polygon.io", original)
+
+        assert "secret-token" not in str(error)
+        assert "apiKey=<redacted>" in str(error)
+
+    def test_redacts_credentials_from_message(self) -> None:
+        error = ProviderError(
+            "GET https://example.test/?access_token=message-secret failed",
+            "polygon.io",
+        )
+
+        assert "message-secret" not in str(error)
+        assert "access_token=<redacted>" in str(error)
+
     def test_inherits_repository_error(self) -> None:
         """Test that ProviderError inherits from RepositoryError."""
         error = ProviderError("test", "provider")

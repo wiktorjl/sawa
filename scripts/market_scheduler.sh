@@ -12,6 +12,7 @@
 # State directory: ~/.sawa/scheduler/
 
 set -euo pipefail
+umask 077
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -23,16 +24,13 @@ LOG_FILE="$STATE_DIR/scheduler.log"
 DAILY_WAIT_HOURS=1  # hours after close before running daily
 INTRADAY_STOP_TIMEOUT=60  # seconds to wait for graceful shutdown
 
-# ── State directory setup ────────────────────────────────────────────────────
-
-mkdir -p "$STATE_DIR"
-
 # ── Lock (prevent overlapping runs) ──────────────────────────────────────────
 
 LOCK_FILE="$STATE_DIR/scheduler.lock"
 
 acquire_lock() {
     exec 9>"$LOCK_FILE"
+    chmod 600 "$LOCK_FILE"
     if ! flock -n 9; then
         echo "[$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S ET')] Another scheduler is already running, skipping" >&2
         exit 0
@@ -41,7 +39,26 @@ acquire_lock() {
     echo $$ >&9
 }
 
-acquire_lock
+initialize_scheduler() {
+    if [ -L "$STATE_DIR" ]; then
+        echo "Refusing symlinked scheduler state directory: $STATE_DIR" >&2
+        return 1
+    fi
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+    if find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type l -print -quit | grep -q .; then
+        echo "Refusing scheduler state directory containing symlinks: $STATE_DIR" >&2
+        return 1
+    fi
+    touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
+    acquire_lock
+
+    # Trim log to last 5000 lines periodically.
+    if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 10000 ]; then
+        tail -n 5000 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+    fi
+}
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -52,11 +69,6 @@ log() {
     echo "$msg" >> "$LOG_FILE"
     echo "$msg" >&2
 }
-
-# Trim log to last 5000 lines periodically
-if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 10000 ]; then
-    tail -n 5000 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
-fi
 
 # ── Notifications ────────────────────────────────────────────────────────────
 #
@@ -82,14 +94,14 @@ notify() {
 
 run_doctor() {
     local job="$1"
-    local output exit_code=0
+    local exit_code=0
 
     log "Starting sawa doctor --job $job..."
-    output=$(sawa doctor --job "$job" --log-dir "$PROJECT_DIR/logs" 2>&1) || exit_code=$?
+    sawa doctor --job "$job" --log-dir "$PROJECT_DIR/logs" \
+        >> "$LOG_FILE" 2>&1 || exit_code=$?
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa doctor --job $job failed (exit $exit_code)"
-        log "$output"
         notify "Sawa Doctor FAILED" "doctor --job $job exited with code $exit_code" error
         return 1
     fi
@@ -107,8 +119,54 @@ run_doctor() {
 heartbeat() {
     local url="$1" suffix="${2:-}"  # suffix: "" on success, "/fail" on failure
     [ -z "$url" ] && return 0
-    if ! curl -fsS --max-time 10 "${url}${suffix}" >/dev/null 2>&1; then
-        log "WARN: heartbeat ping failed (${url}${suffix})"
+    # The capability URL is passed only in the child's environment. Putting it
+    # in curl argv exposes the token to `ps` for the duration of the request.
+    if ! SAWA_HEARTBEAT_REQUEST_URL="$url" \
+        SAWA_HEARTBEAT_REQUEST_SUFFIX="$suffix" \
+        python - >/dev/null 2>&1 <<'PY'
+import os
+import signal
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class NoRedirect(HTTPRedirectHandler):
+    """Keep a validated HTTPS capability URL from redirecting elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def deadline_expired(_signum, _frame):
+    raise TimeoutError("heartbeat request exceeded overall deadline")
+
+
+raw_url = os.environ["SAWA_HEARTBEAT_REQUEST_URL"]
+suffix = os.environ.get("SAWA_HEARTBEAT_REQUEST_SUFFIX", "")
+if suffix not in {"", "/fail"}:
+    raise SystemExit("invalid heartbeat suffix")
+parts = urlsplit(raw_url)
+if parts.scheme != "https" or not parts.netloc:
+    raise SystemExit("heartbeat URL must use HTTPS")
+if parts.username is not None or parts.password is not None:
+    raise SystemExit("heartbeat URL must not contain userinfo")
+if suffix:
+    path = parts.path.rstrip("/") + suffix
+    request_url = urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+else:
+    request_url = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+request = Request(request_url, method="GET")
+signal.signal(signal.SIGALRM, deadline_expired)
+signal.setitimer(signal.ITIMER_REAL, 10)
+try:
+    with build_opener(NoRedirect).open(request, timeout=10) as response:
+        response.read(1)
+finally:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+PY
+    then
+        # Heartbeat URLs commonly contain an embedded secret UUID/token.
+        log "WARN: heartbeat ping failed"
     fi
 }
 
@@ -117,18 +175,73 @@ heartbeat() {
 setup_env() {
     cd "$PROJECT_DIR"
 
-    # Load .env
-    if [ -f .env ]; then
-        set -a
-        # shellcheck disable=SC1091
-        source .env
-        set +a
-    fi
-
-    # Activate virtualenv
+    # Activate the virtualenv before parsing .env so python-dotenv is available.
     if [ -f .venv/bin/activate ]; then
         # shellcheck disable=SC1091
         source .venv/bin/activate
+    fi
+
+    # Parse .env as data. Never `source` it: dotenv values are not trusted shell
+    # syntax, and sourcing turns a writable configuration file into code.
+    if [ -f .env ]; then
+        if [ -L .env ]; then
+            log "ERROR: refusing symlinked .env"
+            return 1
+        fi
+        local dotenv_exports
+        if ! dotenv_exports=$(python - "$PROJECT_DIR/.env" <<'PY'
+import os
+import re
+import shlex
+import sys
+
+from dotenv import dotenv_values
+
+path = sys.argv[1]
+allowed = {
+    "CACHE_ENABLED",
+    "CACHE_TTL_SECONDS",
+    "DATABASE_URL",
+    "DEFAULT_COMPANY_PROVIDER",
+    "DEFAULT_ECONOMY_PROVIDER",
+    "DEFAULT_FUNDAMENTAL_PROVIDER",
+    "DEFAULT_PRICE_PROVIDER",
+    "DEFAULT_RATIOS_PROVIDER",
+    "FRED_API_KEY",
+    "INTRADAY_RETENTION_DAYS",
+    "MASSIVE_API_KEY",
+    "NTFY_TOPIC",
+    "PGDATABASE",
+    "PGHOST",
+    "PGPASSWORD",
+    "PGPORT",
+    "PGUSER",
+    "POLYGON_API_KEY",
+    "POLYGON_S3_ACCESS_KEY",
+    "POLYGON_S3_SECRET_KEY",
+    "SAWA_HEARTBEAT_URL",
+    "SAWA_NOTIFIER",
+    "SAWA_WEEKLY_HEARTBEAT_URL",
+}
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, encoding="utf-8") as stream:
+    values = dotenv_values(stream=stream)
+for key, value in values.items():
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        raise SystemExit(f"invalid environment variable name: {key!r}")
+    if key not in allowed:
+        raise SystemExit(f"environment variable is not allowed in scheduler .env: {key}")
+    if value is not None:
+        print(f"export {key}={shlex.quote(value)}")
+PY
+        ); then
+            log "ERROR: could not safely parse .env"
+            return 1
+        fi
+        eval "$dotenv_exports"
+        unset dotenv_exports
     fi
 
     # The scheduler emits its own success summaries (richer than Python's
@@ -145,12 +258,53 @@ check_market_status() {
     # Try Polygon.io market status API (handles holidays, early closes)
     log "Checking market status via Polygon.io API..."
     local response
-    response=$(curl -s --max-time 5 \
-        "https://api.polygon.io/v1/marketstatus/now?apiKey=$POLYGON_API_KEY" 2>/dev/null) || true
+    if [ -z "${POLYGON_API_KEY:-}" ]; then
+        log "WARN: POLYGON_API_KEY is unavailable for market-status check"
+        response=""
+    else
+        # Read the key from the child environment, not argv. Cap the body before
+        # it enters a shell variable so a broken endpoint cannot exhaust memory.
+        response=$(SAWA_MARKET_STATUS_API_KEY="$POLYGON_API_KEY" \
+            python - 2>/dev/null <<'PY'
+import os
+import signal
+import sys
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+MAX_RESPONSE_BYTES = 64 * 1024
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def deadline_expired(_signum, _frame):
+    raise TimeoutError("market-status request exceeded overall deadline")
+
+
+request = Request(
+    "https://api.polygon.io/v1/marketstatus/now",
+    headers={"Authorization": f"Bearer {os.environ['SAWA_MARKET_STATUS_API_KEY']}"},
+    method="GET",
+)
+signal.signal(signal.SIGALRM, deadline_expired)
+signal.setitimer(signal.ITIMER_REAL, 5)
+try:
+    with build_opener(NoRedirect).open(request, timeout=5) as response:
+        body = response.read(MAX_RESPONSE_BYTES + 1)
+finally:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+if len(body) > MAX_RESPONSE_BYTES:
+    raise SystemExit("market-status response exceeded 64 KiB")
+sys.stdout.buffer.write(body)
+PY
+        ) || true
+    fi
 
     if [ -n "$response" ]; then
         local nyse_status
-        nyse_status=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['exchanges']['nyse'])" 2>/dev/null) || true
+        nyse_status=$(printf '%s' "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['exchanges']['nyse'])" 2>/dev/null) || true
 
         if [ "$nyse_status" = "open" ]; then
             log "Polygon API says NYSE: open"
@@ -188,15 +342,62 @@ check_market_status() {
 
 # ── Intraday process management ─────────────────────────────────────────────
 
+process_start_token() {
+    local pid="$1" stat_line stat_tail
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [ -r "/proc/$pid/stat" ] || return 1
+    IFS= read -r stat_line < "/proc/$pid/stat" || return 1
+    # /proc/PID/stat field 2 is parenthesized and may contain spaces. Strip
+    # through its final ") "; field 22 (starttime) is then positional field 20.
+    stat_tail=${stat_line##*) }
+    # Intentional field splitting of the kernel-owned stat record.
+    # shellcheck disable=SC2086
+    set -- $stat_tail
+    [ "$#" -ge 20 ] || return 1
+    [[ "${20}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${20}"
+}
+
+intraday_command_matches() {
+    local pid="$1" previous="" argument
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    while IFS= read -r -d '' argument; do
+        if [ "${previous##*/}" = "sawa" ] && [ "$argument" = "intraday" ]; then
+            return 0
+        fi
+        previous="$argument"
+    done < "/proc/$pid/cmdline"
+    return 1
+}
+
+intraday_identity_matches() {
+    local pid="$1" expected_token="$2" actual_token
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$expected_token" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    actual_token=$(process_start_token "$pid") || return 1
+    [ "$actual_token" = "$expected_token" ] || return 1
+    intraday_command_matches "$pid"
+}
+
+read_intraday_identity() {
+    local pid_file="$1" extra=""
+    INTRADAY_PID=""
+    INTRADAY_START_TOKEN=""
+    IFS=' ' read -r INTRADAY_PID INTRADAY_START_TOKEN extra < "$pid_file" || return 1
+    [ -z "$extra" ] || return 1
+    [[ "$INTRADAY_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$INTRADAY_START_TOKEN" =~ ^[0-9]+$ ]] || return 1
+}
+
 is_intraday_running() {
     local pid_file="$STATE_DIR/intraday.pid"
     if [ -f "$pid_file" ]; then
-        local pid
-        pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
+        if read_intraday_identity "$pid_file" \
+                && intraday_identity_matches "$INTRADAY_PID" "$INTRADAY_START_TOKEN"; then
             return 0
         else
-            # Stale PID file
+            log "WARN: discarding invalid/stale intraday process identity"
             rm -f "$pid_file"
         fi
     fi
@@ -212,7 +413,24 @@ start_intraday() {
     # unrotated duplicate that fills the disk (incident 2026-06-04).
     sawa intraday --log-dir "$PROJECT_DIR/logs" >/dev/null 2>&1 9>&- &
     local pid=$!
-    echo "$pid" > "$STATE_DIR/intraday.pid"
+    local start_token="" identity_ready=false
+    for _attempt in {1..20}; do
+        if start_token=$(process_start_token "$pid") \
+                && intraday_command_matches "$pid"; then
+            identity_ready=true
+            break
+        fi
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    if [ "$identity_ready" != true ]; then
+        log "ERROR: could not verify newly started intraday process"
+        kill -INT "$pid" 2>/dev/null || true
+        return 1
+    fi
+    printf '%s %s\n' "$pid" "$start_token" > "$STATE_DIR/intraday.pid.tmp"
+    chmod 600 "$STATE_DIR/intraday.pid.tmp"
+    mv "$STATE_DIR/intraday.pid.tmp" "$STATE_DIR/intraday.pid"
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/intraday_start_time"
 
     local start_time
@@ -227,8 +445,14 @@ stop_intraday() {
         return
     fi
 
-    local pid
-    pid=$(cat "$pid_file")
+    if ! read_intraday_identity "$pid_file" \
+            || ! intraday_identity_matches "$INTRADAY_PID" "$INTRADAY_START_TOKEN"; then
+        log "WARN: refusing to signal invalid/stale intraday process identity"
+        rm -f "$pid_file"
+        return
+    fi
+
+    local pid="$INTRADAY_PID" start_token="$INTRADAY_START_TOKEN"
     log "Stopping intraday (PID $pid)..."
 
     # Graceful shutdown via SIGINT
@@ -236,7 +460,8 @@ stop_intraday() {
 
     # Wait for process to exit
     local waited=0
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$INTRADAY_STOP_TIMEOUT" ]; do
+    while intraday_identity_matches "$pid" "$start_token" \
+            && [ "$waited" -lt "$INTRADAY_STOP_TIMEOUT" ]; do
         if [ "$((waited % 10))" -eq 0 ] && [ "$waited" -gt 0 ]; then
             log "Waiting for intraday to exit... (${waited}s/${INTRADAY_STOP_TIMEOUT}s)"
         fi
@@ -245,7 +470,7 @@ stop_intraday() {
     done
 
     # Force kill if still running
-    if kill -0 "$pid" 2>/dev/null; then
+    if intraday_identity_matches "$pid" "$start_token"; then
         log "WARN: Intraday did not exit gracefully, sending SIGKILL"
         kill -9 "$pid" 2>/dev/null || true
     fi
@@ -276,8 +501,8 @@ run_weekly() {
     log "Starting sawa weekly..."
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/weekly_start_time"
 
-    local output exit_code=0
-    output=$(sawa weekly --log-dir "$PROJECT_DIR/logs" 2>&1) || exit_code=$?
+    local exit_code=0
+    sawa weekly --log-dir "$PROJECT_DIR/logs" >/dev/null 2>&1 || exit_code=$?
 
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/weekly_end_time"
 
@@ -322,8 +547,19 @@ run_daily() {
     log "Starting sawa daily..."
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/daily_start_time"
 
-    local output exit_code=0
-    output=$(sawa daily --log-dir "$PROJECT_DIR/logs" 2>&1) || exit_code=$?
+    local inserted exit_code=0
+    # Consume the complete command stream while retaining only the first
+    # inserted-price count, so a verbose run cannot grow shell memory without
+    # bound. pipefail preserves sawa's exit status through awk.
+    inserted=$(sawa daily --log-dir "$PROJECT_DIR/logs" 2>&1 | awk '
+        !found && match($0, /Inserted [0-9,]+ price/) {
+            value = substr($0, RSTART, RLENGTH)
+            sub(/^Inserted /, "", value)
+            sub(/ price$/, "", value)
+            found = 1
+        }
+        END { if (found) print value }
+    ') || exit_code=$?
 
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/daily_end_time"
 
@@ -344,7 +580,7 @@ run_daily() {
 
     # Build summary
     local summary
-    summary=$(build_daily_summary "$output")
+    summary=$(build_daily_summary "$inserted")
 
     log "Daily completed: $summary"
     notify "Sawa Daily Summary" "$summary"
@@ -355,12 +591,34 @@ run_daily() {
 }
 
 build_daily_summary() {
-    local output="$1"
+    local inserted="${1:-}"
     local summary=""
 
     # Query DB for latest price date
     local last_date
-    last_date=$(psql "$DATABASE_URL" -t -A -c "SELECT MAX(date) FROM stock_prices" 2>/dev/null || echo "unknown")
+    # psycopg reads DATABASE_URL (or discrete PG* variables) from the child
+    # environment. The credential-bearing connection string never appears in
+    # process arguments, unlike passing the URL as a positional CLI argument.
+    if ! last_date=$(command python - 2>/dev/null <<'PY'
+import os
+
+import psycopg
+
+conninfo = os.environ.get("DATABASE_URL")
+connect_args = (conninfo,) if conninfo else ()
+with psycopg.connect(
+    *connect_args,
+    options="-c default_transaction_read_only=on -c search_path=pg_catalog,public",
+) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT MAX(date) FROM public.stock_prices")
+        value = cursor.fetchone()[0]
+        if value is not None:
+            print(value)
+PY
+    ); then
+        last_date="unknown"
+    fi
     summary="Latest prices: $last_date"
 
     # Intraday session times
@@ -377,9 +635,6 @@ Intraday ran: $intraday_start — $intraday_stop"
     summary="$summary
 Daily: $daily_start — $daily_end"
 
-    # Parse prices inserted from output
-    local inserted
-    inserted=$(echo "$output" | grep -oP 'Inserted \K[0-9,]+(?= price)' 2>/dev/null | head -1 || true)
     if [ -n "$inserted" ]; then
         summary="$summary
 Prices inserted: $inserted"
@@ -391,6 +646,7 @@ Prices inserted: $inserted"
 # ── Main logic ───────────────────────────────────────────────────────────────
 
 main() {
+    initialize_scheduler
     setup_env
 
     local status
@@ -453,4 +709,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
