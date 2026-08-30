@@ -23,7 +23,7 @@ Sawa has two halves that share a single PostgreSQL database:
 ```
 ┌──────────────────────────┐        ┌──────────────────────────────┐
 │   sawa CLI (data ETL)    │        │  stock-data MCP server       │
-│   - coldstart / daily /  │  ───>  │  - 55 MCP tools for AI       │
+│   - coldstart / daily /  │  ───>  │  - 54 MCP tools for AI       │
 │     weekly / quarterly   │   DB   │    clients (Claude, etc.)    │
 │   - intraday WebSocket   │        │  - read-only queries + views │
 └──────────────────────────┘        └──────────────────────────────┘
@@ -56,7 +56,7 @@ Each command lives in its own module under `sawa/` and is invoked by
 
 Full bootstrap. Does these things in order:
 
-1. (optional, with `--drop`) `drop_all_tables`
+1. (optional, with `--drop-existing` and confirmation) `drop_all_tables`
 2. Apply every `sqlschema/NN_*.sql` in numeric order
 3. Build the universe: union of S&P 500 (scraped from Wikipedia) and the
    NASDAQ list in `data/nasdaq1000_symbols.txt` (~5000 tickers despite the
@@ -74,8 +74,12 @@ Full bootstrap. Does these things in order:
    `2d4e350`); they are no longer mirrored into `stock_prices`.
 
 Flags worth remembering:
-- `--no-drop` — re-apply schema without losing data (safe upgrade path
-  when only the SQL changed)
+- Existing tables and data are preserved by default; schema files are applied
+  atomically as the safe upgrade path. `--no-drop` remains as an explicit,
+  backward-compatible spelling of that default.
+- `--drop-existing --confirm-drop` — explicitly wipe public tables before a
+  full setup. Without `--confirm-drop`, any existing public table requires an
+  interactive `DELETE` confirmation.
 - `--schema-only` — destructive schema rebuild: drops/recreates all tables
   in the target database; use only on a throwaway DB or when intentionally
   wiping data
@@ -96,7 +100,9 @@ Runs after market close. Steps:
    spread live only here; not mirrored into `stock_prices`)
 
 Skips: `--skip-news`, `--skip-ta`, `--skip-market-internals`,
-`--news-only`. `--from-date YYYY-MM-DD` replays from a date forward.
+`--news-only`. `--from-date YYYY-MM-DD` replays prices from a date forward and
+automatically recomputes/persists technical indicators from that date (with
+the needed warm-up history).
 
 A missing `POLYGON_API_KEY` is fatal: `daily` logs an error and exits
 non-zero before doing any work (Polygon underpins prices, news, and TA).
@@ -232,15 +238,17 @@ indices, momentum, movers, corporate_actions). The server registers each
 tool in `server.py`; `validate_new_tools.py` runs a static sanity check.
 
 Connecting an AI client: add the MCP entry as shown in the
-[`README.md`](../README.md). The server reads `.env` from the project
-root via `_project_root / ".env"` so MCP clients only need to pass
-`DATABASE_URL` if they don't share that file.
+[`README.md`](../README.md). Pass `DATABASE_URL` and any optional settings in
+the client's MCP `env` configuration (or export them in the process manager).
+The installed server deliberately does not search its working directory or
+`site-packages` for an implicit `.env` file.
 
-Successful tool calls return a single JSON object in the MCP text
-payload with `data`, optional `chart`, `warnings`, and `metadata`.
-Clients should treat `data` as the machine-readable contract and `chart`
-as display-only text. The response schema version is currently
-`sawa.mcp.tool_response.v1`.
+Successful tool calls return a single JSON object in MCP
+`structuredContent`, plus the same JSON in a text content block for older
+clients. Clients should treat `structuredContent.data` as the machine-readable
+contract and `chart` as display-only text. The response schema version is
+currently `sawa.mcp.tool_response.v1`. Every tool advertises an output schema
+and read-only/destructive/open-world annotations.
 
 Index filters are database-backed. Operators should use `list_indices`
 or `sawa index-list` to verify the active codes after index migrations;
@@ -248,13 +256,13 @@ the MCP input schemas advertise a conservative code pattern rather than
 a frozen enum. The legacy `nasdaq5000` code is intentionally rejected in
 favor of `nasdaq_listed`.
 
-`execute_query` remains read-only and audited. It also supports optional
-named `params` for psycopg placeholders, and the audit log records both
-the SQL text and parameters. Structured outcome records are written to
-`execute_query.jsonl` with duration, row count, and success/error state.
+Arbitrary SQL is not exposed as an MCP tool. PostgreSQL `SELECT` statements
+can call volatile extension or user-defined functions, so a regex or keyword
+blocklist cannot make them a safe sandbox. Add purpose-built parameterized
+tools for new query patterns.
 
-Run this periodically to turn custom SQL usage into a missing-tool
-backlog:
+Historical deployments may still have `execute_query.jsonl` audit records.
+Run this to turn that legacy usage into a missing-tool backlog:
 
 ```bash
 sawa mcp-query-insights
@@ -303,7 +311,7 @@ unreachable.
 | `FRED_API_KEY` | yes | `market_internals` step in daily/weekly/coldstart |
 | `DATABASE_URL` | yes | Everything |
 | `NTFY_TOPIC` | no | Pipeline + scheduler push notifications |
-| `MCP_LOG_LEVEL` / `MCP_MAX_ROWS` / `MCP_QUERY_TIMEOUT` | no | MCP server runtime |
+| `MCP_LOG_LEVEL` / `MCP_MAX_ROWS` / `MCP_QUERY_TIMEOUT` / `MCP_MAX_RESULT_BYTES` | no | MCP server runtime |
 
 ## 8. Common maintenance tasks
 

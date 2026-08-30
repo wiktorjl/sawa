@@ -52,9 +52,9 @@ Sawa has two parts:
 
 1. **Data pipeline** (`sawa` CLI) -- Downloads market data from [Polygon.io](https://polygon.io/) into PostgreSQL and keeps it current with daily/weekly/quarterly update jobs.
 
-2. **MCP server** (`stock-data-mcp-server`) -- Exposes 55 specialized tools that AI assistants call to answer your questions. The AI picks the right tool, passes the right parameters, and interprets the results for you.
+2. **MCP server** (`stock-data-mcp-server`) -- Exposes 54 specialized tools that AI assistants call to answer your questions. The AI picks the right tool, passes the right parameters, and interprets the results for you.
 
-The MCP server doesn't just run raw SQL. It provides structured tools for common analysis patterns -- screeners, technical indicators, chart pattern detection, support/resistance levels, earnings calendars, sector comparisons -- so the AI can answer complex questions in a single step instead of piecing together multiple queries.
+The MCP server does not expose arbitrary raw SQL. It provides structured tools for common analysis patterns -- screeners, technical indicators, chart pattern detection, support/resistance levels, earnings calendars, sector comparisons -- so the AI can answer complex questions in a single step instead of piecing together multiple queries.
 
 ## What You Can Ask About
 
@@ -68,7 +68,6 @@ The MCP server doesn't just run raw SQL. It provides structured tools for common
 | **Economy** | Treasury yield curves, CPI/PCE inflation, labor market data, inflation expectations |
 | **Corporate Actions** | Dividend history and calendar, stock splits, earnings calendar with surprise data |
 | **News** | Recent articles with per-ticker sentiment analysis |
-| **Custom Queries** | Direct read-only SQL against the full database when the built-in tools aren't enough |
 
 ## Quick Start
 
@@ -109,7 +108,8 @@ Then just start asking questions.
 
 ### MCP Tool Contract
 
-Successful tool calls return one JSON object in the MCP text payload:
+Successful tool calls return one JSON object in MCP `structuredContent` and
+the same JSON in a text content block for compatibility:
 
 ```json
 {
@@ -124,7 +124,7 @@ Successful tool calls return one JSON object in the MCP text payload:
 }
 ```
 
-Clients and agents should parse `data` for machine-readable results.
+Clients and agents should parse `structuredContent.data` for machine-readable results.
 `chart` is optional display text, and `warnings` carries non-fatal
 messages such as missing data or market-hours hints.
 
@@ -134,24 +134,18 @@ Index inputs are database-backed codes, not a frozen enum. Use
 `russell1000`, and `mag7`; the legacy `nasdaq5000` code is rejected and
 should be replaced with `nasdaq_listed`.
 
-The `execute_query` tool accepts optional named SQL parameters via
-`params`, for example:
+`scan_ytd_performance` reads stored constituents and prices only and returns
+bounded winner/loser tails. Its `data_schema_version` is
+`scan_ytd_performance.v2`: `by_sector` remains a sector-to-stock-list mapping
+for compatibility but contains only those bounded tail rows and is marked
+`by_sector_truncated`; use `sector_summary` for full-universe counts and
+average returns.
 
-```json
-{
-  "sql": "SELECT * FROM companies WHERE ticker = %(ticker)s",
-  "params": {
-    "ticker": "AAPL"
-  }
-}
-```
-
-`execute_query` usage is audited to `~/.sawa/logs/execute_query.log`
-and structured records are written to `execute_query.jsonl`. Run
-`sawa mcp-query-insights` to summarize repeated custom SQL patterns,
-tables, and filters that may deserve first-class MCP tools. The MCP
-server reads only the cached summary on startup and logs a warning when
-custom SQL volume is high.
+Arbitrary SQL is intentionally unavailable: PostgreSQL `SELECT` statements
+can invoke volatile extension or user-defined functions, so keyword filtering
+is not a security boundary. Add a purpose-built, parameterized read-only tool
+when a new query pattern is needed. `sawa mcp-query-insights` remains available
+to inspect historical audit records from older deployments.
 
 ### 3. Keep Data Fresh
 
@@ -195,6 +189,7 @@ MCP server options (optional):
 | `MCP_LOG_LEVEL` | `info` | Log level |
 | `MCP_MAX_ROWS` | `1000` | Maximum query result rows |
 | `MCP_QUERY_TIMEOUT` | `30` | Query timeout in seconds |
+| `MCP_MAX_RESULT_BYTES` | `5242880` | Maximum UTF-8 bytes in each JSON response envelope, including errors; database rows are also rejected early using canonical compact JSON size |
 
 ## CLI Reference
 
@@ -203,11 +198,12 @@ MCP server options (optional):
 sawa coldstart --years 5                   # Full setup with 5 years of data
 sawa coldstart --schema-only               # DANGER: drops/recreates all tables; use throwaway DB
 sawa coldstart --skip-downloads            # Load existing CSV files only
-sawa coldstart --no-drop                   # Re-apply schema without destroying data (safe upgrade)
+sawa coldstart --no-drop                   # Explicit legacy spelling; preserving data is now default
+sawa coldstart --drop-existing --confirm-drop  # DANGER: explicitly wipe before setup
 
 # Incremental updates
 sawa daily                                 # Prices, news, technical indicators, market internals
-sawa daily --from-date 2024-01-01          # Force update from specific date
+sawa daily --from-date 2024-01-01          # Replay prices and recompute TA from this date
 sawa weekly                                # Economy, overviews, news, corporate actions, character
 sawa weekly --skip-character               # Skip stock character classification
 sawa quarterly                             # Fundamentals + financial ratios
@@ -231,7 +227,7 @@ sawa character                             # Stock character classification (als
 sawa adjust-splits                         # Re-fetch adjusted prices after recent splits
 sawa data-status                           # Show data freshness across price tables
 sawa doctor                                # Validate database completeness/sanity
-sawa mcp-query-insights                    # Summarize execute_query usage patterns
+sawa mcp-query-insights                    # Summarize legacy raw-query audit records
 ```
 
 Full subcommand help: `sawa <command> --help`.
@@ -282,7 +278,7 @@ sawa/                        # Core data pipeline package
   weekly.py, quarterly.py
 mcp_server/                  # MCP server package
   charts/                    # Unicode chart rendering (plotext)
-  tools/                     # 55 MCP tool implementations
+  tools/                     # 54 MCP tool implementations
   services/                  # Service layer and domain converters
 sqlschema/                   # PostgreSQL schema files (applied in numeric order)
 scripts/                     # Shell wrappers, cron scheduler, ad-hoc backfills
