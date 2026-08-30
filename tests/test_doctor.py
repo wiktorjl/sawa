@@ -54,6 +54,8 @@ class FakeConnection:
         post_split_checked: int = 0,
         post_split_flagged: int = 0,
         post_split_worst: str = "",
+        market_latest: tuple[date | None, date | None, date | None] | None = None,
+        extremes_latest: date | None = None,
     ) -> None:
         self.queries: list[str] = []
         self.tables = tables
@@ -77,6 +79,12 @@ class FakeConnection:
         self.post_split_checked = post_split_checked
         self.post_split_flagged = post_split_flagged
         self.post_split_worst = post_split_worst
+        self.market_latest = market_latest or (
+            latest_price_date,
+            latest_price_date,
+            latest_price_date,
+        )
+        self.extremes_latest = extremes_latest or latest_price_date
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -129,14 +137,14 @@ class FakeConnection:
         if "FROM technical_indicators" in compact:
             return (self.latest_price_date, self.price_tickers)
 
-        if "FROM market_internals" in compact:
-            return (self.latest_price_date,)
+        if "FROM market_internals" in compact or "FROM public.market_internals" in compact:
+            return self.market_latest
 
         if "FROM news_articles" in compact:
             return (self.latest_news, 25)
 
         if "FROM mv_52week_extremes" in compact:
-            return (self.latest_price_date, self.latest_price_date)
+            return (self.latest_price_date, self.extremes_latest)
 
         if "FROM stock_character_classification" in compact:
             return (self.character_run, self.character_tickers)
@@ -313,6 +321,76 @@ def test_same_day_news_is_not_marked_stale() -> None:
     by_name = {c.name: c for c in checks}
 
     assert by_name["news_articles.recent"].status == "PASS"
+
+
+def test_doctor_checks_each_market_internal_series_freshness() -> None:
+    conn = FakeConnection(
+        tables={
+            "companies",
+            "stock_prices",
+            "technical_indicators",
+            "news_articles",
+            "market_internals",
+            "stock_prices_live",
+            "mv_52week_extremes",
+        },
+        market_latest=(date(2026, 5, 15), date(2026, 5, 1), None),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["market_internals.vix.latest_date"].status == "PASS"
+    assert by_name["market_internals.vix3m.latest_date"].status == "FAIL"
+    assert by_name["market_internals.hy_spread.latest_date"].status == "FAIL"
+
+
+def test_future_market_internal_dates_do_not_pass_freshness() -> None:
+    conn = FakeConnection(
+        tables={
+            "companies",
+            "stock_prices",
+            "technical_indicators",
+            "news_articles",
+            "market_internals",
+            "stock_prices_live",
+            "mv_52week_extremes",
+        },
+        market_latest=(date(2026, 5, 16), date(2026, 5, 16), date(2026, 5, 16)),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["market_internals.vix.latest_date"].status == "FAIL"
+    assert by_name["market_internals.vix3m.latest_date"].status == "FAIL"
+    assert by_name["market_internals.hy_spread.latest_date"].status == "FAIL"
+
+
+def test_future_stock_price_date_does_not_pass_freshness() -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 5, 16),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["stock_prices.latest_date"].status == "FAIL"
+
+
+def test_future_materialized_view_date_does_not_pass_freshness() -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 5, 15),
+        extremes_latest=date(2026, 5, 16),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["stock_prices.latest_date"].status == "PASS"
+    assert by_name["mv_52week_extremes.freshness"].status == "WARN"
 
 
 _DAILY_TABLES = {
