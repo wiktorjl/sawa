@@ -17,6 +17,7 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, EndpointConnectionError
 
+from sawa.domain.price_validation import is_valid_daily_ohlcv
 from sawa.utils.dates import DATE_FORMAT
 
 S3_ENDPOINT = "https://files.polygon.io"
@@ -27,6 +28,16 @@ S3_KEY_TEMPLATE = "us_stocks_sip/day_aggs_v1/{year}/{month}/{date}.csv.gz"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BASE_DELAY = 1.0  # seconds
 DEFAULT_MAX_DELAY = 30.0  # seconds
+
+
+class BulkPriceRows(list[dict[str, Any]]):
+    """Filtered rows plus whether the requested daily source object existed."""
+
+    source_found: bool
+
+    def __init__(self, rows: list[dict[str, Any]], *, source_found: bool) -> None:
+        super().__init__(rows)
+        self.source_found = source_found
 
 
 class PolygonS3Client:
@@ -54,6 +65,16 @@ class PolygonS3Client:
             endpoint_url=S3_ENDPOINT,
             config=BotoConfig(signature_version="s3v4"),
         )
+
+    def _cleanup_partial_download(self, filepath: str) -> None:
+        """Best-effort cleanup for an unsuccessful download attempt."""
+        try:
+            os.unlink(filepath)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            # Cleanup must never replace the primary S3 result or exception.
+            self.logger.warning(f"Failed to remove partial S3 download {filepath}: {e}")
 
     def download_day(self, target_date: date) -> str | None:
         """
@@ -88,10 +109,14 @@ class PolygonS3Client:
 
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
+            temp_path: str | None = None
+            download_complete = False
             try:
                 with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    temp_path = tmp.name
                     self.client.download_fileobj(S3_BUCKET, key, tmp)
-                    return tmp.name
+                download_complete = True
+                return temp_path
             except ClientError as e:
                 error_code = e.response.get("Error", {}).get("Code")
                 if error_code in ("403", "AccessDenied"):
@@ -118,14 +143,19 @@ class PolygonS3Client:
             except OSError as e:
                 # Connection reset, timeout, etc. - retry
                 last_error = e
+            finally:
+                if temp_path is not None and not download_complete:
+                    self._cleanup_partial_download(temp_path)
 
-            # Calculate delay with exponential backoff
-            delay = min(self.base_delay * (2**attempt), self.max_delay)
-            self.logger.warning(
-                f"S3 download failed (attempt {attempt + 1}/{self.max_retries}): {last_error}. "
-                f"Retrying in {delay:.1f}s..."
-            )
-            time.sleep(delay)
+            if attempt + 1 < self.max_retries:
+                # Calculate delay with exponential backoff only when another
+                # attempt will actually be made.
+                delay = min(self.base_delay * (2**attempt), self.max_delay)
+                self.logger.warning(
+                    f"S3 download failed (attempt {attempt + 1}/{self.max_retries}): "
+                    f"{last_error}. Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
 
         # All retries exhausted
         if last_error:
@@ -173,19 +203,20 @@ class PolygonS3Client:
                 symbol = (row.get(sym_col) or "").strip()
                 if not symbol:
                     continue
-                if symbols and symbol not in symbols:
+                if symbols is not None and symbol not in symbols:
                     continue
 
-                records.append(
-                    {
-                        "symbol": symbol,
-                        "open": row.get(open_col, ""),
-                        "close": row.get(close_col, ""),
-                        "high": row.get(high_col, ""),
-                        "low": row.get(low_col, ""),
-                        "volume": row.get(vol_col, ""),
-                    }
-                )
+                record = {
+                    "symbol": symbol,
+                    "open": row.get(open_col, ""),
+                    "close": row.get(close_col, ""),
+                    "high": row.get(high_col, ""),
+                    "low": row.get(low_col, ""),
+                    "volume": row.get(vol_col, ""),
+                }
+                if not is_valid_daily_ohlcv(record, allow_numeric_strings=True):
+                    raise ValueError("bulk price CSV contains malformed OHLCV data")
+                records.append(record)
 
         return records
 
@@ -193,7 +224,7 @@ class PolygonS3Client:
         self,
         target_date: date,
         symbols: set[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> BulkPriceRows:
         """
         Download and parse bulk file for a date.
 
@@ -206,14 +237,14 @@ class PolygonS3Client:
         """
         filepath = self.download_day(target_date)
         if filepath is None:
-            return []
+            return BulkPriceRows([], source_found=False)
 
         try:
             records = self.parse_bulk_file(filepath, symbols)
             date_str = target_date.strftime(DATE_FORMAT)
             for r in records:
                 r["date"] = date_str
-            return records
+            return BulkPriceRows(records, source_found=True)
         finally:
             try:
                 os.unlink(filepath)
