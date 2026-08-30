@@ -25,6 +25,13 @@ _MAX_DATE_RANGE_DAYS = 3650
 # Max future date offset (1 year)
 _MAX_FUTURE_DAYS = 365
 
+_BOUNDED_TEXT_FIELDS = {
+    "query": 256,
+    "sector": 256,
+    "sector_exclude": 256,
+    "table_name": 63,
+}
+
 _LEGACY_INDEX_CODES = {"nasdaq5000": "nasdaq_listed"}
 
 _TOOLS_ALLOW_INDEX_ALL = {
@@ -37,6 +44,23 @@ _TOOLS_ALLOW_INDEX_ALL = {
 }
 
 _TOOLS_ALLOW_INDEX_BOTH = {"scan_ytd_performance"}
+
+_TOOL_LIMIT_MAX = {
+    "get_intraday_bars": 500,
+    "screen_stocks": 500,
+    "get_stock_splits": 500,
+    "get_dividends": 500,
+    "get_ex_dividend_calendar": 500,
+    "get_dividend_yield_leaders": 200,
+    "get_earnings_calendar": 500,
+    "get_earnings_history": 40,
+}
+
+_TOOL_TICKER_MAX = {
+    "get_intraday_bars": 20,
+    "get_live_prices_batch": 50,
+    "get_ytd_returns": 50,
+}
 
 _FIELD_ENUMS: dict[str, set[Any]] = {
     "chart_detail": {"compact", "normal", "detailed"},
@@ -114,6 +138,17 @@ def validate_tickers(tickers: list[Any], max_count: int = 50) -> list[str]:
     return [validate_ticker(t) for t in tickers]
 
 
+def validate_bounded_text(value: Any, field_name: str, max_length: int) -> str:
+    """Validate and trim a required or explicitly supplied free-text argument."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+
+    normalized = value.strip()
+    if len(normalized) > max_length:
+        raise ValueError(f"{field_name} is too long (max {max_length} characters)")
+    return normalized
+
+
 def validate_date(date_str: str, field_name: str = "date") -> str:
     """Validate a date string in YYYY-MM-DD format.
 
@@ -174,10 +209,10 @@ def validate_limit(limit: Any, max_limit: int = 1000) -> int:
     Returns the validated limit as int.
     Raises ValueError if invalid.
     """
-    if not isinstance(limit, (int, float)):
-        raise ValueError(f"Limit must be a number, got {type(limit).__name__}")
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError(f"Limit must be an integer, got {type(limit).__name__}")
 
-    result = int(limit)
+    result = limit
 
     if result < 1:
         raise ValueError(f"Limit must be at least 1, got {result}")
@@ -267,6 +302,9 @@ def validate_string_list(
             )
         normalized.append(item)
 
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"{field_name} values must be unique")
+
     return normalized
 
 
@@ -281,9 +319,15 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, A
     if "ticker" in arguments and arguments["ticker"] is not None:
         arguments["ticker"] = validate_ticker(arguments["ticker"])
 
+    if "benchmark" in arguments and arguments["benchmark"] is not None:
+        arguments["benchmark"] = validate_ticker(arguments["benchmark"])
+
     # Validate tickers (batch)
     if "tickers" in arguments and arguments["tickers"] is not None:
-        arguments["tickers"] = validate_tickers(arguments["tickers"])
+        arguments["tickers"] = validate_tickers(
+            arguments["tickers"],
+            max_count=_TOOL_TICKER_MAX.get(name, 50),
+        )
 
     if name == "get_intraday_bars":
         has_ticker = arguments.get("ticker") is not None
@@ -317,10 +361,6 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, A
             arguments["indicators"], "indicators", _VALID_ALIGNMENT_INDICATORS
         )
 
-    if name == "execute_query" and arguments.get("params") is not None:
-        if not isinstance(arguments["params"], dict):
-            raise ValueError("params must be an object mapping SQL parameter names to values")
-
     # Validate dates
     start_date = arguments.get("start_date")
     end_date = arguments.get("end_date")
@@ -341,9 +381,21 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, A
     if "target_date" in arguments and arguments["target_date"] is not None:
         arguments["target_date"] = validate_date(arguments["target_date"], "target_date")
 
+    if "since_date" in arguments and arguments["since_date"] is not None:
+        arguments["since_date"] = validate_date(arguments["since_date"], "since_date")
+
+    for field_name, max_length in _BOUNDED_TEXT_FIELDS.items():
+        if field_name in arguments and arguments[field_name] is not None:
+            arguments[field_name] = validate_bounded_text(
+                arguments[field_name], field_name, max_length
+            )
+
     # Validate limit
     if "limit" in arguments and arguments["limit"] is not None:
-        arguments["limit"] = validate_limit(arguments["limit"])
+        arguments["limit"] = validate_limit(
+            arguments["limit"],
+            max_limit=_TOOL_LIMIT_MAX.get(name, 1000),
+        )
 
     # Validate positive numeric fields
     if "min_price" in arguments and arguments["min_price"] is not None:
@@ -363,11 +415,29 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, A
 
     if "days" in arguments and arguments["days"] is not None:
         days = arguments["days"]
-        if not isinstance(days, (int, float)) or int(days) < 1:
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             raise ValueError(f"days must be a positive integer, got {days}")
         max_days = 252 if name == "detect_candlestick_patterns" else 30
-        if int(days) > max_days:
-            raise ValueError(f"days too large: {int(days)} (max {max_days})")
-        arguments["days"] = int(days)
+        if days > max_days:
+            raise ValueError(f"days too large: {days} (max {max_days})")
+        arguments["days"] = days
+
+    if name == "detect_chart_patterns":
+        lookback = arguments.get("lookback_days", 60)
+        minimum = arguments.get("min_pattern_days", 10)
+        if (
+            isinstance(lookback, bool)
+            or not isinstance(lookback, int)
+            or not 20 <= lookback <= 252
+        ):
+            raise ValueError("lookback_days must be an integer between 20 and 252")
+        if (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, int)
+            or not 5 <= minimum <= lookback
+        ):
+            raise ValueError(
+                "min_pattern_days must be an integer between 5 and lookback_days"
+            )
 
     return arguments
