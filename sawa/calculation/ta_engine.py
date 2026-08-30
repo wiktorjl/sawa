@@ -17,7 +17,7 @@ try:
 except ImportError:
     talib = None  # type: ignore
 
-from sawa.domain.technical_indicators import TechnicalIndicators
+from sawa.domain.technical_indicators import CumulativeIndicatorSeed, TechnicalIndicators
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ MIN_PERIODS: dict[str, int] = {
     "bb_lower": 20,
     "bb_width_pct": 20,
     "atr_14": 14,
-    "adx_14": 27,  # Wilder ADX warm-up: 14 (DM/TR smoothing) + 13 (DX averaging) = 27
+    "adx_14": 28,  # First TA-Lib ADX is at zero-based index 2 * 14 - 1.
     "obv": 1,
     "volume_sma_20": 20,
     "volume_ratio": 20,
@@ -163,6 +163,7 @@ def calculate_indicators_for_ticker(
     ticker: str,
     prices: list[dict[str, Any]],
     log: logging.Logger | None = None,
+    cumulative_seed: CumulativeIndicatorSeed | None = None,
 ) -> list[TechnicalIndicators]:
     """Calculate all 28 technical indicators for one ticker.
 
@@ -171,6 +172,9 @@ def calculate_indicators_for_ticker(
         prices: List of price dicts with keys: date, open, high, low, close, volume
                 Must be sorted by date ascending
         log: Logger instance
+        cumulative_seed: Cumulative VWAP/OBV state immediately before the
+            first price. Required when ``prices`` is a bounded incremental
+            window; omit for a full-history calculation.
 
     Returns:
         List of TechnicalIndicators, one per date in prices
@@ -211,11 +215,14 @@ def calculate_indicators_for_ticker(
     ema_100 = talib.EMA(close_prices, timeperiod=100)
     ema_200 = talib.EMA(close_prices, timeperiod=200)
 
-    # VWAP (cumulative - we calculate a rolling approximation)
-    # True VWAP resets daily, but for daily data we use cumulative typical price * volume
+    seed = cumulative_seed or CumulativeIndicatorSeed()
+
+    # VWAP is cumulative across the ticker's available daily history. Seed
+    # bounded incremental windows with all prior rows so moving the warm-up
+    # boundary cannot change the published series.
     typical_price = (high_prices + low_prices + close_prices) / 3
-    cum_tp_vol = np.cumsum(typical_price * volumes)
-    cum_vol = np.cumsum(volumes)
+    cum_tp_vol = np.cumsum(typical_price * volumes) + float(seed.vwap_numerator)
+    cum_vol = np.cumsum(volumes) + float(seed.cumulative_volume)
     # Avoid division by zero
     with np.errstate(divide="ignore", invalid="ignore"):
         vwap = np.where(cum_vol > 0, cum_tp_vol / cum_vol, np.nan)
@@ -238,8 +245,22 @@ def calculate_indicators_for_ticker(
     # Trend strength
     adx_14 = talib.ADX(high_prices, low_prices, close_prices, timeperiod=14)
 
-    # Volume
-    obv = talib.OBV(close_prices, volumes)
+    # Volume. TA-Lib initializes full-history OBV with the first bar's
+    # volume. For an incremental window, continue the exact +/-/0 recurrence
+    # from the last pre-window close and OBV instead of resetting at the
+    # moving lookback boundary.
+    obv = np.empty(len(close_prices), dtype=np.float64)
+    running_obv = float(seed.obv)
+    previous_close = (
+        float(seed.previous_close) if seed.previous_close is not None else None
+    )
+    for i, (close_value, volume) in enumerate(zip(close_prices, volumes, strict=True)):
+        if previous_close is None or close_value > previous_close:
+            running_obv += volume
+        elif close_value < previous_close:
+            running_obv -= volume
+        obv[i] = running_obv
+        previous_close = close_value
     volume_sma_20 = talib.SMA(volumes, timeperiod=20)
     dollar_volume_sma_20 = talib.SMA(close_prices * volumes, timeperiod=20)
 

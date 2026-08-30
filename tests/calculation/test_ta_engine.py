@@ -1,8 +1,10 @@
 """Tests for technical indicator calculation engine."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any
 
+import numpy as np
 import pytest
 
 from sawa.calculation.ta_engine import (
@@ -11,7 +13,62 @@ from sawa.calculation.ta_engine import (
     get_required_lookback_days,
     validate_indicator,
 )
-from sawa.domain.technical_indicators import TechnicalIndicators
+from sawa.domain.technical_indicators import CumulativeIndicatorSeed, TechnicalIndicators
+
+
+def _cumulative_seed(prices: list[dict[str, Any]]) -> CumulativeIndicatorSeed:
+    """Build the same pre-window cumulative state as the database query."""
+    numerator = 0.0
+    cumulative_volume = 0
+    obv = 0
+    previous_close: float | None = None
+
+    for price in prices:
+        close = float(price["close"])
+        volume = int(price["volume"])
+        typical_price = (
+            float(price["high"]) + float(price["low"]) + close
+        ) / 3.0
+        numerator += typical_price * volume
+        cumulative_volume += volume
+        if previous_close is None or close > previous_close:
+            obv += volume
+        elif close < previous_close:
+            obv -= volume
+        previous_close = close
+
+    return CumulativeIndicatorSeed(
+        vwap_numerator=Decimal(str(numerator)),
+        cumulative_volume=cumulative_volume,
+        obv=obv,
+        previous_close=(
+            Decimal(str(previous_close)) if previous_close is not None else None
+        ),
+    )
+
+
+def _cumulative_price_series(count: int = 96) -> list[dict[str, Any]]:
+    prices: list[dict[str, Any]] = []
+    previous_close = 100.0
+    for i in range(count):
+        # Exercise rises, falls, equal closes, and zero-volume bars.
+        if i and i % 11 == 0:
+            close = previous_close
+        else:
+            close = 100.0 + i * 0.17 + ((i % 7) - 3) * 0.31
+        volume = 0 if i in {0, 1, 18, 47} else 1000 + i * 13
+        prices.append(
+            {
+                "date": date(2024, 1, 1) + timedelta(days=i),
+                "open": close - 0.2,
+                "high": close + 0.8,
+                "low": close - 0.9,
+                "close": close,
+                "volume": volume,
+            }
+        )
+        previous_close = close
+    return prices
 
 
 class TestValidateIndicator:
@@ -300,3 +357,48 @@ class TestCalculateIndicators:
         for r in results:
             if r.rsi_14 is not None:
                 assert 0 <= float(r.rsi_14) <= 100
+
+    def test_cumulative_indicators_match_full_history_at_multiple_boundaries(self):
+        """Seeded incremental VWAP/OBV must equal a one-shot calculation."""
+        from sawa.calculation.ta_engine import calculate_indicators_for_ticker
+
+        prices = _cumulative_price_series()
+        full = calculate_indicators_for_ticker("TEST", prices)
+
+        for split_at in (1, 2, 11, 19, 48, 73):
+            incremental = calculate_indicators_for_ticker(
+                "TEST",
+                prices[split_at:],
+                cumulative_seed=_cumulative_seed(prices[:split_at]),
+            )
+            assert [(row.vwap, row.obv) for row in incremental] == [
+                (row.vwap, row.obv) for row in full[split_at:]
+            ]
+
+    def test_zero_cumulative_volume_keeps_vwap_null_until_traded_volume(self):
+        from sawa.calculation.ta_engine import calculate_indicators_for_ticker
+
+        prices = _cumulative_price_series(8)
+        prices[2]["volume"] = 0
+        full = calculate_indicators_for_ticker("TEST", prices)
+        incremental = calculate_indicators_for_ticker(
+            "TEST",
+            prices[2:],
+            cumulative_seed=_cumulative_seed(prices[:2]),
+        )
+
+        assert [row.vwap for row in full[:3]] == [None, None, None]
+        assert incremental[0].vwap is None
+        assert incremental[1].vwap == full[3].vwap
+
+    def test_unseeded_obv_matches_talib_first_volume_convention(self):
+        from sawa.calculation.ta_engine import calculate_indicators_for_ticker
+
+        prices = _cumulative_price_series()
+        close = np.array([float(row["close"]) for row in prices], dtype=np.float64)
+        volume = np.array([float(row["volume"]) for row in prices], dtype=np.float64)
+
+        expected = talib.OBV(close, volume)
+        actual = calculate_indicators_for_ticker("TEST", prices)
+
+        assert [row.obv for row in actual] == [int(round(value)) for value in expected]

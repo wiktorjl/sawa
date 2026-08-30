@@ -22,7 +22,7 @@ from sawa.domain.models import (
     StockPrice,
     TreasuryYield,
 )
-from sawa.domain.technical_indicators import TechnicalIndicators
+from sawa.domain.technical_indicators import CumulativeIndicatorSeed, TechnicalIndicators
 
 __all__ = [
     # Models
@@ -39,6 +39,7 @@ __all__ = [
     "MarketInternals",
     "MarketSentiment",
     "TechnicalIndicators",
+    "CumulativeIndicatorSeed",
     # Exceptions
     "RepositoryError",
     "ProviderError",

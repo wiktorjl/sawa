@@ -5,15 +5,20 @@ Handles bulk insert/upsert and queries for technical_indicators table.
 
 import logging
 from datetime import date
+from decimal import Decimal
 from typing import Any, cast
 
 import psycopg
 from psycopg import sql
 
-from sawa.domain.technical_indicators import TechnicalIndicators
+from sawa.domain.technical_indicators import CumulativeIndicatorSeed, TechnicalIndicators
 from sawa.utils.constants import DEFAULT_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
+
+
+class TechnicalIndicatorWriteError(RuntimeError):
+    """Raised when a TA batch cannot be persisted in full."""
 
 
 def load_technical_indicators(
@@ -21,14 +26,19 @@ def load_technical_indicators(
     indicators: list[TechnicalIndicators],
     log: logging.Logger | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    *,
+    commit: bool = True,
 ) -> int:
-    """Bulk insert technical indicators with upsert.
+    """Atomically insert or update a batch of technical indicators.
 
     Args:
         conn: Database connection
         indicators: List of TechnicalIndicators to insert
         log: Logger instance
         batch_size: Number of rows per batch
+        commit: Commit the completed batch. Set this to ``False`` only when
+            the caller owns the surrounding transaction (for example, an
+            atomic delete-and-replace recompute).
 
     Returns:
         Number of rows inserted/updated
@@ -58,33 +68,41 @@ def load_technical_indicators(
         set_sql,
     )
 
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
     inserted = 0
-    errors = 0
-
-    with conn.cursor() as cur:
-        for i in range(0, len(indicators), batch_size):
-            batch = indicators[i : i + batch_size]
-            for ind in batch:
-                try:
-                    cur.execute("SAVEPOINT row_insert")
-                    cur.execute(query, ind.to_tuple())
-                    cur.execute("RELEASE SAVEPOINT row_insert")
+    current: TechnicalIndicators | None = None
+    try:
+        with conn.cursor() as cur:
+            for i in range(0, len(indicators), batch_size):
+                batch = indicators[i : i + batch_size]
+                for current in batch:
+                    cur.execute(query, current.to_tuple())
                     inserted += 1
-                except psycopg.Error as e:
-                    cur.execute("ROLLBACK TO SAVEPOINT row_insert")
-                    cur.execute("RELEASE SAVEPOINT row_insert")
-                    errors += 1
-                    if errors <= 3:
-                        log.warning(f"Insert failed for {ind.ticker}/{ind.date}: {e}")
-                    elif errors == 4:
-                        log.warning("(suppressing further errors...)")
-            conn.commit()
 
-            if (i + batch_size) % 10000 == 0:
-                log.info(f"  Progress: {min(i + batch_size, len(indicators))}/{len(indicators)}")
+                if i + batch_size >= 10000 and (i + batch_size) % 10000 == 0:
+                    log.info(
+                        f"  Progress: {min(i + batch_size, len(indicators))}/"
+                        f"{len(indicators)}"
+                    )
+    except psycopg.Error as exc:
+        # A partially written indicator series is not useful: future daily
+        # runs can advance past the missing date and the caller used to report
+        # the ticker as successful. Roll back the whole caller transaction in
+        # the ordinary path. Atomic replace callers leave rollback to their
+        # surrounding connection context so the preceding DELETE is undone too.
+        if commit:
+            conn.rollback()
+        target = (
+            f"{current.ticker}/{current.date}" if current is not None else "unknown row"
+        )
+        raise TechnicalIndicatorWriteError(
+            f"technical indicator write failed for {target}"
+        ) from exc
 
-    if errors > 0:
-        log.warning(f"  {errors} rows failed to insert")
+    if commit:
+        conn.commit()
 
     return inserted
 
@@ -93,6 +111,8 @@ def delete_technical_indicators_for_tickers(
     conn,
     tickers: list[str],
     log: logging.Logger | None = None,
+    *,
+    commit: bool = True,
 ) -> int:
     """Delete all technical_indicators rows for the given tickers.
 
@@ -114,8 +134,13 @@ def delete_technical_indicators_for_tickers(
             (upper,),
         )
         deleted = int(cur.rowcount)
-    conn.commit()
-    log.info(f"  Deleted {deleted} stale technical_indicator rows for {len(upper)} ticker(s)")
+    if commit:
+        conn.commit()
+    action = "Deleted" if commit else "Staged deletion of"
+    log.info(
+        f"  {action} {deleted} stale technical_indicator rows for "
+        f"{len(upper)} ticker(s)"
+    )
     return deleted
 
 
@@ -201,6 +226,59 @@ def get_prices_for_ticker(
             }
             for row in cur.fetchall()
         ]
+
+
+def get_cumulative_indicator_seed(
+    conn,
+    ticker: str,
+    before_date: date,
+) -> CumulativeIndicatorSeed:
+    """Return cumulative VWAP/OBV state strictly before ``before_date``.
+
+    State is derived from authoritative price history rather than previously
+    stored indicators, so future incremental rows self-heal even if an older
+    release wrote window-relative OBV or VWAP values.
+    """
+    query = """
+        WITH history AS (
+            SELECT
+                date,
+                high,
+                low,
+                close,
+                volume,
+                LAG(close) OVER (ORDER BY date) AS previous_close
+            FROM stock_prices
+            WHERE ticker = %s
+              AND date < %s
+        )
+        SELECT
+            COALESCE(SUM(((high + low + close) / 3.0) * volume), 0),
+            COALESCE(SUM(volume), 0),
+            COALESCE(SUM(
+                CASE
+                    WHEN previous_close IS NULL THEN volume
+                    WHEN close > previous_close THEN volume
+                    WHEN close < previous_close THEN -volume
+                    ELSE 0
+                END
+            ), 0),
+            (ARRAY_AGG(close ORDER BY date DESC))[1]
+        FROM history
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (ticker.upper(), before_date))
+        row = cur.fetchone()
+
+    if not row:
+        return CumulativeIndicatorSeed()
+
+    return CumulativeIndicatorSeed(
+        vwap_numerator=Decimal(row[0]),
+        cumulative_volume=int(row[1]),
+        obv=int(row[2]),
+        previous_close=Decimal(row[3]) if row[3] is not None else None,
+    )
 
 
 def get_ta_count(conn, ticker: str | None = None) -> int:

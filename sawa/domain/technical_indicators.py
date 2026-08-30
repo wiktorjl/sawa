@@ -10,6 +10,21 @@ from decimal import Decimal
 
 
 @dataclass(frozen=True, slots=True)
+class CumulativeIndicatorSeed:
+    """State immediately before an incremental technical-analysis window.
+
+    VWAP and OBV are cumulative series. A bounded warm-up window therefore
+    needs the state accumulated by all earlier price rows or its results will
+    change whenever the window start moves.
+    """
+
+    vwap_numerator: Decimal = Decimal("0")
+    cumulative_volume: int = 0
+    obv: int = 0
+    previous_close: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TechnicalIndicators:
     """Technical indicators for a ticker on a date.
 

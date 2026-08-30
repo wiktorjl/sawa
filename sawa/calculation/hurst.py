@@ -224,23 +224,27 @@ def compute_adx(
 
     Returns:
         Array of ADX values with the same length as the input arrays.
-        The first ``period * 2`` values will be NaN because ADX needs
-        *period* bars for the initial DI smoothing and another *period*
-        bars for the ADX smoothing itself.
+        The first ``period * 2 - 1`` values will be NaN. The first ADX is
+        emitted at zero-based index ``period * 2 - 1``, matching TA-Lib.
     """
     high = np.asarray(high, dtype=np.float64)
     low = np.asarray(low, dtype=np.float64)
     close = np.asarray(close, dtype=np.float64)
     n = len(high)
 
+    if period < 2:
+        raise ValueError("ADX period must be at least 2")
+    if len(low) != n or len(close) != n:
+        raise ValueError("ADX high, low, and close arrays must have equal lengths")
+
     adx = np.full(n, np.nan, dtype=np.float64)
 
-    if n < period * 2 + 1:
+    if n < period * 2:
         logger.warning(
             "Not enough bars (%d) for ADX with period %d (need %d)",
             n,
             period,
-            period * 2 + 1,
+            period * 2,
         )
         return adx
 
@@ -265,31 +269,22 @@ def compute_adx(
         plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
         minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
 
-    # --- Wilder's smoothing for ATR, +DM14, -DM14 ---
-    # First value: simple sum of the first *period* bars (bars 1..period)
-    atr_smooth = np.sum(tr[1 : period + 1])
-    plus_dm_smooth = np.sum(plus_dm[1 : period + 1])
-    minus_dm_smooth = np.sum(minus_dm[1 : period + 1])
+    # --- Wilder's smoothing for ATR, +DM, -DM ---
+    # TA-Lib seeds with the first period-1 movements, then applies one Wilder
+    # update at index ``period`` before calculating the first DX. Initializing
+    # from period complete movements instead gives the right output index but
+    # a permanently different numerical series.
+    atr_smooth = np.sum(tr[1:period])
+    plus_dm_smooth = np.sum(plus_dm[1:period])
+    minus_dm_smooth = np.sum(minus_dm[1:period])
 
     # Arrays to hold smoothed +DI and -DI (and DX)
     plus_di = np.full(n, np.nan, dtype=np.float64)
     minus_di = np.full(n, np.nan, dtype=np.float64)
     dx = np.full(n, np.nan, dtype=np.float64)
 
-    # First smoothed DI at index *period*
-    idx = period  # index where we have the first smoothed value
-    if atr_smooth != 0.0:
-        plus_di[idx] = 100.0 * plus_dm_smooth / atr_smooth
-        minus_di[idx] = 100.0 * minus_dm_smooth / atr_smooth
-    else:
-        plus_di[idx] = 0.0
-        minus_di[idx] = 0.0
-
-    di_sum = plus_di[idx] + minus_di[idx]
-    dx[idx] = 100.0 * abs(plus_di[idx] - minus_di[idx]) / di_sum if di_sum != 0.0 else 0.0
-
-    # Continue Wilder's smoothing for subsequent bars
-    for i in range(period + 1, n):
+    # Apply Wilder's update and calculate DX from index ``period`` onward.
+    for i in range(period, n):
         atr_smooth = atr_smooth - atr_smooth / period + tr[i]
         plus_dm_smooth = plus_dm_smooth - plus_dm_smooth / period + plus_dm[i]
         minus_dm_smooth = minus_dm_smooth - minus_dm_smooth / period + minus_dm[i]
@@ -306,11 +301,11 @@ def compute_adx(
 
     # --- Wilder's smoothing for ADX itself ---
     # First ADX = simple average of DX over the next *period* DX values
-    first_adx_idx = period * 2
+    first_adx_idx = period * 2 - 1
     if first_adx_idx >= n:
         return adx
 
-    adx_val = np.nanmean(dx[period : period * 2 + 1])
+    adx_val = np.mean(dx[period : period * 2])
     adx[first_adx_idx] = adx_val
 
     for i in range(first_adx_idx + 1, n):
