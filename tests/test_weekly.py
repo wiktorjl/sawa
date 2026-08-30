@@ -47,8 +47,18 @@ def _run_weekly_with_mocks(**overrides: Any) -> dict[str, Any]:
         "load_companies": None,
         "load_economy": None,
         "load_news": 5,
-        "run_corporate_actions_update": {"splits_loaded": 0, "split_tickers": []},
-        "character": {"classified": 2, "total": 2, "errors": 0},
+        "run_corporate_actions_update": {
+            "success": True,
+            "splits_loaded": 0,
+            "split_tickers": [],
+        },
+        "recompute_ta": {
+            "success": True,
+            "deleted": 10,
+            "indicators_calculated": 12,
+        },
+        "split_adjust": {"success": True, "prices_updated": 100},
+        "character": {"success": True, "classified": 2, "total": 2, "errors": 0},
     }
     defaults.update(overrides)
     os.environ.pop("FRED_API_KEY", None)
@@ -70,10 +80,10 @@ def _run_weekly_with_mocks(**overrides: Any) -> dict[str, Any]:
         return_value=defaults["run_corporate_actions_update"],
     ), mock.patch(
         "sawa.split_adjust.refresh_split_adjusted_prices",
-        return_value={"success": True, "prices_updated": 100},
+        return_value=defaults["split_adjust"],
     ) as madj, mock.patch(
         "sawa.ta_backfill.recompute_ta_for_tickers",
-        return_value={"success": True, "deleted": 10, "indicators_calculated": 12},
+        return_value=defaults["recompute_ta"],
     ) as mrec, mock.patch(
         "sawa.stock_character_batch.run_stock_character_batch",
         return_value=defaults["character"],
@@ -96,13 +106,75 @@ def _run_weekly_with_mocks(**overrides: Any) -> dict[str, Any]:
 
 def test_weekly_recomputes_ta_after_split_adjust() -> None:
     stats = _run_weekly_with_mocks(
-        run_corporate_actions_update={"splits_loaded": 1, "split_tickers": ["KLAC"]},
+        run_corporate_actions_update={
+            "success": True,
+            "splits_loaded": 1,
+            "split_tickers": ["KLAC"],
+        },
     )
     assert stats["_adj_mock"].called
     assert stats["_rec_mock"].called
     assert stats["_rec_mock"].call_args.kwargs["tickers"] == ["KLAC"]
     assert stats["split_ta_recompute"]["indicators_calculated"] == 12
     assert stats["success"] is True
+
+
+def test_weekly_fails_when_split_ta_recompute_reports_failure() -> None:
+    stats = _run_weekly_with_mocks(
+        run_corporate_actions_update={
+            "success": True,
+            "splits_loaded": 1,
+            "split_tickers": ["KLAC"],
+        },
+        recompute_ta={"success": False, "tickers_failed": 1, "deleted": 0},
+    )
+
+    assert stats["split_ta_recompute"]["success"] is False
+    assert stats["success"] is False
+    assert "corporate_actions" in stats["step_errors"]
+
+
+def test_weekly_stops_before_ta_when_split_adjustment_fails() -> None:
+    stats = _run_weekly_with_mocks(
+        run_corporate_actions_update={
+            "success": True,
+            "splits_loaded": 1,
+            "split_tickers": ["KLAC"],
+        },
+        split_adjust={
+            "success": False,
+            "tickers_requested": 1,
+            "tickers_adjusted": 0,
+        },
+    )
+
+    assert stats["success"] is False
+    assert "corporate_actions" in stats["step_errors"]
+    assert stats["_rec_mock"].called is False
+
+
+def test_weekly_propagates_unsuccessful_character_batch() -> None:
+    stats = _run_weekly_with_mocks(
+        character={"success": False, "classified": 0, "total": 2, "errors": 2}
+    )
+
+    assert stats["success"] is False
+    assert "character" in stats["step_errors"]
+
+
+def test_weekly_propagates_all_empty_corporate_action_failure() -> None:
+    stats = _run_weekly_with_mocks(
+        run_corporate_actions_update={
+            "success": False,
+            "degraded": True,
+            "splits_fetched": 0,
+            "dividends_fetched": 0,
+            "errors": ["global annual feeds returned no rows"],
+        }
+    )
+
+    assert stats["success"] is False
+    assert "corporate_actions" in stats["step_errors"]
 
 
 def test_weekly_early_step_failure_does_not_abort_later_steps() -> None:
@@ -112,7 +184,12 @@ def test_weekly_early_step_failure_does_not_abort_later_steps() -> None:
     assert "overviews" in stats["step_errors"]
     assert stats["economy"] == {"treasury-yields": 1}
     assert stats["news"] == 5
-    assert stats["character"] == {"classified": 2, "total": 2, "errors": 0}
+    assert stats["character"] == {
+        "success": True,
+        "classified": 2,
+        "total": 2,
+        "errors": 0,
+    }
 
 
 def test_get_economy_start_dates_uses_each_table(monkeypatch) -> None:

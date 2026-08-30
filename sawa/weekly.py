@@ -17,17 +17,23 @@ from sawa.api import FredClient, PolygonClient
 from sawa.corporate_actions import run_corporate_actions_update
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.load import (
+    PersistenceResult,
     load_companies,
     load_economy,
     load_market_internals,
     load_news,
+    require_complete_persistence,
 )
+from sawa.database.news import NewsLoadResult
+from sawa.domain.exceptions import ProviderError
+from sawa.provider_downloads import DownloadCount, DownloadStats, bind_provider_record
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
 from sawa.utils.notify import NotificationLevel
+from sawa.utils.security import redact_sensitive_text
 
 ECONOMY_ENDPOINT_TABLES = {
     "treasury-yields": "treasury_yields",
@@ -43,12 +49,14 @@ def download_overviews(
     output_dir: Path,
     logger: logging.Logger,
     rate_limiter: SyncRateLimiter | None = None,
-) -> int:
+) -> DownloadCount:
     """Download company overviews."""
     logger.info("Downloading company overviews...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     overviews: list[dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
     for i, symbol in enumerate(symbols, 1):
         if i % 50 == 0:
             logger.info(f"  Progress: {i}/{len(symbols)}")
@@ -56,7 +64,13 @@ def download_overviews(
             if rate_limiter:
                 rate_limiter.acquire()
             data = client.get_ticker_details(symbol)
+            if not isinstance(data, dict):
+                raise ProviderError(
+                    "Provider returned a non-object company overview",
+                    provider="polygon",
+                )
             if data:
+                data = bind_provider_record(data, symbol, output_field="ticker")
                 # Flatten nested fields
                 flat = {k: v for k, v in data.items() if not isinstance(v, dict)}
                 if "address" in data and data["address"]:
@@ -66,14 +80,24 @@ def download_overviews(
                     for k, v in data["branding"].items():
                         flat[f"branding_{k}"] = v
                 overviews.append(flat)
+            succeeded += 1
         except Exception as e:
-            logger.warning(f"  {symbol}: {e}")
+            failed += 1
+            logger.warning(f"  {symbol}: {redact_sensitive_text(e)}")
 
+    artifact_written = False
     if overviews:
         filepath = output_dir / "overviews.csv"
         write_csv_auto_fields(filepath, overviews, logger)
+        artifact_written = True
 
-    return len(overviews)
+    return DownloadCount(
+        len(overviews),
+        requested=len(symbols),
+        succeeded=succeeded,
+        failed=failed,
+        artifact_written=artifact_written,
+    )
 
 
 def download_economy(
@@ -83,7 +107,7 @@ def download_economy(
     output_dir: Path,
     logger: logging.Logger,
     start_dates: dict[str, str] | None = None,
-) -> dict[str, int]:
+) -> DownloadStats:
     """Download economy data.
 
     Args:
@@ -98,7 +122,7 @@ def download_economy(
     Returns:
         Dict mapping endpoint names to downloaded row counts.
     """
-    stats: dict[str, int] = {}
+    stats = DownloadStats()
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -107,13 +131,33 @@ def download_economy(
         logger.info(f"Downloading {endpoint} ({endpoint_start} to {end_date})...")
         try:
             data = client.get_economy_data(endpoint, endpoint_start, end_date)
+            if not isinstance(data, list):
+                raise ProviderError(
+                    "Provider returned a non-list economy response",
+                    provider="polygon",
+                )
+            artifact: str | None = None
             if data:
                 filepath = output_dir / f"{endpoint.replace('-', '_')}.csv"
                 write_csv_auto_fields(filepath, data, logger)
-            stats[endpoint] = len(data)
+                artifact = ECONOMY_ENDPOINT_TABLES[endpoint]
+            stats.record(
+                endpoint,
+                len(data),
+                requested=1,
+                succeeded=1,
+                failed=0,
+                artifact=artifact,
+            )
         except Exception as e:
-            logger.error(f"  Failed: {e}")
-            stats[endpoint] = 0
+            logger.error(f"  Failed: {redact_sensitive_text(e)}")
+            stats.record(
+                endpoint,
+                0,
+                requested=1,
+                succeeded=0,
+                failed=1,
+            )
 
     return stats
 
@@ -245,20 +289,21 @@ def run_weekly(
 
         # Each independent step is wrapped so one raising does not abort the
         # rest (the steps take database_url/symbols and don't depend on each
-        # other). Failures are recorded into stats and the overall run fails at
-        # the end if any required step failed — mirroring the market-internals
-        # step that was already guarded.
+        # other). Required-step failures make the overall run fail; optional
+        # provider degradation is reported separately without retry storms.
         step_errors: dict[str, str] = {}
+        provider_degraded_reasons: list[str] = []
 
         def _record_step_failure(name: str, exc: Exception, impact: str) -> None:
-            logger.error(f"Weekly step '{name}' failed: {type(exc).__name__}: {exc}")
-            step_errors[name] = f"{type(exc).__name__}: {exc}"
-            stats[f"{name}_error"] = step_errors[name]
+            safe_error = f"{type(exc).__name__}: {redact_sensitive_text(exc)}"
+            logger.error(f"Weekly step '{name}' failed: {safe_error}")
+            step_errors[name] = safe_error
+            stats[f"{name}_error"] = safe_error
             get_notifier(logger).send(
                 title=f"Sawa: weekly {name} step failed",
                 body=(
                     f"The '{name}' step failed during the weekly run.\n"
-                    f"{type(exc).__name__}: {exc}\n\n"
+                    f"{safe_error}\n\n"
                     f"{impact} Remaining weekly steps still ran."
                 ),
                 level=NotificationLevel.WARNING,
@@ -274,9 +319,41 @@ def run_weekly(
                     client, symbols, output_dir / "overviews", logger, rate_limiter
                 )
                 stats["overviews"] = overview_count
-                # Load into database
-                with psycopg.connect(database_url) as conn:
-                    load_companies(conn, output_dir / "overviews" / "overviews.csv", logger)
+                if isinstance(overview_count, DownloadCount):
+                    stats["overviews_requests"] = overview_count.summary()
+                    if overview_count.all_failed:
+                        raise ProviderError(
+                            "All company overview provider requests failed",
+                            provider="polygon",
+                        )
+                    if overview_count.empty_successful:
+                        raise ProviderError(
+                            "Company overview provider returned no rows",
+                            provider="polygon",
+                        )
+                    if overview_count.failed:
+                        provider_degraded_reasons.append(
+                            "company overview provider requests partially failed"
+                        )
+                    artifact_written = overview_count.artifact_written
+                else:
+                    # Compatibility for integrations that still wrap this
+                    # helper and return a plain count.
+                    artifact_written = int(overview_count) > 0
+                if artifact_written:
+                    with psycopg.connect(database_url) as conn:
+                        loaded_overviews = load_companies(
+                            conn,
+                            output_dir / "overviews" / "overviews.csv",
+                            logger,
+                        )
+                    if isinstance(loaded_overviews, PersistenceResult):
+                        require_complete_persistence(
+                            loaded_overviews,
+                            expected_rows=int(overview_count),
+                        )
+                        stats["overviews_loaded"] = int(loaded_overviews)
+                        stats["overviews_persistence"] = loaded_overviews.summary()
             except Exception as e:
                 _record_step_failure(
                     "overviews", e, "Company metadata will be stale until the next run."
@@ -296,9 +373,66 @@ def run_weekly(
                     start_dates=economy_start_dates,
                 )
                 stats["economy"] = econ_stats
-                # Load into database
-                with psycopg.connect(database_url) as conn:
-                    load_economy(conn, output_dir / "economy", logger)
+                if isinstance(econ_stats, DownloadStats):
+                    stats["economy_requests"] = econ_stats.requests
+                    failed_feeds = econ_stats.failed_feeds
+                    if econ_stats.has_failures and not failed_feeds:
+                        provider_degraded_reasons.append(
+                            "economy provider requests partially failed"
+                        )
+                    if econ_stats.empty_feeds:
+                        provider_degraded_reasons.append(
+                            "economy feeds returned no fresh rows: "
+                            + ", ".join(sorted(econ_stats.empty_feeds))
+                        )
+                    fresh_tables = econ_stats.artifacts
+                else:
+                    fresh_tables = {
+                        ECONOMY_ENDPOINT_TABLES[endpoint]
+                        for endpoint, rows in econ_stats.items()
+                        if rows > 0 and endpoint in ECONOMY_ENDPOINT_TABLES
+                    }
+                if fresh_tables:
+                    with psycopg.connect(database_url) as conn:
+                        loaded_economy = load_economy(
+                            conn,
+                            output_dir / "economy",
+                            logger,
+                            only_tables=fresh_tables,
+                        )
+                    if isinstance(loaded_economy, dict):
+                        stats["economy_loaded"] = {
+                            table: int(result)
+                            for table, result in loaded_economy.items()
+                        }
+                        stats["economy_persistence"] = {
+                            table: result.summary()
+                            for table, result in loaded_economy.items()
+                            if isinstance(result, PersistenceResult)
+                        }
+                        expected_by_table = {
+                            ECONOMY_ENDPOINT_TABLES[endpoint]: int(rows)
+                            for endpoint, rows in econ_stats.items()
+                            if endpoint in ECONOMY_ENDPOINT_TABLES
+                            and ECONOMY_ENDPOINT_TABLES[endpoint] in fresh_tables
+                        }
+                        for table in fresh_tables:
+                            result = loaded_economy.get(table)
+                            if result is None:
+                                raise RuntimeError(
+                                    f"Fresh {table} artifact was not loaded"
+                                )
+                            if isinstance(result, PersistenceResult):
+                                require_complete_persistence(
+                                    result,
+                                    expected_rows=expected_by_table.get(table, 0),
+                                )
+                if isinstance(econ_stats, DownloadStats) and failed_feeds:
+                    raise ProviderError(
+                        "Every request failed for economy feed(s): "
+                        + ", ".join(sorted(failed_feeds)),
+                        provider="polygon",
+                    )
             except Exception as e:
                 _record_step_failure(
                     "economy", e, "Treasury/inflation/labor data will be stale until the next run."
@@ -309,7 +443,38 @@ def run_weekly(
             logger.info(f"\n[{step}/{total_steps}] Updating market internals from FRED...")
             fred_client = FredClient(fred_api_key, logger)
             try:
-                mi_rows = fred_client.get_market_internals(market_internals_start_str, end_str)
+                mi_result = fred_client.get_market_internals(
+                    market_internals_start_str, end_str
+                )
+                mi_rows = mi_result.rows
+                if mi_result.failures:
+                    stats["market_internals_failures"] = mi_result.failure_details
+                    stats["market_internals_degraded"] = True
+                    failure_summary = ", ".join(
+                        f"{failure.field} ({failure.error_type})"
+                        for failure in mi_result.failures
+                    )
+                    if mi_result.all_series_failed:
+                        reason = "market internals failed (all FRED series)"
+                        stats["market_internals_error"] = "all FRED series failed"
+                    else:
+                        reason = (
+                            "market internals partial FRED series failure: "
+                            f"{failure_summary}"
+                        )
+                    provider_degraded_reasons.append(reason)
+                    logger.warning(f"  {reason}")
+                    get_notifier(logger).send(
+                        title="Sawa: weekly market internals degraded",
+                        body=(
+                            "The FRED market-internals fetch was incomplete.\n"
+                            f"Failed series: {failure_summary}\n\n"
+                            "Available series were still loaded; missing values preserve "
+                            "previous database values."
+                        ),
+                        level=NotificationLevel.WARNING,
+                        tags=["warning", "weekly", "market_internals"],
+                    )
                 if mi_rows:
                     with psycopg.connect(database_url) as conn:
                         loaded = load_market_internals(conn, mi_rows, logger)
@@ -317,14 +482,17 @@ def run_weekly(
                 else:
                     stats["market_internals"] = 0
             except Exception as e:
-                logger.warning(f"Market internals update failed: {e}")
+                safe_error = redact_sensitive_text(e)
+                logger.warning(f"Market internals update failed: {safe_error}")
                 stats["market_internals"] = 0
-                stats["market_internals_error"] = str(e)
+                stats["market_internals_error"] = safe_error
+                stats["market_internals_degraded"] = True
+                provider_degraded_reasons.append("market internals update failed")
                 get_notifier(logger).send(
                     title="Sawa: market internals update failed",
                     body=(
                         f"FRED market internals fetch/load failed during weekly run.\n"
-                        f"{type(e).__name__}: {e}\n\n"
+                        f"{type(e).__name__}: {safe_error}\n\n"
                         "VIX/VIX3M/HY spread will be stale until the next successful run."
                     ),
                     level=NotificationLevel.WARNING,
@@ -338,6 +506,10 @@ def run_weekly(
                 "FRED market internals (VIX, VIX3M, HY spread)",
                 logger,
             )
+            stats["market_internals_skipped"] = "FRED_API_KEY not set"
+            provider_degraded_reasons.append(
+                "market internals skipped (FRED_API_KEY not set)"
+            )
 
         # Step: Update news
         if not skip_news:
@@ -345,10 +517,38 @@ def run_weekly(
             step += 1
             try:
                 with psycopg.connect(database_url) as conn:
-                    news_count = load_news(
+                    news_result = load_news(
                         conn, client, symbols, days=DEFAULT_NEWS_DAYS, log=logger
                     )
-                stats["news"] = news_count
+                stats["news"] = int(news_result)
+                if isinstance(news_result, NewsLoadResult):
+                    stats["news_requests"] = news_result.summary()
+                    if news_result.all_requests_failed:
+                        raise ProviderError(
+                            "All news provider requests failed",
+                            provider="polygon",
+                        )
+                    if news_result.no_articles_fetched:
+                        raise ProviderError(
+                            "News provider returned no articles for the requested universe",
+                            provider="polygon",
+                        )
+                    if news_result.total_persistence_failure:
+                        raise RuntimeError(
+                            "News persistence rejected every fetched article ("
+                            f"{news_result.rejected_articles} article(s)"
+                            ")"
+                        )
+                    if news_result.failed:
+                        provider_degraded_reasons.append(
+                            "news provider requests partially failed"
+                        )
+                    if news_result.partial_persistence_failure:
+                        provider_degraded_reasons.append(
+                            "news persistence partially rejected articles"
+                        )
+                elif int(news_result) <= 0:
+                    raise RuntimeError("News loader returned no typed outcome or rows")
             except Exception as e:
                 _record_step_failure(
                     "news", e, "News articles will catch up on the next run (30-day re-pull)."
@@ -366,6 +566,10 @@ def run_weekly(
                     logger=logger,
                 )
                 stats["corporate_actions"] = ca_stats
+                if not ca_stats.get("success"):
+                    raise RuntimeError(
+                        "corporate-actions update reported an incomplete result"
+                    )
 
                 # If splits were loaded, re-fetch adjusted prices for affected
                 # tickers, then fully recompute their technical indicators so
@@ -385,6 +589,13 @@ def run_weekly(
                         logger=logger,
                     )
                     stats["split_adjust"] = adjust_stats
+                    if not adjust_stats.get("success"):
+                        raise RuntimeError(
+                            "split-adjusted price refresh reported an incomplete result "
+                            f"({adjust_stats.get('tickers_adjusted', 0)}/"
+                            f"{adjust_stats.get('tickers_requested', len(split_tickers))} "
+                            "tickers)"
+                        )
 
                     from sawa.ta_backfill import recompute_ta_for_tickers
 
@@ -392,11 +603,17 @@ def run_weekly(
                         f"\nRecomputing technical indicators for "
                         f"{len(split_tickers)} split ticker(s)..."
                     )
-                    stats["split_ta_recompute"] = recompute_ta_for_tickers(
+                    ta_stats = recompute_ta_for_tickers(
                         database_url=database_url,
                         tickers=split_tickers,
                         log=logger,
                     )
+                    stats["split_ta_recompute"] = ta_stats
+                    if not ta_stats.get("success"):
+                        failed = ta_stats.get("tickers_failed", "unknown")
+                        raise RuntimeError(
+                            f"split TA recompute failed for {failed} ticker(s)"
+                        )
             except Exception as e:
                 _record_step_failure(
                     "corporate_actions",
@@ -417,6 +634,13 @@ def run_weekly(
                     log=logger,
                 )
                 stats["character"] = character_stats
+                if not character_stats.get("success", False):
+                    raise RuntimeError(
+                        "stock character batch reported an incomplete result "
+                        f"({character_stats.get('classified', 0)}/"
+                        f"{character_stats.get('total', 0)} classified; "
+                        f"{character_stats.get('errors', 0)} errors)"
+                    )
             except Exception as e:
                 _record_step_failure(
                     "character",
@@ -444,13 +668,22 @@ def run_weekly(
             if summary.get("warning"):
                 logger.warning(f"  {summary['warning']}")
         except Exception as e:
-            logger.warning(f"MCP query insights refresh failed: {e}")
-            stats["mcp_query_insights_error"] = str(e)
+            safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
+            logger.warning(f"MCP query insights refresh failed: {safe_error}")
+            stats["mcp_query_insights_error"] = safe_error
 
         # The run reaches here without a fatal exception, but individual steps
         # may have failed (caught + recorded above). Fail the overall run if any
         # did, so the scheduler withholds the weekly_done flag and retries — but
         # only after every independent step had its chance to run.
+        degraded_reasons = [
+            f"weekly step failed ({name})" for name in sorted(step_errors)
+        ]
+        degraded_reasons.extend(provider_degraded_reasons)
+        stats["degraded"] = bool(degraded_reasons)
+        if degraded_reasons:
+            stats["degraded_reasons"] = degraded_reasons
+
         if step_errors:
             stats["success"] = False
             stats["step_errors"] = step_errors
@@ -458,12 +691,12 @@ def run_weekly(
             stats["success"] = True
         logger.info("\n" + "=" * 60)
         logger.info(
-            "WEEKLY UPDATE COMPLETE" + (" (DEGRADED)" if step_errors else "")
+            "WEEKLY UPDATE COMPLETE" + (" (DEGRADED)" if degraded_reasons else "")
         )
         logger.info("=" * 60)
 
-        if step_errors:
-            logger.warning("  Failed steps: " + ", ".join(sorted(step_errors)))
+        if degraded_reasons:
+            logger.warning("  DEGRADED: " + "; ".join(degraded_reasons))
         if "overviews" in stats:
             logger.info(f"  Overviews: {stats['overviews']}")
         if "economy" in stats:
@@ -484,8 +717,9 @@ def run_weekly(
             )
 
     except Exception as e:
-        logger.error(f"Weekly update failed: {e}")
-        stats["error"] = str(e)
+        safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
+        logger.error(f"Weekly update failed: {safe_error}")
+        stats["error"] = safe_error
         raise
 
     return stats
