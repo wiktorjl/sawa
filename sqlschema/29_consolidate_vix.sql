@@ -14,8 +14,9 @@
 --   2. Recreates v_economy_dashboard against the new column.
 --   3. Adds v_market_internals_enriched with VIX-native metrics
 --      (term structure, 20-day SMA/stddev, 252-day percentile rank).
---   4. Deletes the duplicate ^VIX / ^VIX3M data from stock_prices,
---      technical_indicators, and companies.
+--   4. Leaves any legacy ^VIX / ^VIX3M rows intact. They are no longer read by
+--      the current pipelines, and a replayable schema upgrade must not delete
+--      user data.
 
 -- Step 1: drop the view that depends on vix_close so we can rename the column.
 DROP VIEW IF EXISTS v_economy_dashboard;
@@ -132,14 +133,9 @@ LEFT JOIN LATERAL (
 ) hr ON true
 ORDER BY b.date DESC;
 
--- Step 5: delete the duplicate stock-like VIX rows.
--- Order matters: technical_indicators and stock_prices both reference
--- companies via foreign key, so children first.
-DELETE FROM technical_indicators WHERE ticker IN ('^VIX', '^VIX3M');
-DELETE FROM stock_prices         WHERE ticker IN ('^VIX', '^VIX3M');
-DELETE FROM companies            WHERE ticker IN ('^VIX', '^VIX3M');
-
--- Step 6: drop the empty vix_intraday table. It was sourced from Polygon
--- I:VIX (requires paid Indices plan; returns 403 on ours) and never
--- received data. No code references it.
-DROP TABLE IF EXISTS vix_intraday;
+-- Historical cleanup intentionally omitted. Even apparently obsolete rows or
+-- tables may hold operator data, so no-drop upgrades preserve them.
+DO $$
+BEGIN
+    RAISE NOTICE 'Preserving legacy VIX rows/tables (migration 29 is non-destructive)';
+END $$;

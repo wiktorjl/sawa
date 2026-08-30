@@ -6,11 +6,11 @@
 CREATE TABLE IF NOT EXISTS stock_prices (
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     date DATE NOT NULL,
-    open NUMERIC(12, 4),
-    high NUMERIC(12, 4),
-    low NUMERIC(12, 4),
-    close NUMERIC(12, 4),
-    volume BIGINT,
+    open NUMERIC(12, 4) NOT NULL,
+    high NUMERIC(12, 4) NOT NULL,
+    low NUMERIC(12, 4) NOT NULL,
+    close NUMERIC(12, 4) NOT NULL,
+    volume BIGINT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (ticker, date)
 );

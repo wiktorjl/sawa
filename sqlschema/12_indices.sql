@@ -26,10 +26,25 @@ CREATE TABLE IF NOT EXISTS index_constituents (
 CREATE INDEX IF NOT EXISTS idx_index_constituents_ticker ON index_constituents(ticker);
 CREATE INDEX IF NOT EXISTS idx_index_constituents_index_id ON index_constituents(index_id);
 
--- Seed initial indices
-INSERT INTO indices (code, name, description, source_url) VALUES
-('sp500', 'S&P 500', 'Standard & Poor''s 500 Index - 500 large-cap US stocks',
- 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'),
-('nasdaq_listed', 'NASDAQ Listed', 'All currently-active NASDAQ-listed tickers (CS + ETF + ADRC)',
- NULL)
+-- Seed initial indices. On a pre-34 upgrade, defer the canonical NASDAQ seed
+-- while the legacy code exists so migration 34 can rename it without colliding
+-- with the UNIQUE(code) constraint.
+INSERT INTO indices (code, name, description, source_url)
+VALUES (
+    'sp500',
+    'S&P 500',
+    'Standard & Poor''s 500 Index - 500 large-cap US stocks',
+    'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO indices (code, name, description, source_url)
+SELECT
+    'nasdaq_listed',
+    'NASDAQ Listed',
+    'All currently-active NASDAQ-listed tickers (CS + ETF + ADRC)',
+    NULL
+WHERE NOT EXISTS (
+    SELECT 1 FROM indices WHERE code = 'nasdaq5000'
+)
 ON CONFLICT (code) DO NOTHING;

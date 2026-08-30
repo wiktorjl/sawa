@@ -73,27 +73,39 @@ LEFT JOIN LATERAL (
 ORDER BY d.date DESC;
 
 -- ── 2. stock_prices OHLC integrity ───────────────────────────────────────────
--- Remove the handful of existing junk rows (sub-penny microcaps that collapse to
--- 0.0000 at NUMERIC(16,4), plus any non-positive/inverted rows) so the CHECK can
--- be validated, then constrain. The daily loader already filters these before
--- upsert; the constraint is the backstop.
-DELETE FROM stock_prices
-WHERE open <= 0 OR high <= 0 OR low <= 0 OR close <= 0
-   OR high < low
-   OR volume < 0;
-
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'stock_prices_ohlcv_sane'
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.stock_prices'::pg_catalog.regclass
+          AND conname = 'stock_prices_ohlcv_sane'
     ) THEN
-        ALTER TABLE stock_prices
+        ALTER TABLE public.stock_prices
             ADD CONSTRAINT stock_prices_ohlcv_sane
             CHECK (
                 open > 0 AND high > 0 AND low > 0 AND close > 0
                 AND high >= low
                 AND volume >= 0
-            );
+            )
+            NOT VALID;
+    END IF;
+
+    -- Preserve any legacy malformed rows. The NOT VALID constraint already
+    -- blocks new bad writes; validate it automatically only when history is
+    -- clean. Operators can repair rows and safely replay this migration.
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.stock_prices
+        WHERE open <= 0 OR high <= 0 OR low <= 0 OR close <= 0
+           OR high < low
+           OR volume < 0
+    ) THEN
+        ALTER TABLE public.stock_prices
+            VALIDATE CONSTRAINT stock_prices_ohlcv_sane;
+    ELSE
+        RAISE NOTICE
+            'stock_prices contains legacy malformed OHLCV rows; rows preserved, sanity guard left NOT VALID';
     END IF;
 END $$;
 
