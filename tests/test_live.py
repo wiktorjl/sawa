@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from sawa.api.async_client import AggregateBatchResult
 from sawa.live import get_live_price, get_live_prices_batch
 
 
@@ -193,6 +194,46 @@ class TestGetLivePricesBatch:
         assert result["AAPL"]["error"] is None
         assert result["FAKE"]["error"] is not None
         assert result["FAKE"]["current_price"] is None
+
+    @pytest.mark.asyncio
+    async def test_failed_provider_request_is_returned_as_ticker_error(self) -> None:
+        """A failed batch member must not disappear from the public result."""
+        batch_results = AggregateBatchResult(
+            {"AAPL": list(FIVE_BARS)},
+            failures={"MSFT": "ProviderError: upstream unavailable"},
+        )
+        with patch("sawa.live.AsyncPolygonClient") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.get_aggregates_batch = AsyncMock(return_value=batch_results)
+
+            result = await get_live_prices_batch(
+                ["aapl", "msft"], days=5, api_key="test-key"
+            )
+
+        assert result["AAPL"]["error"] is None
+        assert result["MSFT"]["current_price"] is None
+        assert "Provider request failed" in result["MSFT"]["error"]
+        assert result["MSFT"]["error_type"] == "provider_error"
+        assert mock_client.get_aggregates_batch.call_args.kwargs["tickers"] == [
+            "AAPL",
+            "MSFT",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_missing_plain_dict_member_is_returned_as_ticker_error(self) -> None:
+        """Compatibility mocks/clients cannot silently omit a requested ticker."""
+        with patch("sawa.live.AsyncPolygonClient") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.get_aggregates_batch = AsyncMock(return_value={"AAPL": []})
+
+            result = await get_live_prices_batch(
+                ["AAPL", "MSFT"], days=5, api_key="test-key"
+            )
+
+        assert result["AAPL"]["error"] == "No data found for AAPL"
+        assert result["AAPL"]["error_type"] == "no_data"
+        assert result["MSFT"]["error"] == "No batch result returned for MSFT"
+        assert result["MSFT"]["error_type"] == "provider_error"
 
     @pytest.mark.asyncio
     async def test_single_bar_per_ticker(self) -> None:

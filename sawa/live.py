@@ -22,6 +22,7 @@ from typing import Any
 from sawa.api.async_client import AsyncPolygonClient
 from sawa.utils.config import get_env
 from sawa.utils.dates import timestamp_to_date
+from sawa.utils.security import redact_sensitive_text
 
 
 async def get_live_price(
@@ -84,6 +85,7 @@ async def get_live_price(
         return {
             "ticker": ticker,
             "error": f"No data found for {ticker}",
+            "error_type": "no_data",
             "current_price": None,
             "current_date": None,
             "history": [],
@@ -109,6 +111,7 @@ async def get_live_price(
         "history": results,
         "change_percent": change_percent,
         "error": None,
+        "error_type": None,
     }
 
 
@@ -132,6 +135,23 @@ async def get_live_prices_batch(
     Returns:
         Dict mapping ticker -> result dict (same format as get_live_price)
     """
+    if not (1 <= days <= 30):
+        raise ValueError(f"days must be between 1 and 30, got {days}")
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    if not tickers:
+        raise ValueError("tickers cannot be empty")
+
+    normalized_tickers: list[str] = []
+    seen: set[str] = set()
+    for ticker in tickers:
+        normalized = ticker.upper().strip()
+        if not normalized:
+            raise ValueError("ticker cannot be empty")
+        if normalized not in seen:
+            normalized_tickers.append(normalized)
+            seen.add(normalized)
+
     resolved_api_key = api_key or get_env("POLYGON_API_KEY")
     if not resolved_api_key:
         raise ValueError("POLYGON_API_KEY not set")
@@ -144,7 +164,7 @@ async def get_live_prices_batch(
     # Fetch batch
     client = AsyncPolygonClient(resolved_api_key, logger)
     batch_results = await client.get_aggregates_batch(
-        tickers=tickers,
+        tickers=normalized_tickers,
         start_date=start_date,
         end_date=end_date,
         sort="desc",
@@ -154,11 +174,31 @@ async def get_live_prices_batch(
 
     # Process results
     output: dict[str, dict[str, Any]] = {}
+    batch_failures: dict[str, str] = getattr(batch_results, "failures", {})
+    for ticker in normalized_tickers:
+        if ticker in batch_results:
+            continue
+        failure = batch_failures.get(ticker)
+        if failure:
+            message = f"Provider request failed for {ticker}: {failure}"
+        else:
+            message = f"No batch result returned for {ticker}"
+        output[ticker] = {
+            "ticker": ticker,
+            "error": redact_sensitive_text(message),
+            "error_type": "provider_error",
+            "current_price": None,
+            "current_date": None,
+            "history": [],
+            "change_percent": None,
+        }
+
     for ticker, results in batch_results.items():
         if not results:
             output[ticker] = {
                 "ticker": ticker,
                 "error": f"No data found for {ticker}",
+                "error_type": "no_data",
                 "current_price": None,
                 "current_date": None,
                 "history": [],
@@ -185,6 +225,7 @@ async def get_live_prices_batch(
             "history": results,
             "change_percent": change_percent,
             "error": None,
+            "error_type": None,
         }
 
     return output
