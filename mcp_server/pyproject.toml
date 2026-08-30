@@ -26,6 +26,12 @@ dev = [
     "types-jsonschema",
 ]
 
+[tool.hatch.build]
+# The wheel adds the `mcp_server` package prefix during path rewriting. Hatch
+# cannot infer an editable import root from that prefix-adding rewrite, so point
+# dev installs at the repository root explicitly.
+dev-mode-dirs = [".."]
+
 [tool.hatch.build.targets.wheel]
 only-include = [
     "__init__.py",
