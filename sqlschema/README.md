@@ -39,6 +39,19 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 | `31_widen_indicator_precision.sql` | Widens price-shaped technical-indicator columns | — |
 | `32_us_active_index.sql` | Seeds the `us_active` index definition | Polygon ticker reference |
 | `33_schema_integrity_and_time_semantics.sql` | Migration: intraday timestamp/timezone semantics, stock-character FKs/precision, trailing VIX ranks, GICS volatility | — |
+| `34_rename_nasdaq5000.sql` | Renames the legacy broad-NASDAQ index code to `nasdaq_listed` | — |
+| `35_additional_indices.sql` | Adds NASDAQ-100, Dow 30, and Mag 7 index definitions | seed data |
+| `36_sic_gics_data_extension.sql` | Extends SIC-to-GICS mapping coverage | bundled SQL seed |
+| `37_gics_overrides.sql` | Adds and seeds explicit ticker-level GICS overrides | bundled SQL seed |
+| `38_gics_function_v2.sql` | Updates GICS lookup behavior for overrides | — |
+| `39_russell1000_index.sql` | Adds the Russell 1000 index definition | seed data |
+| `40_repair_intraday_tz_and_live_view.sql` | Repairs intraday timezone metadata and rebuilds the live-price view | — |
+| `41_dashboard_spine_and_integrity.sql` | Adds dashboard date spine and data-integrity constraints | — |
+| `42_widen_price_for_reverse_splits.sql` | Widens daily/intraday price precision for extreme reverse splits | — |
+| `43_intraday_ohlc_sanity_check.sql` | Adds a forward-only intraday OHLCV value sanity check | — |
+| `44_ohlcv_completeness.sql` | Adds non-destructive daily/intraday OHLCV NULL guards | — |
+| `45_intraday_bar_size_identity.sql` | Preserves legacy bars while making interval part of intraday identity; keeps the live candle on one resolution | — |
+| `46_dividend_identity.sql` | Archives legacy duplicate dividend identities and adds PG12-compatible NULL-normalized uniqueness | — |
 
 For the canonical mapping of external data source → table → loader →
 pipeline command, see [`docs/DATA_SOURCES.md`](../docs/DATA_SOURCES.md).
@@ -49,29 +62,36 @@ pipeline command, see [`docs/DATA_SOURCES.md`](../docs/DATA_SOURCES.md).
 
 ```bash
 sawa coldstart --schema-only        # Drops tables, applies all SQL files
-sawa coldstart --no-drop            # Re-applies SQL non-destructively (safe upgrade)
+sawa coldstart --no-drop            # Preserves data; applies all SQL atomically
 ```
 
 ### Manual
 
 ```bash
-# All at once
-for f in sqlschema/*.sql; do psql "$DATABASE_URL" -f "$f"; done
-
-# Or via the schema runner module
+# The schema runner holds every migration and verification in one transaction.
 python -m sawa.database.schema --database-url "$DATABASE_URL" --drop --force
 ```
 
-The runner uses `psycopg.sql.Identifier` for safe table-name handling and
-verifies the expected tables exist after loading. See
-`sawa/database/schema.py` for the list of `EXPECTED_TABLES`.
+Do not replay the numbered files with an autocommit `psql -f` loop. Migrations
+that reconcile an identity or replace an index require one transaction across
+their statements. If diagnosing a single raw file, use `psql
+--single-transaction -f ...` against a disposable database.
+
+The no-drop runner contains no unrecoverable cleanup in replayed migrations and
+commits the complete ordered schema set as one transaction; a failed file rolls
+the whole schema attempt back. Migration 46 is the explicit exception to a
+strictly additive replay: it reconciles duplicate dividend identities only
+after copying every non-survivor into `dividend_identity_conflicts`. The runner
+uses `psycopg.sql.Identifier` for safe table-name handling and verifies the
+expected tables exist after loading. See `sawa/database/schema.py` for the list
+of `EXPECTED_TABLES`.
 
 ## Table Relationships
 
 ```
 companies (ticker PK)
   ├─< stock_prices              (ticker, date)
-  ├─< stock_prices_intraday     (ticker, ts)
+  ├─< stock_prices_intraday     (ticker, timestamp, bar_size_minutes)
   ├─< financial_ratios          (ticker, date)
   ├─< balance_sheets            (ticker, period_end, timeframe)
   ├─< income_statements         (ticker, period_end, timeframe)

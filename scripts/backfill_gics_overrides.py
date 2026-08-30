@@ -34,7 +34,6 @@ Requires:
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import random
 import signal
@@ -257,7 +256,11 @@ def main() -> int:
                         "  %s (%s) → %s / %s", ticker, ttype, gics_sector, yahoo_industry
                     )
 
-                if not args.dry_run and (filled + skipped + errors + unmapped) - last_commit_at >= BATCH_COMMIT_SIZE:
+                if (
+                    not args.dry_run
+                    and (filled + skipped + errors + unmapped) - last_commit_at
+                    >= BATCH_COMMIT_SIZE
+                ):
                     conn.commit()
                     last_commit_at = filled + skipped + errors + unmapped
                     _save_state(ticker, filled, skipped, errors)

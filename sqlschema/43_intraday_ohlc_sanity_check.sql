@@ -3,8 +3,8 @@
 -- ============================================
 -- Migration 41 added stock_prices_ohlcv_sane to stock_prices as a DB-level
 -- backstop against junk OHLCV (zero/negative price, inverted high<low, negative
--- volume), but stock_prices_intraday was left with only NOT NULL + PK + FK
--- constraints. The stock_prices_live view aggregates intraday bars into today's
+-- volume), but stock_prices_intraday was left with only PK + FK constraints.
+-- The stock_prices_live view aggregates intraday bars into today's
 -- (data_source='intraday') candle (open=first, high=MAX, low=MIN, close=last,
 -- volume=SUM) with no value guard, and neither the websocket client nor
 -- load_intraday_bars performs any OHLC sanity check — so an out-of-spec intraday
@@ -27,9 +27,12 @@
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'stock_prices_intraday_ohlcv_sane'
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.stock_prices_intraday'::pg_catalog.regclass
+          AND conname = 'stock_prices_intraday_ohlcv_sane'
     ) THEN
-        ALTER TABLE stock_prices_intraday
+        ALTER TABLE public.stock_prices_intraday
             ADD CONSTRAINT stock_prices_intraday_ohlcv_sane
             CHECK (
                 open > 0 AND high > 0 AND low > 0 AND close > 0

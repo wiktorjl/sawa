@@ -9,17 +9,59 @@
 -- code and to rename the alias 'in_nasdaq5000' → 'in_nasdaq_listed'.
 -- Any consumer code reading from that view must update accordingly.
 
-UPDATE indices
-   SET code = 'nasdaq_listed',
-       name = 'NASDAQ Listed',
-       description = 'All currently-active NASDAQ-listed tickers (CS + ETF + ADRC)'
- WHERE code = 'nasdaq5000';
+DO $migration$
+DECLARE
+    legacy_id INTEGER;
+    canonical_id INTEGER;
+BEGIN
+    SELECT id INTO legacy_id
+    FROM indices
+    WHERE code = 'nasdaq5000';
+
+    IF legacy_id IS NOT NULL THEN
+        SELECT id INTO canonical_id
+        FROM indices
+        WHERE code = 'nasdaq_listed';
+
+        IF canonical_id IS NULL THEN
+            UPDATE indices
+               SET code = 'nasdaq_listed',
+                   name = 'NASDAQ Listed',
+                   description =
+                       'All currently-active NASDAQ-listed tickers (CS + ETF + ADRC)'
+             WHERE id = legacy_id;
+        ELSE
+            -- Recover a partially applied/non-atomic legacy upgrade without
+            -- deleting either row or any constituent. Copy memberships into
+            -- the canonical index and retain the old row under an archival,
+            -- non-routable code.
+            INSERT INTO index_constituents (index_id, ticker, added_at)
+            SELECT canonical_id, ticker, added_at
+            FROM index_constituents
+            WHERE index_id = legacy_id
+            ON CONFLICT (index_id, ticker) DO NOTHING;
+
+            UPDATE indices
+               SET name = 'NASDAQ Listed',
+                   description =
+                       'All currently-active NASDAQ-listed tickers (CS + ETF + ADRC)'
+             WHERE id = canonical_id;
+
+            UPDATE indices
+               SET code = ('nasdaq_legacy_' || id)::VARCHAR(20),
+                   name = name || ' (legacy preserved)'
+             WHERE id = legacy_id;
+        END IF;
+    END IF;
+END
+$migration$;
 
 -- Rebuild the view so the renamed column alias takes effect on
 -- already-deployed databases. CREATE OR REPLACE rejects column renames,
--- so DROP first. CASCADE handles any downstream dependent objects (none
--- exist today but is safe if added later).
-DROP VIEW IF EXISTS v_company_with_indices CASCADE;
+-- so DROP first. Deliberately omit CASCADE: if an operator has added a
+-- dependent object, the atomic upgrade must stop and roll back instead of
+-- silently deleting that extension.
+DROP VIEW IF EXISTS v_company_with_indices;
 
 CREATE VIEW v_company_with_indices AS
 SELECT

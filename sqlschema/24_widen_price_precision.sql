@@ -1,6 +1,7 @@
 -- Widen NUMERIC precision on price columns to accommodate
 -- split-adjusted prices that may exceed NUMERIC(12,4) range.
--- NUMERIC(16,4) supports values up to 999,999,999,999.9999.
+-- NUMERIC(20,8) is the final monotonic target: it preserves sub-penny
+-- reverse-split history and never narrows a schema already upgraded by 42.
 
 -- Drop all dependent views first
 DROP VIEW IF EXISTS stock_prices_live;
@@ -9,17 +10,17 @@ DROP MATERIALIZED VIEW IF EXISTS mv_52week_extremes;
 
 -- Widen stock_prices columns
 ALTER TABLE stock_prices
-    ALTER COLUMN open TYPE NUMERIC(16, 4),
-    ALTER COLUMN high TYPE NUMERIC(16, 4),
-    ALTER COLUMN low TYPE NUMERIC(16, 4),
-    ALTER COLUMN close TYPE NUMERIC(16, 4);
+    ALTER COLUMN open TYPE NUMERIC(20, 8),
+    ALTER COLUMN high TYPE NUMERIC(20, 8),
+    ALTER COLUMN low TYPE NUMERIC(20, 8),
+    ALTER COLUMN close TYPE NUMERIC(20, 8);
 
 -- Widen stock_prices_intraday columns
 ALTER TABLE stock_prices_intraday
-    ALTER COLUMN open TYPE NUMERIC(16, 4),
-    ALTER COLUMN high TYPE NUMERIC(16, 4),
-    ALTER COLUMN low TYPE NUMERIC(16, 4),
-    ALTER COLUMN close TYPE NUMERIC(16, 4);
+    ALTER COLUMN open TYPE NUMERIC(20, 8),
+    ALTER COLUMN high TYPE NUMERIC(20, 8),
+    ALTER COLUMN low TYPE NUMERIC(20, 8),
+    ALTER COLUMN close TYPE NUMERIC(20, 8);
 
 -- Recreate stock_prices_live view
 CREATE OR REPLACE VIEW stock_prices_live AS

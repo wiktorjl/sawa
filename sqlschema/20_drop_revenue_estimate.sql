@@ -1,9 +1,12 @@
 -- ============================================
--- DROP REVENUE_ESTIMATE COLUMN
+-- DEPRECATE REVENUE_ESTIMATE IN PLACE
 -- ============================================
--- Remove revenue_estimate column as yfinance only provides estimates
--- for the upcoming quarter, making historical data incomplete.
-
-ALTER TABLE earnings DROP COLUMN IF EXISTS revenue_estimate;
+-- Historical versions dropped this column. Because schema files are replayed
+-- by the data-preserving no-drop upgrade path, retain any existing values and
+-- simply stop reading/writing the deprecated field in application code.
+DO $$
+BEGIN
+    RAISE NOTICE 'Preserving deprecated earnings.revenue_estimate values';
+END $$;
 
 COMMENT ON TABLE earnings IS 'Earnings calendar and actuals - EPS and revenue data';
