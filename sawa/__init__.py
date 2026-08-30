@@ -20,7 +20,7 @@ CLI Commands:
     sawa add-symbol PLTR COIN       # Add new symbols
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 # Lazy imports to avoid circular dependencies

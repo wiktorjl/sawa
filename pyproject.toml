@@ -14,7 +14,7 @@ dependencies = [
     "requests>=2.28.0",
     "beautifulsoup4>=4.11.0",
     "boto3>=1.28.0",
-    "psycopg[binary]>=3.0",
+    "psycopg[binary]>=3.0.15,<4",
     "python-dateutil>=2.8.0",
     "python-dotenv>=1.0.0",
     "tomli>=2.0;python_version<'3.11'",
@@ -23,12 +23,15 @@ dependencies = [
     "scipy>=1.10.0",
     "statsmodels>=0.14.0",
     "tqdm>=4.65.0",
-    "websockets>=12.0",
+    "websockets>=13.0",
     "pytz>=2023.3",
     "TA-Lib>=0.4.0",  # Requires C library: brew install ta-lib (macOS) or apt install libta-lib-dev (Ubuntu)
 ]
 
 [project.optional-dependencies]
+backfill = [
+    "yfinance>=0.2.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23.0",
@@ -36,9 +39,11 @@ dev = [
     "mypy>=1.0",
     "ruff>=0.1.0",
     "types-python-dateutil",
+    "types-jsonschema",
     "types-pytz",
     "types-requests",
     "boto3-stubs[s3]",
+    "yfinance>=0.2.0",
 ]
 
 [project.scripts]
@@ -50,6 +55,18 @@ packages = ["sawa"]
 [tool.hatch.build.targets.wheel.force-include]
 "sqlschema" = "sawa/sqlschema"
 "data/nasdaq1000_symbols.txt" = "sawa/nasdaq1000_symbols.txt"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/sawa",
+    "/sqlschema",
+    "/data/nasdaq1000_symbols.txt",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"data/nasdaq1000_symbols.txt" = "data/nasdaq1000_symbols.txt"
 
 [tool.ruff]
 line-length = 100
