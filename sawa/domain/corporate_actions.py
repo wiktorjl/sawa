@@ -2,7 +2,75 @@
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+
+from sawa.utils.symbols import validate_ticker
+
+_MAX_INTEGER = 2_147_483_647
+_MAX_BIGINT = 9_223_372_036_854_775_807
+_MAX_NUMERIC_10_4 = Decimal("1000000")
+_NUMERIC_10_4_SCALE = Decimal("0.0001")
+_DIVIDEND_FREQUENCIES = {0, 1, 2, 4, 12}
+
+
+def _positive_integer(value: object, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a positive integer")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be a positive integer") from exc
+    if (
+        not parsed.is_finite()
+        or parsed != parsed.to_integral_value()
+        or parsed <= 0
+        or parsed > _MAX_INTEGER
+    ):
+        raise ValueError(f"{field} must be a positive integer")
+    return int(parsed)
+
+
+def _optional_numeric_10_4(
+    value: object,
+    field: str,
+    *,
+    positive: bool = False,
+) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite numeric value")
+    try:
+        parsed = Decimal(str(value))
+        rounded = parsed.quantize(_NUMERIC_10_4_SCALE, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite numeric value") from exc
+    if (
+        not parsed.is_finite()
+        or abs(rounded) >= _MAX_NUMERIC_10_4
+        or (positive and rounded <= 0)
+    ):
+        qualifier = "positive " if positive else ""
+        raise ValueError(f"{field} must be a {qualifier}finite NUMERIC(10,4) value")
+    return rounded
+
+
+def _optional_bigint(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer") from exc
+    if (
+        not parsed.is_finite()
+        or parsed != parsed.to_integral_value()
+        or abs(parsed) > _MAX_BIGINT
+    ):
+        raise ValueError(f"{field} must fit a signed BIGINT")
+    return int(parsed)
 
 
 @dataclass
@@ -28,10 +96,10 @@ class StockSplit:
     def from_polygon(cls, data: dict) -> "StockSplit":
         """Create from Polygon API response."""
         return cls(
-            ticker=data["ticker"],
+            ticker=validate_ticker(str(data["ticker"])),
             execution_date=date.fromisoformat(data["execution_date"]),
-            split_from=data["split_from"],
-            split_to=data["split_to"],
+            split_from=_positive_integer(data["split_from"], "split_from"),
+            split_to=_positive_integer(data["split_to"], "split_to"),
         )
 
     def to_tuple(self) -> tuple:
@@ -65,21 +133,33 @@ class Dividend:
     @classmethod
     def from_polygon(cls, data: dict) -> "Dividend":
         """Create from Polygon API response."""
+        frequency = data.get("frequency")
+        if isinstance(frequency, bool) or (
+            frequency is not None
+            and (not isinstance(frequency, int) or frequency not in _DIVIDEND_FREQUENCIES)
+        ):
+            raise ValueError(
+                "frequency must be one of 0, 1, 2, 4, or 12 when provided"
+            )
         return cls(
-            ticker=data["ticker"],
+            ticker=validate_ticker(str(data["ticker"])),
             ex_dividend_date=date.fromisoformat(data["ex_dividend_date"]),
             record_date=(
                 date.fromisoformat(data["record_date"]) if data.get("record_date") else None
             ),
             pay_date=date.fromisoformat(data["pay_date"]) if data.get("pay_date") else None,
-            cash_amount=Decimal(str(data["cash_amount"])) if data.get("cash_amount") else None,
+            cash_amount=_optional_numeric_10_4(
+                data.get("cash_amount"),
+                "cash_amount",
+                positive=True,
+            ),
             declaration_date=(
                 date.fromisoformat(data["declaration_date"])
                 if data.get("declaration_date")
                 else None
             ),
             dividend_type=data.get("dividend_type"),
-            frequency=data.get("frequency"),
+            frequency=frequency,
         )
 
     def to_tuple(self) -> tuple:
@@ -149,16 +229,20 @@ class Earnings:
         report_date: date | None = date.fromisoformat(event_date) if event_date else None
 
         return cls(
-            ticker=ticker,
+            ticker=validate_ticker(ticker),
             report_date=report_date,
             fiscal_quarter=attrs.get("fiscal_quarter"),
-            fiscal_year=attrs.get("fiscal_year"),
+            fiscal_year=_optional_bigint(attrs.get("fiscal_year"), "fiscal_year"),
             timing=attrs.get("timing"),
-            eps_estimate=(
-                Decimal(str(attrs["eps_estimate"])) if attrs.get("eps_estimate") else None
+            eps_estimate=_optional_numeric_10_4(
+                attrs.get("eps_estimate"), "eps_estimate"
             ),
-            eps_actual=Decimal(str(attrs["eps_actual"])) if attrs.get("eps_actual") else None,
-            revenue_actual=attrs.get("revenue_actual"),
+            eps_actual=_optional_numeric_10_4(
+                attrs.get("eps_actual"), "eps_actual"
+            ),
+            revenue_actual=_optional_bigint(
+                attrs.get("revenue_actual"), "revenue_actual"
+            ),
         )
 
     def to_tuple(self) -> tuple:
