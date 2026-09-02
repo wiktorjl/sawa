@@ -29,7 +29,11 @@ from sawa.domain.exceptions import ProviderError
 from sawa.provider_downloads import DownloadCount, DownloadStats, bind_provider_record
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
-from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
+from sawa.utils.constants import (
+    DEFAULT_API_RATE_LIMIT,
+    DEFAULT_NEWS_DAYS,
+    MARKET_INTERNALS_OVERLAP_DAYS,
+)
 from sawa.utils.csv_utils import write_csv_auto_fields
 from sawa.utils.dates import DATE_FORMAT
 from sawa.utils.notify import NotificationLevel
@@ -64,7 +68,12 @@ def download_overviews(
             if rate_limiter:
                 rate_limiter.acquire()
             data = client.get_ticker_details(symbol)
-            if not isinstance(data, dict):
+            # None is the provider's documented "no details for this ticker"
+            # answer (get_ticker_details returns dict | None) and is ordinary
+            # for many ETFs and delisted symbols. Only a genuinely wrong type
+            # is a provider error; treating None as one made a normal weekly
+            # run report ~300 failures and go DEGRADED.
+            if data is not None and not isinstance(data, dict):
                 raise ProviderError(
                     "Provider returned a non-object company overview",
                     provider="polygon",
@@ -245,7 +254,15 @@ def run_weekly(
             economy_start_dates = get_economy_start_dates(conn, end_date)
 
             market_internals_last_date = get_last_date(conn, "market_internals")
-            market_internals_start = market_internals_last_date or (end_date - timedelta(days=365))
+            # Starting exactly at the last stored date collapses to a zero-width
+            # window as soon as the daily run has caught up. FRED has not
+            # published today's value yet, returns nothing, and the step reports
+            # the pipeline as failed precisely when it is most up to date. Keep
+            # the same overlap the daily run re-pulls.
+            market_internals_start = min(
+                market_internals_last_date or (end_date - timedelta(days=365)),
+                end_date - timedelta(days=MARKET_INTERNALS_OVERLAP_DAYS),
+            )
             market_internals_start_str = market_internals_start.strftime(DATE_FORMAT)
             fred_api_key = os.environ.get("FRED_API_KEY")
 

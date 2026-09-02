@@ -12,7 +12,12 @@ import pytest
 
 from sawa import cli
 from sawa import corporate_actions as actions
-from sawa.domain.corporate_actions import Dividend, Earnings, StockSplit
+from sawa.domain.corporate_actions import (
+    Dividend,
+    Earnings,
+    StockSplit,
+    is_unrepresentable_split_ratio,
+)
 
 
 def _connection(*, rollback_on_error_exit: bool = False) -> mock.MagicMock:
@@ -239,6 +244,53 @@ def test_successful_split_and_dividend_transaction_commits_once() -> None:
     conn.rollback.assert_not_called()
 
 
+def test_untracked_instruments_cannot_abort_the_batch() -> None:
+    """Out-of-universe provider records must never fail a tracked ticker's load.
+
+    Polygon's feeds carry structured-product identifiers and money-market funds
+    whose values the schema cannot represent. They are dropped by the ticker
+    filter anyway, but parsing them first let one of them abort everything, so
+    no splits or dividends loaded at all.
+    """
+    conn = _connection()
+    client = _client()
+    client.get_splits.return_value = [
+        _split("AAPL"),
+        _split("NIPMY") | {"split_to": 1.5},          # fund reorg, fractional
+    ]
+    client.get_dividends.return_value = [
+        _dividend("MSFT"),
+        _dividend("VIIT0142"),                        # not a valid ticker
+        _dividend("PRTPX") | {"cash_amount": 4.76e-07},  # unrepresentable amount
+        _dividend("YMAX") | {"frequency": 52},        # weekly income ETF
+    ]
+    split_result = actions.ActionPersistenceResult(
+        1, source_rows=1, persisted_tickers=["AAPL"]
+    )
+    dividend_result = actions.ActionPersistenceResult(1, source_rows=1)
+
+    with (
+        _dependency_patches(conn, client),
+        mock.patch.object(actions, "load_splits", return_value=split_result),
+        mock.patch.object(
+            actions, "load_dividends", return_value=dividend_result
+        ) as load_dividends,
+    ):
+        stats = actions.run_corporate_actions_update(
+            api_key="offline-key",
+            database_url="postgresql://unused.invalid/offline",
+            tickers=["MSFT", "AAPL", "YMAX"],
+            include_splits=True,
+            include_dividends=True,
+        )
+
+    assert stats["success"] is True
+    # The tracked weekly-paying ETF survives; the untracked instruments do not.
+    loaded = load_dividends.call_args.args[1]
+    assert sorted(d.ticker for d in loaded) == ["MSFT", "YMAX"]
+    assert stats["splits_eligible"] == 1
+
+
 def test_default_annual_all_empty_feeds_fail_and_roll_back() -> None:
     conn = _connection()
     cursor = mock.MagicMock(name="active_ticker_cursor")
@@ -414,6 +466,57 @@ def test_split_parser_rejects_nonpositive_or_nonfinite_ratios(
 ) -> None:
     with pytest.raises(ValueError, match="positive integer"):
         StockSplit.from_polygon(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _split() | {"split_to": 1.5},
+        _split() | {"split_to": 0.9668},
+        _split() | {"split_from": 2.5, "split_to": 3},
+    ],
+)
+def test_fund_reorganization_ratios_are_skippable_not_malformed(
+    payload: dict[str, object],
+) -> None:
+    """Fractional ratios are unrepresentable in the integer schema, not corrupt.
+
+    One of these aborted the whole corporate-actions batch, including the real
+    equity splits that drive price/TA repair.
+    """
+    assert is_unrepresentable_split_ratio(payload) is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _split() | {"split_from": 0},
+        _split() | {"split_to": -2},
+        _split() | {"split_to": float("inf")},
+        _split() | {"split_to": "3"},
+        _split() | {"split_to": None},
+        42,
+    ],
+)
+def test_malformed_split_ratios_stay_fatal(payload: object) -> None:
+    """Only fractional ratios are skipped; anything else must still raise."""
+    assert is_unrepresentable_split_ratio(payload) is False
+
+
+def test_weekly_and_semimonthly_dividend_frequencies_are_accepted() -> None:
+    """52 (weekly) and 24 (semi-monthly) are ordinary income-ETF schedules.
+
+    Rejecting them aborted the whole dividend batch, so nothing loaded at all.
+    """
+    for frequency in (0, 1, 2, 4, 12, 24, 52):
+        parsed = Dividend.from_polygon(_dividend() | {"frequency": frequency})
+        assert parsed.frequency == frequency
+
+
+@pytest.mark.parametrize("frequency", [3, 7, 53, -1, 365])
+def test_bogus_dividend_frequency_is_still_rejected(frequency: int) -> None:
+    with pytest.raises(ValueError, match="frequency must be one of"):
+        Dividend.from_polygon(_dividend() | {"frequency": frequency})
 
 
 @pytest.mark.parametrize(

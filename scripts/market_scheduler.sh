@@ -92,6 +92,22 @@ notify() {
     fi
 }
 
+# Every sawa job already sends its own detailed failure notification through
+# monitored_run (check counts, elapsed time, the degraded reasons). Alerting
+# again here on the same event doubled every failure on the operator's phone.
+# Only alert for terminations the job could NOT have reported itself: killed by
+# a signal (128+N), or the shell failing to execute it at all (126/127).
+notify_unreported_failure() {
+    local exit_code="$1"
+    local title="$2"
+    local body="$3"
+    if [ "$exit_code" -ge 126 ]; then
+        notify "$title" "$body" error
+    else
+        log "Skipping duplicate alert; the job reported exit $exit_code itself"
+    fi
+}
+
 run_doctor() {
     local job="$1"
     local exit_code=0
@@ -102,7 +118,8 @@ run_doctor() {
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa doctor --job $job failed (exit $exit_code)"
-        notify "Sawa Doctor FAILED" "doctor --job $job exited with code $exit_code" error
+        notify_unreported_failure "$exit_code" "Sawa Doctor FAILED" \
+            "doctor --job $job exited with code $exit_code"
         return 1
     fi
 
@@ -508,7 +525,8 @@ run_weekly() {
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa weekly failed (exit $exit_code)"
-        notify "Sawa Weekly FAILED" "sawa weekly exited with code $exit_code at $(cat "$STATE_DIR/weekly_end_time")" error
+        notify_unreported_failure "$exit_code" "Sawa Weekly FAILED" \
+            "sawa weekly exited with code $exit_code at $(cat "$STATE_DIR/weekly_end_time")"
         heartbeat "${SAWA_WEEKLY_HEARTBEAT_URL:-}" /fail
         return 1
     fi
@@ -565,7 +583,8 @@ run_daily() {
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa daily failed (exit $exit_code)"
-        notify "Sawa Daily FAILED" "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")" error
+        notify_unreported_failure "$exit_code" "Sawa Daily FAILED" \
+            "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")"
         heartbeat "${SAWA_HEARTBEAT_URL:-}" /fail
         return 1
     fi

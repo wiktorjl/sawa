@@ -13,6 +13,7 @@ from psycopg import sql
 
 from sawa.domain.technical_indicators import CumulativeIndicatorSeed, TechnicalIndicators
 from sawa.utils.constants import DEFAULT_BATCH_SIZE
+from sawa.utils.security import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,12 @@ def load_technical_indicators(
         target = (
             f"{current.ticker}/{current.date}" if current is not None else "unknown row"
         )
+        # Carry the driver's reason into the message: callers only log the
+        # exception text, so without it an overflow and a constraint violation
+        # are indistinguishable in the daily log.
         raise TechnicalIndicatorWriteError(
-            f"technical indicator write failed for {target}"
+            f"technical indicator write failed for {target}: "
+            f"{type(exc).__name__}: {redact_sensitive_text(exc)}"
         ) from exc
 
     if commit:

@@ -29,6 +29,11 @@ def _connection() -> mock.MagicMock:
     cursor = mock.MagicMock(name="news_cursor")
     cursor.__enter__.return_value = cursor
     cursor.__exit__.return_value = None
+    # Model an empty table rather than handing back a MagicMock where the
+    # database returns a date; get_last_date is documented to return date|None
+    # and callers do date arithmetic on the result.
+    cursor.fetchone.return_value = (None,)
+    cursor.fetchall.return_value = []
     conn.cursor.return_value = cursor
     return conn
 

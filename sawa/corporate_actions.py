@@ -12,7 +12,12 @@ from typing import Any
 import psycopg
 
 from sawa.api import PolygonClient
-from sawa.domain.corporate_actions import Dividend, Earnings, StockSplit
+from sawa.domain.corporate_actions import (
+    Dividend,
+    Earnings,
+    StockSplit,
+    is_unrepresentable_split_ratio,
+)
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
@@ -324,6 +329,31 @@ def run_corporate_actions_update(
             raise ValueError("no active tickers resolved for corporate actions")
         ticker_set = set(tickers)
 
+        def _tracked_only(
+            records: list[Any],
+            label: str,
+        ) -> list[Any]:
+            """Drop provider records for tickers we do not track, before parsing.
+
+            Polygon's corporate-action feeds cover instruments outside our
+            universe: structured-product identifiers (VIIT0142, MSTR0263),
+            fund share classes, and money-market funds quoting sub-cent
+            distributions that NUMERIC(10,4) cannot hold. Every one of those is
+            discarded by the ticker filter below anyway — but parsing them
+            first let a single unrepresentable value abort the entire batch, so
+            nothing at all was loaded.
+            """
+            kept = [
+                record
+                for record in records
+                if isinstance(record, dict)
+                and str(record.get("ticker", "")).strip().upper() in ticker_set
+            ]
+            dropped = len(records) - len(kept)
+            if dropped:
+                logger.info(f"  Ignored {dropped} {label} for untracked tickers")
+            return kept
+
         # Fetch and load splits
         if include_splits:
             logger.info("Fetching stock splits...")
@@ -335,7 +365,22 @@ def run_corporate_actions_update(
             logger.info(f"  Found {len(raw_splits)} splits")
 
             if raw_splits and not dry_run:
-                splits = [StockSplit.from_polygon(s) for s in raw_splits]
+                # Fund reorganizations arrive on this endpoint with fractional
+                # ratios the integer schema cannot hold. Skip only those, so a
+                # tracked ticker's real split still loads.
+                raw_splits = _tracked_only(raw_splits, "split(s)")
+                fractional = [s for s in raw_splits if is_unrepresentable_split_ratio(s)]
+                if fractional:
+                    stats["splits_fractional_skipped"] = len(fractional)
+                    logger.warning(
+                        f"  Skipped {len(fractional)} split(s) with non-integer "
+                        "share ratios (fund reorganizations)"
+                    )
+                splits = [
+                    StockSplit.from_polygon(s)
+                    for s in raw_splits
+                    if not is_unrepresentable_split_ratio(s)
+                ]
                 if any(
                     split.execution_date < start_date
                     or split.execution_date > end_date
@@ -372,6 +417,7 @@ def run_corporate_actions_update(
             logger.info(f"  Found {len(raw_dividends)} dividends")
 
             if raw_dividends and not dry_run:
+                raw_dividends = _tracked_only(raw_dividends, "dividend(s)")
                 dividends = [Dividend.from_polygon(d) for d in raw_dividends]
                 if any(
                     dividend.ex_dividend_date < start_date

@@ -104,6 +104,45 @@ def _run_weekly_with_mocks(**overrides: Any) -> dict[str, Any]:
     return stats
 
 
+def test_absent_company_overview_is_not_a_provider_failure(tmp_path) -> None:
+    """get_ticker_details returns None for tickers with no details.
+
+    That is the provider's documented answer and is ordinary for ETFs and
+    delisted symbols. Counting it as a failure marked a healthy weekly run
+    DEGRADED over ~300 tickers.
+    """
+    client = mock.MagicMock(name="client")
+    client.get_ticker_details.side_effect = lambda ticker: (
+        None if ticker == "XHYC" else {"ticker": ticker, "name": f"{ticker} Inc."}
+    )
+
+    count = weekly.download_overviews(
+        client,
+        ["AAPL", "XHYC", "MSFT"],
+        tmp_path,
+        logging.getLogger(__name__),
+    )
+
+    assert int(count) == 2
+    assert count.failed == 0
+
+
+def test_non_object_company_overview_is_still_a_provider_failure(tmp_path) -> None:
+    client = mock.MagicMock(name="client")
+    client.get_ticker_details.side_effect = lambda ticker: (
+        ["unexpected", "list"] if ticker == "BAD" else {"ticker": ticker}
+    )
+
+    count = weekly.download_overviews(
+        client,
+        ["AAPL", "BAD"],
+        tmp_path,
+        logging.getLogger(__name__),
+    )
+
+    assert count.failed == 1
+
+
 def test_weekly_recomputes_ta_after_split_adjust() -> None:
     stats = _run_weekly_with_mocks(
         run_corporate_actions_update={

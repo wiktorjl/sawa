@@ -107,7 +107,12 @@ class TestGetPaginatedRetry:
         assert results == [{"id": "a"}, {"id": "b"}]
         assert mock_get.call_count == 4
         second_page_call = mock_get.call_args_list[-1]
-        assert second_page_call.kwargs["params"] == {"apiKey": "test-key"}
+        # The key is merged into the next_url itself; passing it as params=
+        # would drop the cursor Polygon encodes in that URL.
+        assert second_page_call.args[0] == httpx.URL(
+            "https://api.polygon.io/p2?apiKey=test-key"
+        )
+        assert "params" not in second_page_call.kwargs
 
     @pytest.mark.parametrize(
         "next_url",
@@ -133,6 +138,54 @@ class TestGetPaginatedRetry:
 
         assert mock_get.call_count == 1
 
+    def test_next_url_cursor_survives_api_key_injection(self) -> None:
+        """The api key must merge into next_url, never replace its query.
+
+        httpx replaces an existing query string when params= is supplied, so
+        passing the key that way dropped Polygon's cursor and re-requested
+        page 1 until the repeated-URL guard aborted the fetch.
+        """
+        client = PolygonClient("test-key")
+        first_page = _ok_response(
+            {
+                "status": "OK",
+                "results": [{"id": "a"}],
+                "next_url": "https://api.polygon.io/v2/reference/news?cursor=abc123",
+            }
+        )
+        second_page = _ok_response({"status": "OK", "results": [{"id": "b"}]})
+
+        with patch.object(
+            client.client, "get", side_effect=[first_page, second_page]
+        ) as mock_get:
+            results = client.get_paginated("news", {"limit": 1000})
+
+        assert results == [{"id": "a"}, {"id": "b"}]
+        second_url = mock_get.call_args_list[1].args[0]
+        assert second_url.params["cursor"] == "abc123"
+        assert second_url.params["apiKey"] == "test-key"
+
+    def test_next_url_api_key_is_not_duplicated(self) -> None:
+        """A next_url that already carries a key gets ours, exactly once."""
+        client = PolygonClient("test-key")
+        first_page = _ok_response(
+            {
+                "status": "OK",
+                "results": [{"id": "a"}],
+                "next_url": "https://api.polygon.io/v2/x?cursor=c1&apiKey=stale",
+            }
+        )
+        second_page = _ok_response({"status": "OK", "results": [{"id": "b"}]})
+
+        with patch.object(
+            client.client, "get", side_effect=[first_page, second_page]
+        ) as mock_get:
+            client.get_paginated("news")
+
+        second_url = mock_get.call_args_list[1].args[0]
+        assert second_url.params.get_list("apiKey") == ["test-key"]
+        assert second_url.params["cursor"] == "c1"
+
     def test_relative_next_url_stays_on_polygon_origin(self) -> None:
         client = PolygonClient("test-key")
         first_page = _ok_response(
@@ -144,7 +197,9 @@ class TestGetPaginatedRetry:
             results = client.get_paginated("news")
 
         assert results == [{"id": "a"}, {"id": "b"}]
-        assert mock_get.call_args_list[1].args[0] == "https://api.polygon.io/v2/page/2"
+        assert mock_get.call_args_list[1].args[0] == httpx.URL(
+            "https://api.polygon.io/v2/page/2?apiKey=test-key"
+        )
 
     def test_rejects_absolute_untrusted_initial_endpoint_before_io(self) -> None:
         client = PolygonClient("test-key")
