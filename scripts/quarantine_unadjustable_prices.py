@@ -11,8 +11,17 @@ day-over-day jump whose ratio matches a split recorded for that ticker (within
 5%). A jump with no matching split is left alone — a microcap really can move
 3x in a day, and a reused ticker legitimately changes price.
 
+--include-unmatched-jumps widens selection to every pre-horizon discontinuity,
+including those with no matching split. Those are more likely to be real price
+moves or a reused ticker than a stale basis, so it is off by default.
+
+--prune-orphan-ta additionally deletes technical_indicators rows that have no
+matching stock_prices row, which is what removing prices leaves behind.
+
 Rows are copied to ``stock_prices_unadjustable_archive`` before removal, so the
-operation is reversible. Defaults to a dry run; pass --apply to commit.
+operation is reversible. Defaults to a dry run, which performs NO writes at all
+— it only counts. (An earlier version staged the writes and relied on rollback
+to undo them; a dry run must not depend on a rollback it might not get.)
 
 Extreme absolute prices are NOT a selection criterion. A ticker with compounded
 reverse splits genuinely back-adjusts into the billions per share, and the
@@ -36,6 +45,8 @@ SELECT MIN(date) FROM stock_prices
 WHERE date >= (CURRENT_DATE - INTERVAL '5 years')
 """
 
+# Selection differs only in the final WHERE: matched-split-ratio only, or every
+# discontinuity. Both take the last jump per ticker as the cutoff.
 STALE_TICKERS_QUERY = """
 WITH horizon AS (SELECT %s::date AS d),
 consecutive AS (
@@ -59,6 +70,33 @@ WHERE EXISTS (
            OR abs(jumps.ratio - 1 / splits.factor) * splits.factor < 0.05)
 )
 GROUP BY jumps.ticker
+"""
+
+ALL_JUMP_TICKERS_QUERY = """
+WITH horizon AS (SELECT %s::date AS d),
+consecutive AS (
+    SELECT ticker, date, close,
+           lag(close) OVER (PARTITION BY ticker ORDER BY date) AS prev
+    FROM stock_prices, horizon WHERE date < horizon.d
+)
+SELECT ticker, MAX(date) AS cutoff
+FROM consecutive
+WHERE prev IS NOT NULL
+  AND (close / NULLIF(prev, 0) > 3 OR close / NULLIF(prev, 0) < 0.34)
+GROUP BY ticker
+"""
+
+ORPHAN_TA_COUNT = """
+SELECT count(*) FROM technical_indicators t
+LEFT JOIN stock_prices p ON p.ticker = t.ticker AND p.date = t.date
+WHERE p.ticker IS NULL
+"""
+
+ORPHAN_TA_DELETE = """
+DELETE FROM technical_indicators t
+WHERE NOT EXISTS (
+    SELECT 1 FROM stock_prices p WHERE p.ticker = t.ticker AND p.date = t.date
+)
 """
 
 CREATE_ARCHIVE = """
@@ -86,6 +124,16 @@ COMMENT ON TABLE stock_prices_unadjustable_archive IS
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="commit (default: dry run)")
+    parser.add_argument(
+        "--include-unmatched-jumps",
+        action="store_true",
+        help="also quarantine discontinuities with no matching split ratio",
+    )
+    parser.add_argument(
+        "--prune-orphan-ta",
+        action="store_true",
+        help="delete technical_indicators rows that have no stock_prices row",
+    )
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     args = parser.parse_args()
 
@@ -97,9 +145,39 @@ def main() -> int:
         horizon = conn.execute(HORIZON_QUERY).fetchone()[0]
         print(f"Provider history horizon (earliest re-fetchable date): {horizon}")
 
-        stale = conn.execute(STALE_TICKERS_QUERY, (horizon,)).fetchall()
-        if not stale:
-            print("No provably stale pre-horizon rows found.")
+        query = (
+            ALL_JUMP_TICKERS_QUERY
+            if args.include_unmatched_jumps
+            else STALE_TICKERS_QUERY
+        )
+        selection = (
+            "every pre-horizon discontinuity"
+            if args.include_unmatched_jumps
+            else "discontinuities matching a recorded split ratio"
+        )
+        print(f"Selecting: {selection}")
+
+        stale = conn.execute(query, (horizon,)).fetchall()
+        if not stale and not args.prune_orphan_ta:
+            print("Nothing to do.")
+            return 0
+
+        if not args.apply:
+            # Count only. A dry run performs no writes, so it cannot leave
+            # anything behind if the rollback does not happen.
+            rows = 0
+            for ticker, cutoff in stale:
+                rows += conn.execute(
+                    "SELECT count(*) FROM stock_prices "
+                    "WHERE ticker = %s AND date < %s",
+                    (ticker, cutoff),
+                ).fetchone()[0]
+            print(f"Tickers affected:      {len(stale)}")
+            print(f"Rows to quarantine:    {rows}")
+            if args.prune_orphan_ta:
+                orphans = conn.execute(ORPHAN_TA_COUNT).fetchone()[0]
+                print(f"Orphan TA rows now:    {orphans} (more appear once prices go)")
+            print("DRY RUN - no writes were performed. Re-run with --apply.")
             return 0
 
         conn.execute(CREATE_ARCHIVE)
@@ -131,15 +209,16 @@ def main() -> int:
                 return 1
             moved += deleted
 
+        pruned = 0
+        if args.prune_orphan_ta:
+            pruned = conn.execute(ORPHAN_TA_DELETE).rowcount
+
+        conn.commit()
         print(f"Tickers affected:      {len(stale)}")
         print(f"Rows quarantined:      {moved}")
-
-        if args.apply:
-            conn.commit()
-            print("APPLIED. Recompute technical indicators for these tickers.")
-        else:
-            conn.rollback()
-            print("DRY RUN - nothing committed. Re-run with --apply.")
+        if args.prune_orphan_ta:
+            print(f"Orphan TA rows pruned: {pruned}")
+        print("APPLIED. Recompute technical indicators for the affected tickers.")
 
     return 0
 
