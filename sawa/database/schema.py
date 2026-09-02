@@ -118,6 +118,8 @@ REQUIRED_SCHEMA_FILENAMES = frozenset(
         "44_ohlcv_completeness.sql",
         "45_intraday_bar_size_identity.sql",
         "46_dividend_identity.sql",
+        "47_widen_indicator_overflow_headroom.sql",
+        "48_widen_price_for_compounded_reverse_splits.sql",
     }
 )
 

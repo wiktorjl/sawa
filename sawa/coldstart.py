@@ -439,7 +439,12 @@ def download_overviews(
             if rate_limiter:
                 rate_limiter.acquire()
             data = client.get_ticker_details(symbol)
-            if not isinstance(data, dict):
+            # None is the provider's documented "no details for this ticker"
+            # answer (get_ticker_details returns dict | None) and is ordinary
+            # for many ETFs and delisted symbols. Only a genuinely wrong type
+            # is a provider error; treating None as one made a normal weekly
+            # run report ~300 failures and go DEGRADED.
+            if data is not None and not isinstance(data, dict):
                 raise ProviderError(
                     "Provider returned a non-object company overview",
                     provider="polygon",
@@ -572,7 +577,12 @@ def fetch_missing_companies(
             if rate_limiter:
                 rate_limiter.acquire()
             data = client.get_ticker_details(symbol)
-            if not isinstance(data, dict):
+            # None is the provider's documented "no details for this ticker"
+            # answer (get_ticker_details returns dict | None) and is ordinary
+            # for many ETFs and delisted symbols. Only a genuinely wrong type
+            # is a provider error; treating None as one made a normal weekly
+            # run report ~300 failures and go DEGRADED.
+            if data is not None and not isinstance(data, dict):
                 raise ProviderError(
                     "Provider returned a non-object company overview",
                     provider="polygon",

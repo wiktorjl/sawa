@@ -10,7 +10,10 @@ _MAX_INTEGER = 2_147_483_647
 _MAX_BIGINT = 9_223_372_036_854_775_807
 _MAX_NUMERIC_10_4 = Decimal("1000000")
 _NUMERIC_10_4_SCALE = Decimal("0.0001")
-_DIVIDEND_FREQUENCIES = {0, 1, 2, 4, 12}
+# 24 = semi-monthly and 52 = weekly are ordinary distribution schedules for
+# income ETFs, not provider corruption. The set stays an allowlist so a
+# genuinely bogus frequency is still rejected.
+_DIVIDEND_FREQUENCIES = {0, 1, 2, 4, 12, 24, 52}
 
 
 def _positive_integer(value: object, field: str) -> int:
@@ -28,6 +31,34 @@ def _positive_integer(value: object, field: str) -> int:
     ):
         raise ValueError(f"{field} must be a positive integer")
     return int(parsed)
+
+
+def is_unrepresentable_split_ratio(data: object) -> bool:
+    """Whether a provider split record carries a non-integer share ratio.
+
+    Polygon reports mutual-fund reorganizations through the splits endpoint
+    with fractional ratios (NSNRX 1:0.9668, NIPMY 1:1.5). ``stock_splits``
+    stores integer share counts, so such a record is unrepresentable rather
+    than malformed, and one of them must not fail the batch that also carries
+    real equity splits. Anything else — a missing, non-numeric, zero, negative,
+    or out-of-range ratio — stays malformed and is left to the strict parser.
+    """
+    if not isinstance(data, dict):
+        return False
+    for field in ("split_from", "split_to"):
+        value = data.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            return False
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return False
+        if not parsed.is_finite() or parsed <= 0 or parsed > _MAX_INTEGER:
+            return False
+    return any(
+        Decimal(str(data[field])) != Decimal(str(data[field])).to_integral_value()
+        for field in ("split_from", "split_to")
+    )
 
 
 def _optional_numeric_10_4(
@@ -128,7 +159,9 @@ class Dividend:
     cash_amount: Decimal | None = None
     declaration_date: date | None = None
     dividend_type: str | None = None  # CD, SC, LT, ST
-    frequency: int | None = None  # 0=one-time, 1=annual, 4=quarterly, 12=monthly
+    # 0=one-time, 1=annual, 2=semi-annual, 4=quarterly, 12=monthly,
+    # 24=semi-monthly, 52=weekly
+    frequency: int | None = None
 
     @classmethod
     def from_polygon(cls, data: dict) -> "Dividend":
@@ -139,7 +172,9 @@ class Dividend:
             and (not isinstance(frequency, int) or frequency not in _DIVIDEND_FREQUENCIES)
         ):
             raise ValueError(
-                "frequency must be one of 0, 1, 2, 4, or 12 when provided"
+                "frequency must be one of "
+                + ", ".join(str(f) for f in sorted(_DIVIDEND_FREQUENCIES))
+                + " when provided"
             )
         return cls(
             ticker=validate_ticker(str(data["ticker"])),

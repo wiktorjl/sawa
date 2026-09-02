@@ -27,10 +27,17 @@ from sawa.api import (
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import NewsLoadResult, fetch_and_load_news
 from sawa.domain.exceptions import ProviderError
-from sawa.domain.price_validation import is_valid_daily_ohlcv
+from sawa.domain.price_validation import (
+    is_valid_daily_ohlcv,
+    normalize_provider_volume,
+)
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
-from sawa.utils.constants import DEFAULT_API_RATE_LIMIT, DEFAULT_NEWS_DAYS
+from sawa.utils.constants import (
+    DEFAULT_API_RATE_LIMIT,
+    DEFAULT_NEWS_DAYS,
+    MARKET_INTERNALS_OVERLAP_DAYS,
+)
 from sawa.utils.dates import DATE_FORMAT, timestamp_to_date
 from sawa.utils.market_hours import get_market_date, is_after_market_close
 from sawa.utils.notify import NotificationLevel
@@ -235,7 +242,7 @@ def fetch_prices_via_api(
                     "high": r.get("h"),
                     "low": r.get("l"),
                     "close": r.get("c"),
-                    "volume": r.get("v"),
+                    "volume": normalize_provider_volume(r.get("v")),
                 }
                 if _is_valid_price_row(price):
                     all_prices.append(price)
@@ -1156,8 +1163,10 @@ def run_daily(
                 logger.info("\nFetching market internals from FRED...")
                 fred_client = FredClient(fred_api_key, logger)
                 try:
-                    # Fetch last 30 days to catch any backfill gaps
-                    mi_start = (date.today() - timedelta(days=30)).strftime(DATE_FORMAT)
+                    # Re-pull a fixed overlap to catch any backfill gaps
+                    mi_start = (
+                        date.today() - timedelta(days=MARKET_INTERNALS_OVERLAP_DAYS)
+                    ).strftime(DATE_FORMAT)
                     mi_end = date.today().strftime(DATE_FORMAT)
                     mi_result = fetch_market_internals(fred_client, mi_start, mi_end, logger)
                     mi_rows = mi_result.rows

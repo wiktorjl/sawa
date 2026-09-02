@@ -195,6 +195,80 @@ def test_fetch_rejects_malformed_rows_before_reporting_fetched() -> None:
     }
 
 
+def test_fetch_keeps_fractional_provider_volume() -> None:
+    """Polygon reports fractional share volume; those rows are real bars.
+
+    Rejecting them as malformed dropped ~95% of every fetch, which then failed
+    the trading-day coverage guard and rolled the whole price batch back.
+    """
+
+    class FractionalVolumeClient:
+        def get(self, *args: object, **kwargs: object) -> dict[str, Any]:
+            return {
+                "results": [
+                    {
+                        "t": 1781265600000,
+                        "o": 306,
+                        "h": 307.49,
+                        "l": 304.3,
+                        "c": 305.93,
+                        "v": 28229375.485403,
+                    },
+                    {
+                        "t": 1781352000000,
+                        "o": 306.21,
+                        "h": 307.66,
+                        "l": 302.939,
+                        "c": 305.59,
+                        "v": 38169263.5,
+                    },
+                ]
+            }
+
+    stats: dict[str, Any] = {}
+    prices = fetch_prices_via_api(
+        FractionalVolumeClient(),  # type: ignore[arg-type]
+        ["AAPL"],
+        "2026-06-12",
+        "2026-06-13",
+        logging.getLogger(__name__),
+        stats=stats,
+    )
+
+    assert [p["volume"] for p in prices] == [28229375, 38169264]
+    assert all(isinstance(p["volume"], int) for p in prices)
+    assert "invalid_price_rows" not in stats
+
+
+def test_fetch_still_rejects_unusable_provider_volume() -> None:
+    """Rounding fractional volume must not smuggle in nonsense values."""
+
+    class BadVolumeClient:
+        def get(self, *args: object, **kwargs: object) -> dict[str, Any]:
+            base = {"t": 1781265600000, "o": 1, "h": 2, "l": 1, "c": 2}
+            return {
+                "results": [
+                    {**base, "v": -1.5},
+                    {**base, "t": 1781352000000, "v": math.nan},
+                    {**base, "t": 1781438400000, "v": None},
+                    {**base, "t": 1781524800000, "v": "1000"},
+                ]
+            }
+
+    stats: dict[str, Any] = {}
+    prices = fetch_prices_via_api(
+        BadVolumeClient(),  # type: ignore[arg-type]
+        ["AAPL"],
+        "2026-06-12",
+        "2026-06-16",
+        logging.getLogger(__name__),
+        stats=stats,
+    )
+
+    assert prices == []
+    assert stats["invalid_price_rows"] == 4
+
+
 def test_fetch_rejects_bool_and_out_of_range_timestamps() -> None:
     class TimestampClient:
         def get(self, *args: object, **kwargs: object) -> dict[str, Any]:

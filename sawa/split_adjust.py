@@ -189,12 +189,44 @@ def refresh_split_adjusted_prices(
             except ValueError:
                 continue
             fetched_dates.add((ticker, price_date))
-        missing_existing_dates = sorted(
-            (ticker, price_date)
-            for ticker, stored_dates in existing_dates.items()
-            for price_date in stored_dates
-            if (ticker, price_date) not in fetched_dates
-        )
+        # The provider serves a rolling history window (currently five years),
+        # so stored rows older than the oldest row it will return can never be
+        # re-based. Requiring the provider to cover every stored date therefore
+        # failed the whole adjustment for any ticker with a longer history —
+        # and failing meant NOTHING was re-based, leaving the series
+        # discontinuous at the split instead of at the unreachable horizon.
+        # Split the shortfall: a gap inside the window the provider did serve
+        # is real incompleteness and still fails; anything older than that
+        # window is reported and skipped, and no stored row is deleted.
+        earliest_fetched: dict[str, date] = {}
+        for ticker, price_date in fetched_dates:
+            current = earliest_fetched.get(ticker)
+            if current is None or price_date < current:
+                earliest_fetched[ticker] = price_date
+
+        missing_existing_dates: list[tuple[str, date]] = []
+        unreachable_dates: list[tuple[str, date]] = []
+        for ticker, stored_dates in existing_dates.items():
+            horizon = earliest_fetched.get(ticker)
+            for price_date in stored_dates:
+                if (ticker, price_date) in fetched_dates:
+                    continue
+                if horizon is not None and price_date < horizon:
+                    unreachable_dates.append((ticker, price_date))
+                else:
+                    missing_existing_dates.append((ticker, price_date))
+        missing_existing_dates.sort()
+
+        if unreachable_dates:
+            horizon_start = min(earliest_fetched.values())
+            stats["pre_horizon_dates_not_adjusted"] = len(unreachable_dates)
+            stats["provider_history_horizon"] = horizon_start.isoformat()
+            logger.warning(
+                f"  {len(unreachable_dates)} stored date(s) predate the provider's "
+                f"available history (earliest {horizon_start.isoformat()}) and keep "
+                "their existing basis; the adjustable range is re-based"
+            )
+
         if missing_tickers or provider_stats.get("failed_symbols") or provider_stats.get(
             "invalid_price_rows"
         ) or missing_existing_dates:

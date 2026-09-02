@@ -313,16 +313,26 @@ def replace_flags(
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT flag FROM public.stock_character_flags "
-                "WHERE ticker = %s AND run_date = %s ORDER BY flag",
+                "WHERE ticker = %s AND run_date = %s",
                 (normalized_ticker, run_date),
             )
             persisted_names = [str(row[0]) for row in cur.fetchall()]
 
-        if persisted_names != sorted(expected_names):
+        # Sort both sides in Python. Ordering the query in SQL compared a
+        # database-collation order against a Python codepoint order, and the
+        # two disagree wherever an underscore matters: the collation ignores
+        # it at the primary weight and sorts VOL_SPIKE before VOLUME_SPIKE,
+        # while Python sorts it after. That failed verification on a correct
+        # write whenever a ticker carried both flags.
+        if sorted(persisted_names) != sorted(expected_names):
+            missing = sorted(set(expected_names) - set(persisted_names))
+            unexpected = sorted(set(persisted_names) - set(expected_names))
             raise StockCharacterWriteError(
                 "flag replacement verification failed for "
-                f"{normalized_ticker}/{run_date}: expected {len(expected_names)} "
-                f"identity row(s), found {len(persisted_names)}"
+                f"{normalized_ticker}/{run_date}: expected "
+                f"{len(expected_names)} identity row(s), found "
+                f"{len(persisted_names)}; missing={missing or 'none'}, "
+                f"unexpected={unexpected or 'none'}"
             )
 
         if commit:

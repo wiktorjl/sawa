@@ -14,6 +14,11 @@ from sawa.domain.stock_character import CharacterFlag
 RUN_DATE = date(2026, 8, 28)
 
 
+def _collation_key(value: str) -> tuple[str, str]:
+    """Approximate a glibc/ICU primary weight: punctuation is not significant."""
+    return (value.replace("_", ""), value)
+
+
 class _Cursor:
     def __init__(self, connection: _Connection) -> None:
         self.connection = connection
@@ -41,13 +46,17 @@ class _Cursor:
             self.connection.working_flags.add((values[0], values[1], values[2]))
         elif "SELECT flag FROM public.stock_character_flags" in rendered:
             ticker, run_date = params  # type: ignore[misc]
-            self.results = [
-                (flag,)
-                for stored_ticker, stored_date, flag in sorted(
-                    self.connection.working_flags
-                )
+            matching = [
+                flag
+                for stored_ticker, stored_date, flag in self.connection.working_flags
                 if (stored_ticker, stored_date) == (ticker, run_date)
             ]
+            # Return rows the way the real database does. A glibc/ICU collation
+            # ignores underscores at the primary weight, so Postgres orders
+            # VOL_SPIKE before VOLUME_SPIKE while Python's sorted() orders it
+            # after. Sorting this mock with sorted() modelled a database that
+            # does not exist and hid a production verification failure.
+            self.results = [(flag,) for flag in sorted(matching, key=_collation_key)]
 
     def fetchall(self) -> list[tuple[object, ...]]:
         return self.results
@@ -191,6 +200,65 @@ def test_flag_postverification_mismatch_rolls_back_old_set(monkeypatch) -> None:
     assert conn.committed_flags == {old_identity}
     assert conn.commits == 0
     assert conn.rollbacks == 1
+
+
+def test_batch_stamps_the_market_date_not_the_host_date(monkeypatch) -> None:
+    """run_date must come from the market clock, like every freshness check.
+
+    The host runs UTC, so a weekly finishing after 20:00 ET stamped tomorrow's
+    date. doctor compares against get_market_date() and rejects a future-dated
+    row as clock skew, so a completely healthy weekly alarmed every time.
+    """
+    market_date = date(2026, 9, 1)
+    monkeypatch.setattr(
+        stock_character_batch, "get_market_date", lambda: market_date
+    )
+    monkeypatch.setattr(
+        stock_character_batch, "_fetch_benchmark_prices", lambda _url: {}
+    )
+    monkeypatch.setattr(
+        stock_character_batch, "get_tickers_with_prices", lambda _conn: []
+    )
+    monkeypatch.setattr(
+        stock_character_batch.psycopg, "connect", lambda _url: _Connection()
+    )
+
+    stats = stock_character_batch.run_stock_character_batch(
+        database_url="offline-test",
+        tickers=[],
+        log=logging.getLogger(__name__),
+    )
+
+    assert stats["run_date"] == market_date
+
+
+def test_verification_is_independent_of_database_collation(monkeypatch) -> None:
+    """Flag sets must verify regardless of how the database orders them.
+
+    VOL_SPIKE sorts before VOLUME_SPIKE under the database collation and after
+    it in Python. Comparing a SQL-ordered list against a Python-sorted one
+    rejected a perfectly correct write for every ticker carrying both flags.
+    """
+    conn = _Connection()
+    new_flags = [
+        CharacterFlag("AAPL", RUN_DATE, "VOLUME_SPIKE"),
+        CharacterFlag("AAPL", RUN_DATE, "VOL_SPIKE"),
+        CharacterFlag("AAPL", RUN_DATE, "VOLUME_DROUGHT"),
+    ]
+    _prepare_worker(monkeypatch, conn, _analysis(flags=new_flags))
+    monkeypatch.setattr(stock_character_batch, "load_classification", lambda *_a, **_k: 1)
+    monkeypatch.setattr(stock_character_batch, "load_baseline", lambda *_a, **_k: 1)
+    monkeypatch.setattr(stock_character_batch, "load_scorecard", lambda *_a, **_k: 1)
+
+    result = stock_character_batch._process_ticker("AAPL")
+
+    assert result["classified"] is True, result.get("error")
+    assert conn.rollbacks == 0
+    assert conn.committed_flags == {
+        ("AAPL", RUN_DATE, "VOLUME_SPIKE"),
+        ("AAPL", RUN_DATE, "VOL_SPIKE"),
+        ("AAPL", RUN_DATE, "VOLUME_DROUGHT"),
+    }
 
 
 def test_later_scorecard_failure_rolls_back_flag_delete(monkeypatch) -> None:

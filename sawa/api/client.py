@@ -222,14 +222,27 @@ class PolygonClient:
             response: httpx.Response | None = None
             for attempt in range(max_retries):
                 try:
-                    page_params = (
-                        {"apiKey": self.api_key} if page > 1 else request_params
-                    )
-                    response = self.client.get(
-                        url,
-                        params=page_params,
-                        timeout=timeout,
-                    )
+                    if page > 1:
+                        # httpx REPLACES an existing query string when params=
+                        # is supplied, which stripped the cursor Polygon puts
+                        # in next_url and made every page re-request page 1
+                        # until the repeated-URL guard fired. Merge the key
+                        # into the validated URL so pagination advances.
+                        request_url = (
+                            httpx.URL(url)
+                            .copy_remove_param("apiKey")
+                            .copy_merge_params({"apiKey": self.api_key})
+                        )
+                        response = self.client.get(
+                            request_url,
+                            timeout=timeout,
+                        )
+                    else:
+                        response = self.client.get(
+                            url,
+                            params=request_params,
+                            timeout=timeout,
+                        )
 
                     if response.status_code == 429:
                         if attempt >= max_retries - 1:

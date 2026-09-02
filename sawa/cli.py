@@ -19,8 +19,10 @@ from sawa.utils import monitored_run, setup_logging
 from sawa.utils.dates import parse_date
 from sawa.utils.symbols import validate_ticker
 
-# Load .env file from current directory or parent directories
-load_dotenv()
+# .env is loaded in main(), not at import. Importing this module used to
+# populate os.environ for the whole process, so anything that merely imported
+# the CLI — the test suite included — silently inherited the operator's real
+# credentials and NTFY_TOPIC, and then pushed alerts to a real device.
 
 
 def get_log_dir(args) -> Path | None:
@@ -982,6 +984,9 @@ def cmd_mcp_query_insights(args) -> int:
 
 def main() -> int:
     """Main entry point."""
+    # Load .env from the current directory or a parent.
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
         prog="sawa",
         description="S&P 500 data download and database management.",

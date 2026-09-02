@@ -20,6 +20,7 @@ from sawa.database.stock_character import (
     replace_flags,
 )
 from sawa.database.ta_load import get_tickers_with_prices
+from sawa.utils.market_hours import get_market_date
 from sawa.utils.security import redact_sensitive_text
 from sawa.utils.symbols import validate_ticker
 
@@ -205,16 +206,18 @@ def run_stock_character_batch(
         database_url: PostgreSQL connection URL
         tickers: Specific tickers to process (None = all)
         workers: Number of parallel workers
-        run_date: Classification date (defaults to today)
+        run_date: Classification date (defaults to the current market date)
         log: Logger instance
 
     Returns:
         Statistics dictionary
     """
-    from datetime import date
-
     log = log or logger
-    run_date = run_date or date.today()
+    # Stamp the market date, not the host's calendar date. The box runs UTC, so
+    # a weekly finishing after 20:00 ET recorded run_date as tomorrow; the
+    # doctor compares freshness against get_market_date() and correctly rejects
+    # a future-dated row as clock skew, failing right after a healthy run.
+    run_date = run_date or get_market_date()
 
     log.info("=" * 60)
     log.info("STOCK CHARACTER CLASSIFICATION BATCH")
@@ -310,6 +313,10 @@ def run_stock_character_batch(
     return {
         "success": total > 0 and bool(classified_results) and not errors,
         "degraded": bool(errors),
+        # Surfaced so an operator can see which date the run stamped; a
+        # mismatch with the market date is what made doctor fail after a
+        # healthy weekly.
+        "run_date": run_date,
         "total": total,
         "classified": len(classified_results),
         "unclassifiable": len(unclassifiable),

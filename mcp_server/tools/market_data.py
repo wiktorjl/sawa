@@ -6,6 +6,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from psycopg import sql
+from sawa.domain.price_validation import normalize_provider_volume
 from sawa.utils.dates import timestamp_to_date
 from sawa.utils.market_hours import get_market_date
 from sawa.utils.security import redact_sensitive_text
@@ -279,7 +280,7 @@ async def get_live_price_async(ticker: str, days: int = 7) -> dict[str, Any]:
             "high": latest.get("h"),
             "low": latest.get("l"),
             "close": latest.get("c", result["current_price"]),
-            "volume": latest.get("v"),
+            "volume": normalize_provider_volume(latest.get("v")),
             "change_percent": result["change_percent"],
             "history": [
                 {
@@ -288,7 +289,7 @@ async def get_live_price_async(ticker: str, days: int = 7) -> dict[str, Any]:
                     "high": bar["h"],
                     "low": bar["l"],
                     "close": bar["c"],
-                    "volume": bar["v"],
+                    "volume": normalize_provider_volume(bar["v"]),
                 }
                 for bar in history
             ],
@@ -347,7 +348,7 @@ async def get_live_prices_batch_async(
                 "high": latest.get("h"),
                 "low": latest.get("l"),
                 "close": latest.get("c", result["current_price"]),
-                "volume": latest.get("v"),
+                "volume": normalize_provider_volume(latest.get("v")),
                 "change_percent": result["change_percent"],
                 "history": [
                     {
@@ -356,7 +357,7 @@ async def get_live_prices_batch_async(
                         "high": bar["h"],
                         "low": bar["l"],
                         "close": bar["c"],
-                        "volume": bar["v"],
+                        "volume": normalize_provider_volume(bar["v"]),
                     }
                     for bar in history
                 ],

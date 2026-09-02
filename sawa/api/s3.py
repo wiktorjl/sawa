@@ -17,7 +17,10 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, EndpointConnectionError
 
-from sawa.domain.price_validation import is_valid_daily_ohlcv
+from sawa.domain.price_validation import (
+    is_valid_daily_ohlcv,
+    normalize_provider_volume,
+)
 from sawa.utils.dates import DATE_FORMAT
 
 S3_ENDPOINT = "https://files.polygon.io"
@@ -212,7 +215,9 @@ class PolygonS3Client:
                     "close": row.get(close_col, ""),
                     "high": row.get(high_col, ""),
                     "low": row.get(low_col, ""),
-                    "volume": row.get(vol_col, ""),
+                    "volume": normalize_provider_volume(
+                        row.get(vol_col, ""), allow_numeric_strings=True
+                    ),
                 }
                 if not is_valid_daily_ohlcv(record, allow_numeric_strings=True):
                     raise ValueError("bulk price CSV contains malformed OHLCV data")
