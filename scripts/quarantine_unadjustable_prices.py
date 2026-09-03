@@ -32,6 +32,7 @@ correct, not corrupt.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 
@@ -134,6 +135,11 @@ def main() -> int:
         action="store_true",
         help="delete technical_indicators rows that have no stock_prices row",
     )
+    parser.add_argument(
+        "--recompute-ta",
+        action="store_true",
+        help="recompute indicators for the affected tickers once rows are moved",
+    )
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     args = parser.parse_args()
 
@@ -218,7 +224,35 @@ def main() -> int:
         print(f"Rows quarantined:      {moved}")
         if args.prune_orphan_ta:
             print(f"Orphan TA rows pruned: {pruned}")
-        print("APPLIED. Recompute technical indicators for the affected tickers.")
+        print("APPLIED.")
+
+    if not args.recompute_ta:
+        # ta-backfill takes a single --ticker, so there is no one-line CLI way
+        # to do this for a list. Say exactly what to run rather than leave it
+        # as an exercise.
+        print(
+            "\nIndicators for these tickers were computed over the removed rows "
+            "and are now stale.\nRe-run with --recompute-ta, or the next weekly "
+            "will correct them."
+        )
+        return 0
+
+    from sawa.ta_backfill import recompute_ta_for_tickers
+
+    affected = [ticker for ticker, _ in stale]
+    print(f"\nRecomputing indicators for {len(affected)} ticker(s)...")
+    ta_stats = recompute_ta_for_tickers(
+        database_url=args.database_url,
+        tickers=affected,
+        log=logging.getLogger("quarantine.ta"),
+    )
+    print(
+        f"  recomputed {ta_stats.get('indicators_calculated', 0)} indicator rows "
+        f"for {ta_stats.get('tickers_succeeded', 0)}/{len(affected)} tickers"
+    )
+    if not ta_stats.get("success"):
+        print("  TA recompute reported failure", file=sys.stderr)
+        return 1
 
     return 0
 
