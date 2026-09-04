@@ -579,3 +579,157 @@ def test_drop_tables_and_functions_use_one_transaction() -> None:
     assert result is False
     assert conn.commits == 0
     assert conn.rollbacks == 1
+
+
+# --- Split registry for as-traded flat-file bars -----------------------------
+
+
+def _offline_price_cache(tmp_path: Path) -> Path:
+    output_dir = tmp_path / "cache"
+    overviews_csv = output_dir / "overviews" / "overviews.csv"
+    overviews_csv.parent.mkdir(parents=True)
+    overviews_csv.write_text("ticker,name\nAAPL,Apple\n", encoding="utf-8")
+    prices_dir = output_dir / "prices"
+    prices_dir.mkdir(parents=True)
+    (prices_dir / "AAPL.csv").write_text(
+        "date,symbol,open,high,low,close,volume\n"
+        "2026-01-02,AAPL,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+    return output_dir
+
+
+def _run_load_only(tmp_path: Path, output_dir: Path, adjuster: object) -> tuple[dict, mock.Mock]:
+    conn = mock.MagicMock(name="offline_connection")
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = None
+    company_result = coldstart.PersistenceResult(
+        1, table="companies", artifact_found=True, source_rows=1, eligible_rows=1
+    )
+    price_result = coldstart.PersistenceResult(
+        1, table="stock_prices", artifact_found=True, source_rows=1, eligible_rows=1
+    )
+    with (
+        mock.patch.object(psycopg, "connect", return_value=conn),
+        mock.patch.object(coldstart, "load_companies", return_value=company_result),
+        mock.patch.object(coldstart, "load_prices", return_value=price_result) as load_prices,
+        mock.patch.object(coldstart, "get_tickers_from_csv_files", return_value={"AAPL"}),
+        mock.patch.object(coldstart, "get_existing_tickers_from_db", return_value={"AAPL"}),
+        mock.patch.object(coldstart, "get_split_adjuster", return_value=adjuster),
+        mock.patch.object(coldstart, "run_corporate_actions_update") as refresh,
+    ):
+        stats = coldstart.run_coldstart(
+            api_key=None,
+            s3_access_key=None,
+            s3_secret_key=None,
+            database_url="offline-only",
+            schema_dir=tmp_path / "schema",
+            output_dir=output_dir,
+            load_only=True,
+            logger=logging.getLogger(__name__),
+        )
+    refresh.assert_not_called()
+    return stats, load_prices
+
+
+def test_load_only_rebases_cached_bars_with_the_stored_split_registry(tmp_path: Path) -> None:
+    from datetime import date
+
+    from sawa.domain.corporate_actions import SplitAdjuster, StockSplit
+
+    adjuster = SplitAdjuster(
+        [StockSplit(ticker="AAPL", execution_date=date(2026, 1, 5), split_from=1, split_to=4)]
+    )
+    stats, load_prices = _run_load_only(tmp_path, _offline_price_cache(tmp_path), adjuster)
+
+    assert stats["success"] is True
+    assert load_prices.call_args.kwargs["split_adjuster"] is adjuster
+    assert stats["split_registry"] == {"splits": 1}
+    assert not stats.get("degraded")
+
+
+def test_load_only_with_an_empty_split_registry_is_degraded_not_fatal(tmp_path: Path) -> None:
+    from sawa.domain.corporate_actions import SplitAdjuster
+
+    stats, load_prices = _run_load_only(tmp_path, _offline_price_cache(tmp_path), SplitAdjuster([]))
+
+    assert stats["success"] is True
+    assert stats["degraded"] is True
+    assert any("stock_splits is empty" in reason for reason in stats["degraded_reasons"])
+    assert len(load_prices.call_args.kwargs["split_adjuster"]) == 0
+
+
+def test_refresh_split_registry_requests_splits_only_for_the_price_window() -> None:
+    from datetime import date
+
+    start = date(2021, 2, 12)
+    outcome_from_provider = {
+        "success": True,
+        "splits_fetched": 7361,
+        "splits_loaded": 2115,
+        "errors": [],
+    }
+    with mock.patch.object(
+        coldstart, "run_corporate_actions_update", return_value=outcome_from_provider
+    ) as refresh:
+        outcome = coldstart.refresh_split_registry("key", "db", start, logging.getLogger(__name__))
+
+    assert outcome == {"success": True, "splits_fetched": 7361, "splits_loaded": 2115}
+    kwargs = refresh.call_args.kwargs
+    assert kwargs["start_date"] == start
+    assert kwargs["include_splits"] is True
+    assert kwargs["include_dividends"] is False
+    assert kwargs["database_url"] == "db"
+
+
+def test_refresh_split_registry_refuses_an_empty_multi_year_feed() -> None:
+    from datetime import date, timedelta
+
+    with mock.patch.object(
+        coldstart,
+        "run_corporate_actions_update",
+        return_value={"success": True, "splits_fetched": 0, "splits_loaded": 0, "errors": []},
+    ):
+        outcome = coldstart.refresh_split_registry(
+            "key", "db", date.today() - timedelta(days=5 * 365), logging.getLogger(__name__)
+        )
+
+    assert outcome["success"] is False
+    assert "no splits" in outcome["error"]
+
+
+def test_refresh_split_registry_reports_a_provider_failure_without_raising() -> None:
+    from datetime import date
+
+    with mock.patch.object(
+        coldstart,
+        "run_corporate_actions_update",
+        side_effect=RuntimeError("splits endpoint down"),
+    ):
+        outcome = coldstart.refresh_split_registry(
+            "key", "db", date(2021, 2, 12), logging.getLogger(__name__)
+        )
+
+    assert outcome["success"] is False
+    assert outcome["error"].startswith("RuntimeError")
+
+
+def test_refresh_split_registry_surfaces_rolled_back_persistence() -> None:
+    from datetime import date
+
+    with mock.patch.object(
+        coldstart,
+        "run_corporate_actions_update",
+        return_value={
+            "success": False,
+            "splits_fetched": 12,
+            "splits_loaded": 0,
+            "errors": ["split persistence was incomplete"],
+        },
+    ):
+        outcome = coldstart.refresh_split_registry(
+            "key", "db", date(2021, 2, 12), logging.getLogger(__name__)
+        )
+
+    assert outcome["success"] is False
+    assert outcome["errors"] == ["split persistence was incomplete"]

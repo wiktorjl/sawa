@@ -15,6 +15,7 @@ from sawa.api import PolygonClient
 from sawa.domain.corporate_actions import (
     Dividend,
     Earnings,
+    SplitAdjuster,
     StockSplit,
     is_unrepresentable_split_ratio,
 )
@@ -66,6 +67,21 @@ def get_active_tickers(conn) -> list[str]:
     with conn.cursor() as cur:
         cur.execute("SELECT ticker FROM companies WHERE active = true ORDER BY ticker")
         return [row[0] for row in cur.fetchall()]
+
+
+def get_split_adjuster(conn) -> SplitAdjuster:
+    """Build a ``SplitAdjuster`` from every split recorded in ``stock_splits``.
+
+    Flat-file bars are as-traded, so any loader that writes them into the
+    split-adjusted ``stock_prices`` series must re-base them with the splits
+    the registry knows about; an incomplete registry leaves bars before an
+    unrecorded split on the wrong basis.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ticker, execution_date, split_from, split_to FROM stock_splits"
+        )
+        return SplitAdjuster.from_rows(cur.fetchall())
 
 
 def load_splits(

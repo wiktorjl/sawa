@@ -26,6 +26,7 @@ from typing import Any
 
 from sawa.api import FredClient, PolygonClient, PolygonS3Client
 from sawa.api.s3 import BulkPriceRows
+from sawa.corporate_actions import get_split_adjuster, run_corporate_actions_update
 from sawa.database.load import (
     PersistenceResult,
     load_companies,
@@ -212,6 +213,54 @@ def _check_date_already_downloaded(date_str: str, output_dir: Path) -> bool:
             continue
 
     return False
+
+
+def refresh_split_registry(
+    api_key: str,
+    database_url: str,
+    start_date: date,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Record every split that executed inside the price window in ``stock_splits``.
+
+    Flat-file bars are as-traded, so the loader must know each split in the
+    window to re-base them onto the split-adjusted basis the REST pipeline
+    maintains afterwards. Returns a compact outcome; ``success`` is False when
+    the provider or persistence failed, or when a window of a year or more
+    came back with no splits at all (the global feed covers the whole market,
+    so that is not credible), and nothing was committed in that case.
+    """
+    logger.info(f"Loading the split registry from {start_date} for the price window...")
+    try:
+        result = run_corporate_actions_update(
+            api_key=api_key,
+            database_url=database_url,
+            start_date=start_date,
+            include_splits=True,
+            include_dividends=False,
+            logger=logger,
+        )
+    except Exception as e:
+        safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
+        logger.error(f"  Split registry refresh failed: {safe_error}")
+        return {"success": False, "error": safe_error}
+
+    outcome: dict[str, Any] = {
+        "success": bool(result.get("success")),
+        "splits_fetched": int(result.get("splits_fetched", 0) or 0),
+        "splits_loaded": int(result.get("splits_loaded", 0) or 0),
+    }
+    errors = result.get("errors") or []
+    if errors:
+        outcome["errors"] = list(errors)
+    window_days = (date.today() - start_date).days
+    if outcome["success"] and window_days >= 365 and outcome["splits_fetched"] == 0:
+        outcome["success"] = False
+        outcome["error"] = (
+            f"split provider returned no splits for a {window_days}-day window"
+        )
+        logger.error(f"  {outcome['error']}")
+    return outcome
 
 
 def download_prices(
@@ -1193,7 +1242,22 @@ def run_coldstart(
                 logger.info("\n[5/9] Loading prices from CSV")
                 prices_dir = output_dir / "prices"
                 if prices_dir.exists():
-                    loaded_prices = load_prices(conn, prices_dir, logger)
+                    # Cached flat-file bars are as-traded. Re-base them onto
+                    # the split-adjusted basis with whatever split registry
+                    # the database already holds; offline mode cannot fetch
+                    # one, so an empty registry is reported, not fatal.
+                    split_adjuster = get_split_adjuster(conn)
+                    stats["split_registry"] = {"splits": len(split_adjuster)}
+                    if len(split_adjuster) == 0:
+                        degraded_reasons.append(
+                            "stock_splits is empty, so cached flat-file bars were "
+                            "loaded on their as-traded basis; run `sawa "
+                            "corporate-actions --splits-only --start-date <history "
+                            "start>` and repeat --load-only to re-base them"
+                        )
+                    loaded_prices = load_prices(
+                        conn, prices_dir, logger, split_adjuster=split_adjuster
+                    )
                     stats["prices"] = int(loaded_prices)
                     stats["prices_loaded"] = int(loaded_prices)
                     if isinstance(loaded_prices, PersistenceResult):
@@ -1294,6 +1358,7 @@ def run_coldstart(
                 # These are guaranteed to be set when not skipping all downloads
                 assert client is not None
                 assert s3_client is not None
+                assert api_key is not None
 
                 # Step 2: Fetch or load symbols
                 if symbols_file and symbols_file.exists():
@@ -1456,22 +1521,48 @@ def run_coldstart(
                             )
 
                         if price_count:
-                            logger.info("Loading fresh prices into database...")
-                            loaded_prices = load_prices(conn, staging_dir, logger)
-                            stats["prices_loaded"] = int(loaded_prices)
-                            if isinstance(loaded_prices, PersistenceResult):
-                                stats["prices_persistence"] = loaded_prices.summary()
-                                require_complete_persistence(
-                                    loaded_prices,
-                                    expected_rows=int(price_count),
-                                    require_nonempty=True,
-                                )
-                            elif loaded_prices < int(price_count):
+                            # Flat-file bars are as-traded; every REST write
+                            # that maintains this table afterwards is split-
+                            # adjusted. Record the window's splits first and
+                            # re-base each bar as it is written, so a ticker
+                            # that split inside the window is not stored on
+                            # two bases. Without the registry the bars stay
+                            # in the cache for --load-only rather than being
+                            # persisted on the wrong basis.
+                            registry = refresh_split_registry(
+                                api_key, database_url, start_date, logger
+                            )
+                            stats["split_registry"] = registry
+                            if not registry.get("success"):
                                 fatal_provider_steps.add("prices")
                                 degraded_reasons.append(
-                                    f"persisted only {loaded_prices}/{int(price_count)} "
-                                    "fresh historical price rows"
+                                    "split registry refresh failed, so as-traded "
+                                    "flat-file bars were not loaded (they remain "
+                                    "cached for --load-only once stock_splits is "
+                                    "populated)"
                                 )
+                            else:
+                                logger.info("Loading fresh prices into database...")
+                                loaded_prices = load_prices(
+                                    conn,
+                                    staging_dir,
+                                    logger,
+                                    split_adjuster=get_split_adjuster(conn),
+                                )
+                                stats["prices_loaded"] = int(loaded_prices)
+                                if isinstance(loaded_prices, PersistenceResult):
+                                    stats["prices_persistence"] = loaded_prices.summary()
+                                    require_complete_persistence(
+                                        loaded_prices,
+                                        expected_rows=int(price_count),
+                                        require_nonempty=True,
+                                    )
+                                elif loaded_prices < int(price_count):
+                                    fatal_provider_steps.add("prices")
+                                    degraded_reasons.append(
+                                        f"persisted only {loaded_prices}/{int(price_count)} "
+                                        "fresh historical price rows"
+                                    )
                             try:
                                 _merge_price_artifacts(staging_dir, prices_dir)
                             except OSError as e:

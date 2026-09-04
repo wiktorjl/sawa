@@ -1,9 +1,13 @@
 """Domain models for corporate actions (splits, dividends, earnings)."""
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from fractions import Fraction
+from typing import Any
 
+from sawa.domain.price_validation import MAX_BIGINT, MAX_STORABLE_PRICE, PRICE_SCALE
 from sawa.utils.symbols import validate_ticker
 
 _MAX_INTEGER = 2_147_483_647
@@ -312,3 +316,141 @@ class Earnings:
             "revenue_actual",
             "surprise_pct",
         ]
+
+
+_PRICE_FIELDS = ("open", "high", "low", "close")
+
+
+def _coerce_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _finite_decimal(value: object, field: str) -> Decimal:
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{field} is not numeric")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} is not numeric") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{field} is not finite")
+    return parsed
+
+
+class SplitAdjuster:
+    """Re-base as-traded daily bars onto the split-adjusted basis.
+
+    Polygon publishes the same trading day on two bases. The S3 flat files
+    carry as-traded prices and share counts, while the REST aggregates with
+    ``adjusted=true`` divide every bar dated before a split's execution date
+    by the split ratio and multiply its volume by that ratio (splits only;
+    dividends are never adjusted). A table that mixes the two bases prices a
+    company two different ways on consecutive days: NVDA's first flat-file
+    bars sat at 40x the rest of its history (a 4:1 and a 10:1 split) until
+    they were quarantined.
+
+    ``factor(ticker, on)`` is the cumulative ratio of every recorded split
+    for that ticker executing strictly after ``on``; the bar dated on the
+    execution date itself already trades on the new basis. An unknown ticker,
+    or a bar after the last recorded split, has a factor of 1, so applying
+    the adjuster to a split-free or already-adjusted series changes nothing.
+    """
+
+    def __init__(self, splits: Iterable[StockSplit]) -> None:
+        schedule: dict[str, list[tuple[date, Fraction]]] = {}
+        for split in splits:
+            schedule.setdefault(split.ticker, []).append(
+                (split.execution_date, Fraction(split.split_to, split.split_from))
+            )
+        for entries in schedule.values():
+            entries.sort()
+        self._schedule = schedule
+        self._count = sum(len(entries) for entries in schedule.values())
+
+    @classmethod
+    def from_rows(cls, rows: Iterable[tuple[Any, ...]]) -> "SplitAdjuster":
+        """Build from ``(ticker, execution_date, split_from, split_to)`` rows."""
+        splits: list[StockSplit] = []
+        for ticker, execution_date, split_from, split_to in rows:
+            coerced = _coerce_date(execution_date)
+            if coerced is None:
+                raise ValueError("split execution_date is not a date")
+            splits.append(
+                StockSplit(
+                    ticker=str(ticker).upper(),
+                    execution_date=coerced,
+                    split_from=_positive_integer(split_from, "split_from"),
+                    split_to=_positive_integer(split_to, "split_to"),
+                )
+            )
+        return cls(splits)
+
+    def __len__(self) -> int:
+        return self._count
+
+    @property
+    def tickers(self) -> frozenset[str]:
+        return frozenset(self._schedule)
+
+    def factor(self, ticker: str, on: date) -> Fraction:
+        """Cumulative ratio of the ticker's splits executing after ``on``."""
+        result = Fraction(1)
+        for execution_date, ratio in self._schedule.get(ticker.upper(), ()):
+            if execution_date > on:
+                result *= ratio
+        return result
+
+    def adjust_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a copy of an as-traded bar on the split-adjusted basis.
+
+        Expects ``stock_prices`` column names (``ticker``, ``date``, ``open``,
+        ``high``, ``low``, ``close``, ``volume``); values may be numbers or
+        numeric strings, as they are in the flat-file CSV artifacts. Prices
+        are quantized to the stored 8-decimal scale and volume rounded
+        half-up to whole shares. A bar whose factor is 1 comes back with its
+        values untouched.
+        """
+        adjusted = dict(row)
+        ticker = adjusted.get("ticker")
+        bar_date = _coerce_date(adjusted.get("date"))
+        if not isinstance(ticker, str) or bar_date is None:
+            raise ValueError("split adjustment needs a ticker and an ISO date")
+        factor = self.factor(ticker, bar_date)
+        if factor == 1:
+            return adjusted
+        # Compounded reverse splits can push an as-traded price past the
+        # default 28-digit context; give the arithmetic room so the range
+        # check below is what rejects the value, not an InvalidOperation.
+        with localcontext() as ctx:
+            ctx.prec = 60
+            for field in _PRICE_FIELDS:
+                raw = _finite_decimal(adjusted.get(field), field)
+                try:
+                    scaled = (raw * factor.denominator / factor.numerator).quantize(
+                        PRICE_SCALE, rounding=ROUND_HALF_UP
+                    )
+                except InvalidOperation:
+                    scaled = MAX_STORABLE_PRICE
+                if scaled <= 0 or scaled >= MAX_STORABLE_PRICE:
+                    raise ValueError(
+                        f"split-adjusted {field} for {ticker} {bar_date} is outside "
+                        "the storable price range"
+                    )
+                adjusted[field] = scaled
+            raw_volume = _finite_decimal(adjusted.get("volume"), "volume")
+            volume = (raw_volume * factor.numerator / factor.denominator).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        if volume < 0 or volume > MAX_BIGINT:
+            raise ValueError(
+                f"split-adjusted volume for {ticker} {bar_date} is outside the storable range"
+            )
+        adjusted["volume"] = int(volume)
+        return adjusted

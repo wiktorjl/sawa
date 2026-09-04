@@ -358,3 +358,54 @@ def test_coldstart_offline_mode_requires_company_and_price_caches(
         "provider step failed (overviews)",
         "provider step failed (prices)",
     }
+
+
+def test_price_loader_rebases_as_traded_bars_with_the_split_registry(tmp_path: Path) -> None:
+    """Flat-file bars are as-traded; the loader must write them split-adjusted.
+
+    NVDA's coldstart bars before its 4:1 (2021-07-20) and 10:1 (2024-06-10)
+    splits were stored at 40x the rest of the series because nothing re-based
+    them. The bar on the execution date already trades on the new basis.
+    """
+    from decimal import Decimal
+
+    from sawa.domain.corporate_actions import SplitAdjuster, StockSplit
+
+    (tmp_path / "NVDA.csv").write_text(
+        "date,symbol,open,close,high,low,volume\n"
+        "2021-02-17,NVDA,606.84,596.24,608.9407,591.2,6761910\n"
+        "2024-06-10,NVDA,120.37,121.79,195.95,117.01,314157461\n",
+        encoding="utf-8",
+    )
+    adjuster = SplitAdjuster(
+        [
+            StockSplit(ticker="NVDA", execution_date=date(2021, 7, 20), split_from=1, split_to=4),
+            StockSplit(ticker="NVDA", execution_date=date(2024, 6, 10), split_from=1, split_to=10),
+        ]
+    )
+
+    with mock.patch.object(database_load, "_insert_rows", return_value=2) as insert:
+        result = database_load.load_prices(object(), tmp_path, split_adjuster=adjuster)
+
+    assert int(result) == 2
+    rows = {row["date"]: row for row in insert.call_args.args[3]}
+    assert rows["2021-02-17"]["close"] == Decimal("14.90600000")
+    assert rows["2021-02-17"]["high"] == Decimal("15.22351750")
+    assert rows["2021-02-17"]["volume"] == 270_476_400
+    # Post-split bar passes through untouched, as read from the CSV.
+    assert rows["2024-06-10"]["close"] == "121.79"
+    assert rows["2024-06-10"]["volume"] == "314157461"
+
+
+def test_price_loader_without_a_registry_writes_bars_as_read(tmp_path: Path) -> None:
+    (tmp_path / "NVDA.csv").write_text(
+        "date,symbol,open,close,high,low,volume\n"
+        "2021-02-17,NVDA,606.84,596.24,608.9407,591.2,6761910\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(database_load, "_insert_rows", return_value=1) as insert:
+        database_load.load_prices(object(), tmp_path)
+
+    assert insert.call_args.kwargs.get("row_transform") is None
+    assert insert.call_args.args[3][0]["close"] == "596.24"

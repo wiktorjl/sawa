@@ -77,7 +77,7 @@ Rate limiting: `sawa/repositories/rate_limiter.py` (default 5 req/s).
 | `/stocks/financials/v1/balance-sheets` | `balance_sheets` | `coldstart`, `quarterly` | `sawa/database/load.py` |
 | `/stocks/financials/v1/income-statements` | `income_statements` | `coldstart`, `quarterly` | `sawa/database/load.py` |
 | `/stocks/financials/v1/cash-flow-statements` | `cash_flows` | `coldstart`, `quarterly` | `sawa/database/load.py` |
-| `/v3/reference/splits` | `stock_splits` | `coldstart`, `weekly` | `sawa/corporate_actions.py` |
+| `/v3/reference/splits` | `stock_splits` | `coldstart` (whole price window), `weekly` (trailing year) | `sawa/corporate_actions.py` |
 | `/v3/reference/dividends` | `dividends` | `coldstart`, `weekly` | `sawa/corporate_actions.py` |
 | `/vX/reference/tickers/{t}/events` | `earnings` (opt-in) | `corporate-actions --include-earnings` only | `sawa/corporate_actions.py` |
 | `/v2/reference/news` | `news_articles`, `news_article_tickers`, `news_sentiment` | `coldstart`, `daily`, `weekly` | `sawa/database/news.py` |
@@ -111,6 +111,21 @@ S3 is used only for the historical bulk download path — coldstart fans
 out one S3 GET per trading day across the requested year range, which is
 dramatically faster than the per-ticker REST aggregates endpoint. After
 coldstart, `sawa daily` uses REST for incremental updates.
+
+**Basis.** Flat-file bars are *as-traded*: prices and share counts exactly
+as printed on the day. Every REST write (`daily`, `adjust-splits`,
+`add-symbol`) is *split-adjusted*: Polygon divides each bar before a split's
+execution date by the split ratio and multiplies its volume by the same
+ratio (splits only; dividends are never adjusted). `stock_prices` is kept on
+the split-adjusted basis, so coldstart first records every split inside the
+price window in `stock_splits` (one global `/v3/reference/splits` call) and
+`load_prices` re-bases each flat-file bar through
+`sawa.domain.corporate_actions.SplitAdjuster` as it is written. Without
+that step a ticker that split inside the window (NVDA: 4:1 in 2021, 10:1 in
+2024) is stored two different ways, at 40x on the older side. If the split
+fetch fails, the bars stay in the CSV cache and are not loaded;
+`--load-only` re-bases from whatever `stock_splits` already holds and
+reports a degraded run when the registry is empty.
 
 ### 2.3 Polygon WebSocket — `wss://delayed.polygon.io/stocks`
 
@@ -234,7 +249,7 @@ Reverse index of §2 and §3.
 | `market_internals` | FRED (`VIXCLS`, `VXVCLS`, `BAMLH0A0HYM2`) — sole source since commit `2d4e350` |
 | `indices` | seed data in `sqlschema/12_indices.sql` |
 | `index_constituents` | Wikipedia (`sp500`) + Polygon (`nasdaq_listed`, `us_active`) |
-| `stock_splits` | Polygon REST `/v3/reference/splits` |
+| `stock_splits` | Polygon REST `/v3/reference/splits` — coldstart records the whole price window, weekly the trailing year; also the registry `load_prices` uses to re-base as-traded flat-file bars |
 | `dividends` | Polygon REST `/v3/reference/dividends` |
 | `earnings` | yfinance via `scripts/populate_earnings.py` (manual). Polygon `ticker-events` is wired up but currently returns no earnings data. |
 | `news_articles`, `news_article_tickers`, `news_sentiment` | Polygon REST `/v2/reference/news` (sentiment provided by Polygon) |

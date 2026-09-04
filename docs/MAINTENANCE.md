@@ -336,7 +336,17 @@ sawa adjust-splits                 # auto-detect recent splits
 sawa adjust-splits --ticker XYZ    # force a specific ticker
 ```
 
-This re-fetches split-adjusted history from Polygon.
+This re-fetches split-adjusted history from Polygon and re-bases rows older
+than Polygon's five-year window by the ratio it applied at the window
+boundary, then recomputes the ticker's indicators. A series that is still
+discontinuous afterwards (the stored tail was already on a third basis) is
+listed under `pre_horizon_rebase_skipped` in the run stats; see
+`scripts/quarantine_unadjustable_prices.py`.
+
+Coldstart bars come from Polygon's as-traded flat files and are re-based at
+load time from `stock_splits` (`docs/DATA_SOURCES.md` §2.2). A price series
+that steps by a split ratio at one date usually means it was loaded before
+that registry existed.
 
 ### "I changed an SQL file"
 
