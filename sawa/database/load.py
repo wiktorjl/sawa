@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -19,6 +20,7 @@ from psycopg import sql
 
 from sawa.api.client import PolygonClient
 from sawa.database.news import NewsLoadResult, fetch_news_for_symbols
+from sawa.domain.corporate_actions import SplitAdjuster
 from sawa.domain.price_validation import (
     is_plausible_daily_price_date,
     is_valid_daily_ohlcv,
@@ -178,6 +180,7 @@ def load_csv_to_table(
     upsert: bool = True,
     valid_tickers: set[str] | None = None,
     strict: bool = False,
+    row_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> PersistenceResult:
     """
     Load CSV file into PostgreSQL table.
@@ -192,6 +195,9 @@ def load_csv_to_table(
         valid_tickers: Optional set of valid ticker symbols. If provided,
             rows with tickers not in this set will be skipped.
         strict: Atomically require every source row to be eligible and written.
+        row_transform: Applied to each eligible row (keyed by DB column) after
+            mapping and ticker filtering, before the write — e.g. re-basing
+            as-traded bars onto the split-adjusted basis.
 
     Returns:
         Number of rows loaded
@@ -246,6 +252,8 @@ def load_csv_to_table(
                     skipped_rows += 1
                     continue
 
+            if row_transform is not None:
+                mapped_row = row_transform(mapped_row)
             rows.append(mapped_row)
 
     # Log skipped tickers summary
@@ -538,11 +546,25 @@ def load_companies(
 
 
 def load_prices(
-    conn, prices_dir: Path, log: logging.Logger | None = None
+    conn,
+    prices_dir: Path,
+    log: logging.Logger | None = None,
+    *,
+    split_adjuster: SplitAdjuster | None = None,
 ) -> PersistenceResult:
-    """Load stock prices from per-symbol CSV files."""
+    """Load stock prices from per-symbol CSV files.
+
+    The CSV artifacts hold as-traded flat-file bars, while ``stock_prices`` is
+    maintained on Polygon's split-adjusted basis by every later REST write.
+    Pass ``split_adjuster`` so each bar is re-based as it is written; loading
+    without one stores a ticker that split inside the window on two bases.
+    """
     log = log or logger
     log.info("Loading stock prices...")
+    if split_adjuster is not None:
+        log.info(
+            f"  Re-basing as-traded bars with {len(split_adjuster)} recorded split(s)"
+        )
 
     if not prices_dir.exists():
         log.warning(f"Prices directory not found: {prices_dir}")
@@ -607,6 +629,9 @@ def load_prices(
             log,
             upsert=True,
             strict=True,
+            row_transform=(
+                split_adjuster.adjust_row if split_adjuster is not None else None
+            ),
         )
         require_complete_persistence(count, require_nonempty=True)
         total += count

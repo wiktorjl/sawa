@@ -250,7 +250,57 @@ Polygon's available history (typically 5+ years back).
 Polygon's daily aggregates are split-adjusted at fetch time, but historical
 data already in the DB will not be retroactively adjusted. Run
 `sawa adjust-splits --ticker XYZ` or let `sawa adjust-splits` auto-detect
-recent splits.
+recent splits (the daily and weekly jobs do this themselves for splits they
+record). Polygon serves a rolling five-year history, so rows older than that
+cannot be re-fetched; the refresh re-bases them locally by the ratio Polygon
+applied at the first date it did serve, provided the stored tail sits on the
+same basis as that boundary. Rows it cannot reconcile are reported in
+`pre_horizon_rebase_skipped` and are the job of
+`scripts/quarantine_unadjustable_prices.py`.
+
+Coldstart's flat-file bars are as-traded and are re-based at load time from
+`stock_splits`; see `docs/DATA_SOURCES.md` §2.2. If `stock_splits` was
+empty when a cache was loaded, populate it for the whole history and reload:
+
+```bash
+sawa corporate-actions --splits-only --start-date 2021-01-04   # history start
+sawa coldstart --load-only
+```
+
+### Stale split basis: finding, quarantining, and restoring rows
+A recorded split whose raw jump is still visible in `stock_prices` means that
+ticker's history was never re-based. This query lists them (splits closer to
+their raw step than to no step at all); fix each with
+`sawa adjust-splits --ticker XYZ`:
+
+```sql
+WITH s AS (SELECT ticker, execution_date, split_to::numeric / split_from AS f
+           FROM stock_splits),
+     p AS (SELECT ticker, date, close,
+                  lag(close) OVER (PARTITION BY ticker ORDER BY date) AS prev
+           FROM stock_prices WHERE ticker IN (SELECT ticker FROM s))
+SELECT s.ticker, s.execution_date, s.f, p.prev, p.close
+FROM s JOIN p ON p.ticker = s.ticker
+ AND p.date = (SELECT min(date) FROM stock_prices q
+               WHERE q.ticker = s.ticker AND q.date >= s.execution_date)
+WHERE p.prev > 0 AND (s.f >= 1.2 OR s.f <= 0.8333)
+  AND abs(ln(p.close / p.prev) + ln(s.f)) < abs(ln(p.close / p.prev));
+```
+
+Two scripts handle rows older than the provider window:
+
+- `scripts/quarantine_unadjustable_prices.py` moves pre-horizon rows that sit
+  on a stale basis into `stock_prices_unadjustable_archive` (dry run by
+  default; `--apply`, `--recompute-ta`).
+- `scripts/restore_quarantined_prices.py` puts archived rows back on the
+  split-adjusted basis using `stock_splits`, trying the as-traded reading and
+  each "only the latest k splits" reading segment by segment, and restoring
+  rows only where exactly one reading is continuous with the stored series
+  (dry run by default; `--apply`, `--recompute-ta`, `--ticker XYZ`). Rows it
+  leaves archived are listed with the reason. When the reason is that no
+  split is recorded after the rows, the quarantined jump was a genuine move
+  (TAL and ARDX collapsed 70%+ in July 2021); `--as-is XYZ` restores such rows
+  unchanged and refuses any ticker that does have a later split.
 
 ## Data Directory Layout
 
