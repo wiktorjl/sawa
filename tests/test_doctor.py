@@ -1,9 +1,29 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from sawa.doctor import format_checks, run_doctor_on_connection, summarize_checks
+import pytest
+
+from sawa.doctor import (
+    _backup_checks,
+    format_checks,
+    run_doctor_on_connection,
+    summarize_checks,
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_backup_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the backup check off this host's real /data/db-backups.
+
+    Without this the doctor tests would pass or fail according to whether the
+    machine running them happens to hold a recent database backup.
+    """
+    monkeypatch.setenv("SAWA_BACKUP_DIR", str(tmp_path / "absent"))
 
 
 class FakeCursor:
@@ -562,3 +582,74 @@ def test_format_checks_includes_summary_counts() -> None:
     assert "Database Doctor" in output
     assert "Summary:" in output
     assert "stock_prices.latest_date" in output
+
+
+def _write_backup(directory: Path, name: str, *, days_old: float, size: int = 4096) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"\0" * size)
+    stamp = time.time() - days_old * 86400
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_backup_check_is_omitted_when_the_host_keeps_no_backups(tmp_path: Path) -> None:
+    """A developer machine or CI runner is not running backups, so there is nothing to report."""
+    os.environ["SAWA_BACKUP_DIR"] = str(tmp_path / "nonexistent")
+
+    assert _backup_checks() == []
+
+
+def test_recent_backup_passes(tmp_path: Path) -> None:
+    _write_backup(tmp_path, "postgres_backup_20260904_000633.tar", days_old=1)
+    os.environ["SAWA_BACKUP_DIR"] = str(tmp_path)
+
+    checks = _backup_checks()
+
+    assert len(checks) == 1
+    assert checks[0].name == "backup.freshness"
+    assert checks[0].status == "PASS"
+    assert "postgres_backup_20260904_000633.tar" in checks[0].message
+
+
+def test_stale_backup_fails_rather_than_warns(tmp_path: Path) -> None:
+    """The 14-week silent failure is exactly what this check exists to catch."""
+    _write_backup(tmp_path, "postgres_backup_20260524_010001.tar", days_old=102)
+    os.environ["SAWA_BACKUP_DIR"] = str(tmp_path)
+
+    checks = _backup_checks()
+
+    assert checks[0].status == "FAIL"
+    assert checks[0].observed == 102
+
+
+def test_empty_backup_directory_fails(tmp_path: Path) -> None:
+    (tmp_path / "backups").mkdir()
+    os.environ["SAWA_BACKUP_DIR"] = str(tmp_path / "backups")
+
+    checks = _backup_checks()
+
+    assert checks[0].status == "FAIL"
+    assert checks[0].observed == "none"
+
+
+def test_freshness_uses_the_newest_archive(tmp_path: Path) -> None:
+    _write_backup(tmp_path, "postgres_backup_20260405_010001.tar", days_old=150)
+    _write_backup(tmp_path, "postgres_backup_20260904_000633.tar", days_old=2)
+    os.environ["SAWA_BACKUP_DIR"] = str(tmp_path)
+
+    checks = _backup_checks()
+
+    assert checks[0].status == "PASS"
+    assert checks[0].observed == 2
+
+
+def test_a_partial_dump_is_not_counted_as_a_backup(tmp_path: Path) -> None:
+    """The script writes .part first and renames on success; .part must not qualify."""
+    _write_backup(tmp_path, "postgres_backup_20260904_000633.tar.part", days_old=0)
+    os.environ["SAWA_BACKUP_DIR"] = str(tmp_path)
+
+    checks = _backup_checks()
+
+    assert checks[0].status == "FAIL"
+    assert checks[0].observed == "none"
