@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from math import ceil
+from pathlib import Path
 from typing import Any, Literal
 
 import psycopg
@@ -490,6 +493,83 @@ def _post_split_ta_check(conn: Any) -> DoctorCheck:
     )
 
 
+_BACKUP_DIR_ENV = "SAWA_BACKUP_DIR"
+_DEFAULT_BACKUP_DIR = "/data/db-backups"
+_BACKUP_GLOB = "postgres_backup_*.tar"
+# Backups run weekly, so 10 days leaves room for one missed run before alerting.
+_BACKUP_MAX_AGE_DAYS = 10
+
+
+def _backup_checks(*, now: float | None = None) -> list[DoctorCheck]:
+    """Fail when the newest database backup has gone stale.
+
+    The weekly backup failed silently on 14 consecutive runs because nothing
+    downstream ever looked at its result: the script wrote to a log file, and
+    a non-zero exit reached no one. Checking the artifact here means a stopped
+    backup — or a stopped cron — surfaces through the same alerting path as
+    every other doctor failure, within a day rather than a quarter.
+
+    Hosts with no backup directory (a developer machine, CI) are not running
+    backups at all, so the check does not apply and is omitted entirely rather
+    than reported as a failure.
+
+    Age is elapsed time, not a difference of calendar dates: the file carries a
+    UTC timestamp while the rest of the doctor works in market (ET) dates, and
+    subtracting one from the other reports a backup written this evening as
+    minus one day old.
+    """
+    backup_dir = Path(os.environ.get(_BACKUP_DIR_ENV) or _DEFAULT_BACKUP_DIR)
+    if not backup_dir.is_dir():
+        return []
+
+    try:
+        backups = sorted(
+            backup_dir.glob(_BACKUP_GLOB),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        return [
+            _check(
+                "backup.freshness",
+                False,
+                f"cannot read backup directory {backup_dir}: {exc.strerror}",
+                severity="fail",
+                observed="unreadable",
+                expected=f"a readable {backup_dir}",
+            )
+        ]
+
+    expected = f"an archive newer than {_BACKUP_MAX_AGE_DAYS} days"
+    if not backups:
+        return [
+            _check(
+                "backup.freshness",
+                False,
+                f"no {_BACKUP_GLOB} archive in {backup_dir}",
+                severity="fail",
+                observed="none",
+                expected=expected,
+            )
+        ]
+
+    newest = backups[0]
+    stat = newest.stat()
+    reference = time.time() if now is None else now
+    age_days = max(0, int((reference - stat.st_mtime) // 86400))
+    size_gb = stat.st_size / 1024**3
+    return [
+        _check(
+            "backup.freshness",
+            age_days <= _BACKUP_MAX_AGE_DAYS,
+            f"newest backup is {newest.name} ({size_gb:.1f} GB), {age_days} day(s) old",
+            severity="fail",
+            observed=age_days,
+            expected=expected,
+        )
+    ]
+
+
 def _daily_checks(
     conn: Any,
     *,
@@ -753,6 +833,8 @@ def run_doctor_on_connection(
     blocking_schema_failures = [c for c in checks if c.status == "FAIL"]
     if blocking_schema_failures:
         return checks
+
+    checks.extend(_backup_checks())
 
     active_count = _active_company_count(conn)
     checks.extend(

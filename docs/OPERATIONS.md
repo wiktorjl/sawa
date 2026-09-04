@@ -186,6 +186,41 @@ sawa doctor --max-staleness-days 3         # stricter stock_prices recency
 Exit code is `0` only when there are no failed checks. Warnings are printed and
 included in notifications, but do not make the command fail.
 
+## Database Backups
+
+`/home/seed/scripts/backup_postgres.sh` runs from cron every Sunday at 01:00
+UTC and writes a `pg_dump -F t` archive to `/data/db-backups`, keeping the ten
+most recent.
+
+Postgres runs in a rootless podman container, so the dump executes inside the
+container. This is not a style choice: the host `pg_dump` is 16.x while the
+server is 18.x, and pg_dump refuses to dump a newer server. The script sets
+`XDG_RUNTIME_DIR` itself because cron does not.
+
+Each run writes to a `.part` file and renames it only after the archive passes
+three checks: an absolute size floor, at least half the size of the previous
+backup, and a readable tar table of contents containing `toc.dat`. A partial
+dump therefore never takes the name of a good one, and retention never sees it.
+
+Failures raise an ntfy alert through `sawa notify`. Independently,
+`sawa doctor` fails the `backup.freshness` check when the newest archive is
+more than 10 days old, so a stopped cron surfaces even when the script never
+runs to report its own failure. Point `SAWA_BACKUP_DIR` elsewhere to check a
+different location; hosts without the directory skip the check.
+
+Run one on demand, and restore, like this:
+
+```bash
+/home/seed/scripts/backup_postgres.sh                  # takes ~1 minute
+
+# Inspect an archive (through the container: host pg_restore is older)
+podman exec -i stocksdb pg_restore -l < /data/db-backups/postgres_backup_YYYYMMDD_HHMMSS.tar
+
+# Restore over the live database - destructive, stop the schedulers first
+podman exec -i stocksdb pg_restore -U postgres -d postgres --clean --if-exists \
+    < /data/db-backups/postgres_backup_YYYYMMDD_HHMMSS.tar
+```
+
 ## Re-entrancy
 
 All operations are safe to re-run.
