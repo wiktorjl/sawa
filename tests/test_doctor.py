@@ -653,3 +653,286 @@ def test_a_partial_dump_is_not_counted_as_a_backup(tmp_path: Path) -> None:
 
     assert checks[0].status == "FAIL"
     assert checks[0].observed == "none"
+
+
+# ── Trading-calendar news freshness and the watchdog job ─────────────────────
+
+from datetime import timedelta  # noqa: E402
+
+from sawa.utils.market_hours import ET  # noqa: E402
+
+_DAILY_TABLES = {
+    "companies",
+    "stock_prices",
+    "technical_indicators",
+    "news_articles",
+    "market_internals",
+    "stock_prices_live",
+    "mv_52week_extremes",
+}
+
+
+def _et(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    return ET.localize(datetime(year, month, day, hour, minute))
+
+
+def test_news_four_days_stale_warns_but_does_not_fail_the_daily_doctor() -> None:
+    # Friday evening post-job doctor: session 05-15 expected, news floor 05-12.
+    # The post-job check is WARN-only so a provider news outage cannot withhold
+    # daily_done and re-run the daily on every evening tick.
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_news=datetime(2026, 5, 11, 20, 0, tzinfo=timezone.utc),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["news_articles.recent"].status == "WARN"
+    assert summarize_checks(checks)["success"] is True
+
+
+def test_news_three_days_behind_the_session_still_passes_post_job() -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_news=datetime(2026, 5, 12, 20, 0, tzinfo=timezone.utc),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["news_articles.recent"].status == "PASS"
+
+
+def test_news_three_days_stale_fails_the_watchdog(scheduler_state: Path) -> None:
+    # Tuesday 09-15 08:30 ET: expected session Monday 09-14, strict floor 09-12.
+    now = _et(2026, 9, 15, 8, 30)
+    _fresh_state(scheduler_state, now, date(2026, 9, 14), "2026-W38")
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 14),
+        latest_news=datetime(2026, 9, 11, 20, 0, tzinfo=timezone.utc),
+        market_latest=(date(2026, 9, 14), date(2026, 9, 14), date(2026, 9, 11)),
+    )
+
+    checks = run_doctor_on_connection(conn, job="watchdog", now=now)
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["news_articles.recent"].status == "FAIL"
+    assert summarize_checks(checks)["success"] is False
+
+
+def test_news_floor_follows_the_trading_calendar_over_a_long_weekend() -> None:
+    # Tuesday 2026-09-08 08:30 ET after Labor Day: latest session is Friday
+    # 09-04, so news from Wednesday 09-02 is still acceptable.
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 4),
+        latest_news=datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", now=_et(2026, 9, 8, 8, 30))
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["news_articles.recent"].status == "PASS"
+
+
+def test_same_evening_news_after_utc_midnight_is_not_future_dated() -> None:
+    # 21:30 ET on 05-15 is 01:30 UTC on 05-16: judged in ET, it is today's news.
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_news=datetime(2026, 5, 16, 1, 30, tzinfo=timezone.utc),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["news_articles.recent"].status == "PASS"
+
+
+@pytest.fixture
+def scheduler_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    state = tmp_path / "scheduler"
+    state.mkdir()
+    monkeypatch.setenv("SAWA_SCHEDULER_STATE_DIR", str(state))
+    return state
+
+
+def _write_log(state: Path, *lines: str) -> None:
+    (state / "scheduler.log").write_text("\n".join(lines) + "\n")
+
+
+def _fresh_state(state: Path, now: datetime, expected_eod: date, week: str) -> None:
+    tick = now - timedelta(minutes=10)
+    _write_log(
+        state,
+        f"[{tick:%Y-%m-%d %H:%M:%S} ET] Scheduler tick — market: closed, time: {tick:%H:%M} ET",
+        f"[{tick:%Y-%m-%d %H:%M:%S} ET] No action needed",
+    )
+    (state / f"daily_done_{expected_eod:%Y-%m-%d}").touch()
+    (state / f"weekly_done_{week}").touch()
+
+
+def test_watchdog_passes_on_a_healthy_morning(scheduler_state: Path) -> None:
+    now = _et(2026, 9, 15, 8, 30)  # Tuesday; expected session Monday 09-14
+    _fresh_state(scheduler_state, now, date(2026, 9, 14), "2026-W38")
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 14),
+        latest_news=datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc),
+        market_latest=(date(2026, 9, 14), date(2026, 9, 14), date(2026, 9, 11)),
+    )
+
+    checks = run_doctor_on_connection(conn, job="watchdog", now=now)
+    by_name = {c.name: c for c in checks}
+
+    assert summarize_checks(checks)["success"] is True, format_checks(checks)
+    assert by_name["stock_prices.latest_date"].status == "PASS"
+    assert by_name["technical_indicators.latest_date"].status == "PASS"
+    assert by_name["market_internals.hy_spread.latest_date"].status == "PASS"
+    assert by_name["scheduler.tick_freshness"].status == "PASS"
+    assert by_name["scheduler.daily_done"].status == "PASS"
+    assert by_name["scheduler.weekly_done"].status == "PASS"
+    assert by_name["scheduler.intraday_orphan"].status == "PASS"
+
+
+def test_watchdog_fails_one_session_behind(scheduler_state: Path) -> None:
+    # Data stopped Friday 09-11; Tuesday 09-15 morning expects Monday 09-14.
+    now = _et(2026, 9, 15, 8, 30)
+    _fresh_state(scheduler_state, now, date(2026, 9, 14), "2026-W38")
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 11),
+        latest_news=datetime(2026, 9, 12, 20, 0, tzinfo=timezone.utc),
+    )
+
+    checks = run_doctor_on_connection(conn, job="watchdog", now=now)
+    failed = {c.name for c in checks if c.status == "FAIL"}
+
+    assert "stock_prices.latest_date" in failed
+    assert "technical_indicators.latest_date" in failed
+    assert "market_internals.vix.latest_date" in failed
+    # News gets two days of slack behind the expected session (09-14), so
+    # 09-12 news still passes; the price/TA/internals checks carry the alert.
+    assert "news_articles.recent" not in failed
+
+
+def test_watchdog_monday_morning_expects_friday_and_last_weeks_flag(
+    scheduler_state: Path,
+) -> None:
+    now = _et(2026, 9, 14, 8, 30)  # Monday
+    _fresh_state(scheduler_state, now, date(2026, 9, 11), "2026-W37")
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 11),
+        latest_news=datetime(2026, 9, 13, 20, 0, tzinfo=timezone.utc),
+    )
+
+    checks = run_doctor_on_connection(conn, job="watchdog", now=now)
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["stock_prices.latest_date"].status == "PASS"
+    assert by_name["scheduler.daily_done"].status == "PASS"
+    assert by_name["scheduler.weekly_done"].status == "PASS"
+
+
+def test_watchdog_reports_the_2026_09_04_outage(scheduler_state: Path, tmp_path: Path) -> None:
+    now = _et(2026, 9, 15, 8, 30)
+    _write_log(
+        scheduler_state,
+        "[2026-09-04 14:15:02 ET] Scheduler tick — market: open, time: 14:15 ET",
+        "[2026-09-04 14:15:02 ET] No action needed",
+        "[2026-09-04 14:30:01 ET] ERROR: could not safely parse .env",
+        "[2026-09-15 08:15:01 ET] ERROR: could not safely parse .env",
+    )
+    (scheduler_state / "daily_done_2026-09-03").touch()
+    (scheduler_state / "weekly_done_2026-W36").touch()
+    # A fake /proc with a live `sawa intraday` process.
+    proc = tmp_path / "proc"
+    (proc / "210102").mkdir(parents=True)
+    (proc / "210102" / "cmdline").write_bytes(
+        b"/x/.venv/bin/python\0/x/.venv/bin/sawa\0intraday\0--log-dir\0/x/logs\0"
+    )
+    (scheduler_state / "intraday.pid").write_text("210102 39973489\n")
+    (scheduler_state / "intraday_start_time").write_text("2026-09-04 09:30 ET\n")
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 3),
+        latest_news=datetime(2026, 9, 3, 20, 55, tzinfo=timezone.utc),
+    )
+
+    # The integrated path with a controlled /proc: nothing here depends on
+    # the host's real process table.
+    checks = run_doctor_on_connection(
+        conn, job="watchdog", now=now, scheduler_state_dir=scheduler_state, proc=proc
+    )
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["news_articles.recent"].status == "FAIL"
+    assert by_name["stock_prices.latest_date"].status == "FAIL"
+    tick = by_name["scheduler.tick_freshness"]
+    assert tick.status == "FAIL"
+    assert "2026-09-04 14:15 ET" in tick.message
+    assert "could not safely parse .env" in tick.message
+    assert by_name["scheduler.daily_done"].status == "FAIL"
+    assert "daily_done_2026-09-14" in by_name["scheduler.daily_done"].message
+    assert by_name["scheduler.weekly_done"].status == "FAIL"
+    assert "weekly_done_2026-W38" in by_name["scheduler.weekly_done"].message
+    orphan = by_name["scheduler.intraday_orphan"]
+    assert orphan.status == "FAIL"
+    assert "210102" in orphan.message and "2026-09-04 09:30 ET" in orphan.message
+
+
+def test_watchdog_tolerates_a_stale_tick_while_a_job_holds_the_lock(
+    scheduler_state: Path, tmp_path: Path
+) -> None:
+    from sawa import doctor as doctor_module
+
+    now = _et(2026, 9, 15, 18, 40)
+    tick = now - timedelta(hours=1, minutes=40)
+    _write_log(
+        scheduler_state,
+        f"[{tick:%Y-%m-%d %H:%M:%S} ET] Scheduler tick — market: closed, time: {tick:%H:%M} ET",
+        f"[{tick:%Y-%m-%d %H:%M:%S} ET] Starting sawa daily...",
+    )
+    proc = tmp_path / "proc"
+    (proc / "4242").mkdir(parents=True)
+    (proc / "4242" / "cmdline").write_bytes(b"/x/.venv/bin/python\0/x/.venv/bin/sawa\0daily\0")
+
+    checks = doctor_module._scheduler_state_checks(
+        now_et=now, expected_eod=date(2026, 9, 14), state_dir=scheduler_state, proc=proc
+    )
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["scheduler.tick_freshness"].status == "PASS"
+    assert "sawa daily is running" in by_name["scheduler.tick_freshness"].message
+
+
+def test_intraday_during_the_session_is_not_an_orphan(scheduler_state: Path, tmp_path: Path) -> None:
+    from sawa import doctor as doctor_module
+
+    now = _et(2026, 9, 15, 11, 0)
+    _fresh_state(scheduler_state, now, date(2026, 9, 14), "2026-W38")
+    proc = tmp_path / "proc"
+    (proc / "77").mkdir(parents=True)
+    (proc / "77" / "cmdline").write_bytes(b"/x/.venv/bin/sawa\0intraday\0")
+    (scheduler_state / "intraday.pid").write_text("77 1\n")
+
+    checks = doctor_module._scheduler_state_checks(
+        now_et=now, expected_eod=date(2026, 9, 14), state_dir=scheduler_state, proc=proc
+    )
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["scheduler.intraday_orphan"].status == "PASS"
+
+
+def test_watchdog_fails_when_the_state_directory_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SAWA_SCHEDULER_STATE_DIR", str(tmp_path / "nowhere"))
+    conn = FakeConnection(tables=_DAILY_TABLES, latest_price_date=date(2026, 9, 14))
+
+    checks = run_doctor_on_connection(conn, job="watchdog", now=_et(2026, 9, 15, 8, 30))
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["scheduler.state_dir"].status == "FAIL"

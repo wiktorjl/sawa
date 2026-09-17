@@ -1607,7 +1607,12 @@ async def list_tools() -> list[Tool]:
         # News sentiment tools
         Tool(
             name="get_recent_news_sentiment",
-            description="Get recent news articles with sentiment analysis for a ticker",
+            description=(
+                "Get news articles with Polygon sentiment insights for a ticker from "
+                "the local database (refreshed by the daily job, not live). Read "
+                "freshness.data_age_days and warnings before treating the summary "
+                "as current."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2530,6 +2535,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 days_back=arguments.get("days_back", 14),
                 max_articles=arguments.get("max_articles", 10),
             )
+            # Staleness warnings belong in the envelope, next to every other
+            # tool's warnings, not buried in the data payload.
+            warnings.extend(result.pop("warnings", []))
         elif name == "calculate_support_resistance_levels":
             logger.info("  Executing: calculate_support_resistance_levels")
             result = await _run_sync(

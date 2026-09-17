@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time as dt_time, timedelta
 from math import ceil
 from pathlib import Path
 from typing import Any, Literal
@@ -14,9 +15,15 @@ from typing import Any, Literal
 import psycopg
 
 from sawa.utils.logging import setup_logging
-from sawa.utils.market_hours import get_market_date
+from sawa.utils.market_hours import (
+    ET,
+    expected_latest_eod_date,
+    get_market_date,
+    is_trading_day,
+    previous_trading_day,
+)
 
-DoctorJob = Literal["all", "daily", "weekly", "quarterly", "coldstart"]
+DoctorJob = Literal["all", "daily", "weekly", "quarterly", "coldstart", "watchdog"]
 Severity = Literal["info", "warn", "fail"]
 
 
@@ -95,6 +102,21 @@ def _within_days(value: date | datetime | None, today: date, max_days: int) -> b
     return age is not None and 0 <= age <= max_days
 
 
+def _market_date_of(value: date | datetime | None) -> date | None:
+    """Calendar date of ``value`` in market (ET) time.
+
+    published_utc rows written at 21:00 ET land on the next UTC date; judging
+    them by their UTC date would call same-evening news "future-dated".
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(ET)
+        return value.date()
+    return value
+
+
 def _required_coverage_count(expected_count: int, min_coverage: float) -> int:
     return ceil(expected_count * min_coverage)
 
@@ -107,7 +129,7 @@ def _coverage_ok(count: int, expected_count: int, min_coverage: float) -> bool:
 
 def _required_tables_checks(conn: Any, job: DoctorJob) -> list[DoctorCheck]:
     tables = ["companies", "stock_prices"]
-    if job in {"all", "daily", "coldstart"}:
+    if job in {"all", "daily", "coldstart", "watchdog"}:
         tables.extend(
             [
                 "technical_indicators",
@@ -570,14 +592,37 @@ def _backup_checks(*, now: float | None = None) -> list[DoctorCheck]:
     ]
 
 
+# News is a seven-day feed re-pulled by every daily run, so its newest article
+# should trail the latest expected EOD session by at most a couple of days.
+# The watchdog (calendar-strict) FAILS after two days of lag. The post-job
+# daily doctor only WARNS, with an extra day of slack: sawa/daily.py makes the
+# news step non-fatal on purpose, and a doctor FAIL there withholds daily_done
+# and re-runs the whole daily on every evening tick — a provider news outage
+# must not turn into a retry loop against the price provider.
+_NEWS_MAX_LAG_DAYS_STRICT = 2
+_NEWS_MAX_LAG_DAYS_POST_JOB = 3
+
+
 def _daily_checks(
     conn: Any,
     *,
     active_count: int,
     today: date,
     min_coverage: float,
+    expected_eod: date,
+    calendar_strict: bool = False,
 ) -> list[DoctorCheck]:
+    """Daily-cadence freshness checks.
+
+    ``expected_eod`` is the most recent session whose data should be present.
+    With ``calendar_strict`` (the watchdog job) the TA and market-internals
+    thresholds collapse to that session instead of the weekend-sized calendar
+    windows the post-job doctor uses, so a single missed session is caught the
+    next morning.
+    """
     checks: list[DoctorCheck] = []
+    eod_lag = max(0, (today - expected_eod).days)
+    ta_max_days = eod_lag if calendar_strict else 4
 
     if _table_exists(conn, "technical_indicators"):
         latest_ta, ta_tickers = _fetchone(
@@ -597,11 +642,11 @@ def _daily_checks(
         checks.append(
             _check(
                 "technical_indicators.latest_date",
-                _within_days(latest_ta, today, 4),
+                _within_days(latest_ta, today, ta_max_days),
                 f"latest technical_indicators date is {latest_ta}",
                 severity="fail",
                 observed=latest_ta,
-                expected=f"within 4 days of {today}",
+                expected=f"within {ta_max_days} days of {today}",
             )
         )
         checks.append(
@@ -631,17 +676,27 @@ def _daily_checks(
         )
         # A fresh value in one column must not mask a failed/stale independent
         # provider series in another column.
+        # FRED publishes the HY spread one business day late, so it is
+        # legitimately one session behind VIX/VIX3M on a healthy run.
+        internals_floor = {
+            "vix": expected_eod,
+            "vix3m": expected_eod,
+            "hy_spread": previous_trading_day(expected_eod),
+        }
         for field, latest_value in zip(
             ("vix", "vix3m", "hy_spread"), latest_values, strict=True
         ):
+            max_days = (
+                max(0, (today - internals_floor[field]).days) if calendar_strict else 5
+            )
             checks.append(
                 _check(
                     f"market_internals.{field}.latest_date",
-                    _within_days(latest_value, today, 5),
+                    _within_days(latest_value, today, max_days),
                     f"latest market_internals.{field} date is {latest_value}",
                     severity="fail",
                     observed=latest_value,
-                    expected=f"within 5 days of {today}",
+                    expected=f"within {max_days} days of {today}",
                 )
             )
 
@@ -650,14 +705,17 @@ def _daily_checks(
             conn,
             "SELECT MAX(published_utc), COUNT(*) FROM news_articles",
         )
+        news_lag = _NEWS_MAX_LAG_DAYS_STRICT if calendar_strict else _NEWS_MAX_LAG_DAYS_POST_JOB
+        news_floor = expected_eod - timedelta(days=news_lag)
+        news_date = _market_date_of(latest_news)
         checks.append(
             _check(
                 "news_articles.recent",
-                _within_days(latest_news, today, 14),
+                news_date is not None and news_floor <= news_date <= today,
                 f"latest news article is {latest_news}; total rows={news_rows or 0}",
-                severity="warn",
+                severity="fail" if calendar_strict else "warn",
                 observed=latest_news,
-                expected=f"within 14 days of {today}",
+                expected=f"published on or after {news_floor} (latest session {expected_eod})",
             )
         )
 
@@ -783,6 +841,204 @@ def _weekly_checks(
     return checks
 
 
+# ── Scheduler liveness (watchdog job) ────────────────────────────────────────
+#
+# Every check above reads the database, so all of them are downstream of the
+# scheduler that fills it. These read the scheduler's own state directory and
+# fail when the scheduler itself has stopped ticking, stopped marking jobs
+# done, or left the intraday streamer running outside the session — the
+# conditions that produced the silent 2026-09-04..09-15 outage.
+
+_SCHEDULER_STATE_DIR_ENV = "SAWA_SCHEDULER_STATE_DIR"
+_SCHEDULER_LOG_LINE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ET\] (.*)$")
+_SCHEDULER_LOG_TAIL_BYTES = 4 * 1024 * 1024
+# The cron cadence is 15 minutes; a running daily/weekly holds the lock for up
+# to ~2.5 h and logs no tick, so the age limit only applies when no job is live.
+_SCHEDULER_TICK_MAX_AGE = timedelta(minutes=45)
+_SCHEDULER_JOBS = ("daily", "weekly", "coldstart", "quarterly")
+_INTRADAY_SESSION_START = dt_time(9, 0)
+_INTRADAY_SESSION_END = dt_time(16, 30)
+
+
+def _scheduler_state_dir() -> Path:
+    configured = os.environ.get(_SCHEDULER_STATE_DIR_ENV)
+    return Path(configured) if configured else Path.home() / ".sawa" / "scheduler"
+
+
+def _tail_text(path: Path, max_bytes: int = _SCHEDULER_LOG_TAIL_BYTES) -> str:
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def _sawa_subcommand(pid_dir: Path) -> str | None:
+    """Subcommand of a ``sawa`` CLI process, read from /proc/<pid>/cmdline."""
+    try:
+        argv = (pid_dir / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    for previous, argument in zip(argv, argv[1:]):
+        if previous.rsplit(b"/", 1)[-1] == b"sawa":
+            return argument.decode("utf-8", errors="replace")
+    return None
+
+
+def _running_scheduler_job(proc: Path = Path("/proc")) -> str | None:
+    """Name of a scheduler-driven sawa job currently running, if any."""
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        subcommand = _sawa_subcommand(entry)
+        if subcommand in _SCHEDULER_JOBS:
+            return subcommand
+    return None
+
+
+def _intraday_process_alive(pid: int, proc: Path = Path("/proc")) -> bool:
+    return _sawa_subcommand(proc / str(pid)) == "intraday"
+
+
+def _scheduler_state_checks(
+    *,
+    now_et: datetime,
+    expected_eod: date,
+    state_dir: Path | None = None,
+    proc: Path = Path("/proc"),
+) -> list[DoctorCheck]:
+    state_dir = state_dir or _scheduler_state_dir()
+    checks: list[DoctorCheck] = []
+    if not state_dir.is_dir():
+        return [
+            _check(
+                "scheduler.state_dir",
+                False,
+                f"scheduler state directory {state_dir} does not exist",
+                severity="fail",
+                observed=str(state_dir),
+                expected="the directory market_scheduler.sh writes to",
+            )
+        ]
+
+    # 1. The scheduler is still ticking (setup_env succeeded recently).
+    log_path = state_dir / "scheduler.log"
+    last_tick: datetime | None = None
+    last_error: tuple[datetime, str] | None = None
+    if log_path.is_file():
+        for line in _tail_text(log_path).splitlines():
+            match = _SCHEDULER_LOG_LINE.match(line)
+            if not match:
+                continue
+            stamp = ET.localize(datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S"))
+            message = match.group(2)
+            if message.startswith("Scheduler tick"):
+                last_tick, last_error = stamp, None
+            elif message.startswith("ERROR:"):
+                last_error = (stamp, message)
+    running_job = _running_scheduler_job(proc)
+    if last_tick is None:
+        tick_ok, tick_message = False, f"no 'Scheduler tick' line in {log_path}"
+    else:
+        age = now_et - last_tick
+        age_minutes = int(age.total_seconds() // 60)
+        tick_ok = age <= _SCHEDULER_TICK_MAX_AGE or running_job is not None
+        tick_message = f"last scheduler tick {last_tick:%Y-%m-%d %H:%M ET} ({age_minutes} min ago)"
+        if running_job:
+            tick_message += f"; sawa {running_job} is running"
+    if last_error is not None:
+        tick_message += (
+            f"; newest error after that tick: {last_error[1]!r} at "
+            f"{last_error[0]:%Y-%m-%d %H:%M ET} (see ~/.sawa/scheduler/cron.log)"
+        )
+    checks.append(
+        _check(
+            "scheduler.tick_freshness",
+            tick_ok,
+            tick_message,
+            severity="fail",
+            observed=last_tick,
+            expected=f"a tick within {int(_SCHEDULER_TICK_MAX_AGE.total_seconds() // 60)} min",
+        )
+    )
+
+    # 2. The daily job completed (doctor passed) for the latest expected session.
+    daily_flag = state_dir / f"daily_done_{expected_eod:%Y-%m-%d}"
+    checks.append(
+        _check(
+            "scheduler.daily_done",
+            daily_flag.is_file(),
+            (
+                f"{daily_flag.name} present"
+                if daily_flag.is_file()
+                else f"{daily_flag.name} missing: no completed daily for session {expected_eod}"
+            ),
+            severity="fail",
+            observed=daily_flag.is_file(),
+            expected=f"{daily_flag.name} in {state_dir}",
+        )
+    )
+
+    # 3. The weekly job completed for the current ISO week (it runs on the
+    #    first closed-market evening of the week, i.e. Monday); on Monday the
+    #    previous week's flag is the one that must exist.
+    reference_day = now_et.date()
+    if reference_day.isoweekday() == 1:
+        reference_day -= timedelta(days=7)
+    iso_year, iso_week, _ = reference_day.isocalendar()
+    weekly_flag = state_dir / f"weekly_done_{iso_year}-W{iso_week:02d}"
+    checks.append(
+        _check(
+            "scheduler.weekly_done",
+            weekly_flag.is_file(),
+            (
+                f"{weekly_flag.name} present"
+                if weekly_flag.is_file()
+                else f"{weekly_flag.name} missing: no completed weekly for ISO week {iso_week}"
+            ),
+            severity="fail",
+            observed=weekly_flag.is_file(),
+            expected=f"{weekly_flag.name} in {state_dir}",
+        )
+    )
+
+    # 4. No intraday streamer left running outside the regular session.
+    pid_file = state_dir / "intraday.pid"
+    pid: int | None = None
+    if pid_file.is_file():
+        first_field = pid_file.read_text().split()[:1]
+        if first_field and first_field[0].isdigit():
+            pid = int(first_field[0])
+    alive = pid is not None and _intraday_process_alive(pid, proc)
+    in_session_window = (
+        is_trading_day(now_et.date())
+        and _INTRADAY_SESSION_START <= now_et.time() <= _INTRADAY_SESSION_END
+    )
+    started = ""
+    start_file = state_dir / "intraday_start_time"
+    if alive and start_file.is_file():
+        started = f", started {start_file.read_text().strip()}"
+    checks.append(
+        _check(
+            "scheduler.intraday_orphan",
+            not alive or in_session_window,
+            (
+                f"intraday PID {pid} is running outside the session window{started}"
+                if alive and not in_session_window
+                else (f"intraday PID {pid} running during the session" if alive else "no live intraday process")
+            ),
+            severity="fail",
+            observed=pid if alive else None,
+            expected="no intraday process outside 09:00-16:30 ET on trading days",
+        )
+    )
+    return checks
+
+
 def _quarterly_checks(conn: Any, *, today: date) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     date_columns = {
@@ -825,9 +1081,36 @@ def run_doctor_on_connection(
     today: date | None = None,
     min_coverage: float = 0.85,
     max_staleness_days: int = 5,
+    now: datetime | None = None,
+    scheduler_state_dir: Path | None = None,
+    proc: Path = Path("/proc"),
 ) -> list[DoctorCheck]:
-    """Run doctor checks against an existing database connection."""
-    today = today or get_market_date()
+    """Run doctor checks against an existing database connection.
+
+    ``now`` fixes the wall clock (tests, replays). When only ``today`` is
+    given the clock is pinned to the end of that market day, so a trading day
+    is expected to be fully loaded — the situation after a post-job doctor.
+    ``scheduler_state_dir`` and ``proc`` are only read by the watchdog job
+    (defaults: ~/.sawa/scheduler or $SAWA_SCHEDULER_STATE_DIR, and /proc).
+    """
+    if now is not None:
+        now_et = now.astimezone(ET)
+    elif today is not None:
+        now_et = ET.localize(datetime.combine(today, dt_time(23, 59)))
+    else:
+        now_et = datetime.now(ET)
+    today = today or now_et.date()
+    # Post-job doctors run right after the 17:00 ET daily, so from 17:00 the
+    # current session is expected. The watchdog runs on its own clock (mornings)
+    # and must not expect today's session before the daily has had time to
+    # finish, so it waits until 20:00 ET.
+    settled_hour = 20 if job == "watchdog" else 17
+    expected_eod = expected_latest_eod_date(now_et, settled_hour=settled_hour)
+    if job == "watchdog":
+        # Stock prices must reach the latest expected session exactly; the
+        # --max-staleness-days flag is deliberately ignored for this job.
+        max_staleness_days = max(0, (today - expected_eod).days)
+
     checks = _required_tables_checks(conn, job)
 
     blocking_schema_failures = [c for c in checks if c.status == "FAIL"]
@@ -847,13 +1130,25 @@ def run_doctor_on_connection(
         )
     )
 
-    if job in {"all", "daily", "coldstart"}:
+    if job in {"all", "daily", "coldstart", "watchdog"}:
         checks.extend(
             _daily_checks(
                 conn,
                 active_count=active_count,
                 today=today,
                 min_coverage=min_coverage,
+                expected_eod=expected_eod,
+                calendar_strict=job == "watchdog",
+            )
+        )
+
+    if job == "watchdog":
+        checks.extend(
+            _scheduler_state_checks(
+                now_et=now_et,
+                expected_eod=expected_eod,
+                state_dir=scheduler_state_dir,
+                proc=proc,
             )
         )
 
@@ -924,6 +1219,11 @@ def run_doctor(
     logger.info(format_checks(checks))
     summary = summarize_checks(checks)
     summary["job"] = job
+    # Dict values render as "name=message" pairs in the failure notification,
+    # so the push says *which* checks failed instead of only how many.
+    failures = {c.name: c.message for c in checks if c.status == "FAIL"}
+    if failures:
+        summary["failures"] = failures
     summary["results"] = [
         {
             "name": c.name,

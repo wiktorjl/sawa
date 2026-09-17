@@ -311,7 +311,15 @@ unreachable.
 | `FRED_API_KEY` | yes | `market_internals` step in daily/weekly/coldstart |
 | `DATABASE_URL` | yes | Everything |
 | `NTFY_TOPIC` | no | Pipeline + scheduler push notifications |
-| `MCP_LOG_LEVEL` / `MCP_MAX_ROWS` / `MCP_QUERY_TIMEOUT` / `MCP_MAX_RESULT_BYTES` | no | MCP server runtime |
+| `SAWA_HEARTBEAT_URL` / `SAWA_WEEKLY_HEARTBEAT_URL` / `SAWA_TICK_HEARTBEAT_URL` | no | Scheduler dead-man's-switch pings (daily / weekly / per tick) |
+| `SAWA_WATCHDOG_HEARTBEAT_URL` | no | `sawa doctor --job watchdog` dead-man's-switch ping |
+| `MCP_LOG_LEVEL` / `MCP_MAX_ROWS` / `MCP_QUERY_TIMEOUT` / `MCP_MAX_RESULT_BYTES` | no | MCP server runtime (pass via the MCP client `env`, see §5) |
+
+> `scripts/market_scheduler.sh` exports only the keys in its `setup_env`
+> allowlist to scheduled jobs. Any other key in `.env` is ignored with a WARN
+> line per tick and one warning push; process-control names (`PATH`,
+> `PYTHONPATH`, `LD_PRELOAD`, ...) abort the tick with an error push. Add new
+> keys to the allowlist and to `.env.example` (a test cross-checks the two).
 
 ## 8. Common maintenance tasks
 

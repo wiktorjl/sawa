@@ -23,6 +23,21 @@ LOG_FILE="$STATE_DIR/scheduler.log"
 # .env in setup_env to make it available to the child process.
 DAILY_WAIT_HOURS=1  # hours after close before running daily
 INTRADAY_STOP_TIMEOUT=60  # seconds to wait for graceful shutdown
+# A daily/weekly that fails (job or doctor) is retried on every closed-market
+# evening tick; without a cap an unfixable doctor FAIL re-ran the 75-minute
+# daily back-to-back until midnight (2026-08-31: 7 attempts). Per-date cap.
+MAX_JOB_ATTEMPTS=3
+
+# Fail-loud bookkeeping (see "Fail loud" section). STATE_DIR_OK is set once
+# initialize_scheduler has verified the state directory, so nothing writes
+# through a refused symlink; SCHEDULER_STAGE names the phase a non-zero exit
+# happened in; SCHEDULER_ALERTED records that a failure alert (or a deliberate
+# "the job reported itself" skip) already went out this tick.
+STATE_DIR_OK=false
+SCHEDULER_STAGE="startup"
+SCHEDULER_ALERTED=false
+SCHEDULER_LAST_ERROR=""
+SCHEDULER_IGNORED_ENV_KEYS=""
 
 # ── Lock (prevent overlapping runs) ──────────────────────────────────────────
 
@@ -31,10 +46,21 @@ LOCK_FILE="$STATE_DIR/scheduler.lock"
 acquire_lock() {
     exec 9>"$LOCK_FILE"
     chmod 600 "$LOCK_FILE"
-    if ! flock -n 9; then
-        echo "[$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S ET')] Another scheduler is already running, skipping" >&2
-        exit 0
-    fi
+    # `flock -n` exits 1 on contention; anything else (127 not installed,
+    # EBADF/ENOLCK) is an error that must not masquerade as "already running".
+    local rc=0
+    flock -n 9 || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            log "Another scheduler is already running, skipping"
+            exit 0
+            ;;
+        *)
+            log "ERROR: flock failed (rc=$rc) on $LOCK_FILE"
+            return 1
+            ;;
+    esac
     # Write PID for debugging
     echo $$ >&9
 }
@@ -52,6 +78,14 @@ initialize_scheduler() {
     fi
     touch "$LOG_FILE"
     chmod 600 "$LOG_FILE"
+    # From here on log() may append to scheduler.log and marker files may be
+    # written: the directory is a real, private, symlink-free directory.
+    STATE_DIR_OK=true
+    # cron appends this script's stdout/stderr to cron.log (crontab entry at
+    # the top of this file); the shell creates it with the default umask, so
+    # keep it as private as scheduler.log. It is not rotated here on purpose:
+    # it is the only long-term record of early aborts (see "Fail loud").
+    [ -f "$STATE_DIR/cron.log" ] && chmod 600 "$STATE_DIR/cron.log"
     acquire_lock
 
     # Trim log to last 5000 lines periodically.
@@ -66,7 +100,14 @@ log() {
     local ts
     ts=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S ET')
     local msg="[$ts] $*"
-    echo "$msg" >> "$LOG_FILE"
+    case "$*" in
+        ERROR*) SCHEDULER_LAST_ERROR="$*" ;;
+    esac
+    # Before initialize_scheduler has verified the state directory the log
+    # path may be a planted symlink; stderr (cron.log) is the only safe sink.
+    if [ "$STATE_DIR_OK" = true ]; then
+        echo "$msg" >> "$LOG_FILE"
+    fi
     echo "$msg" >&2
 }
 
@@ -81,6 +122,9 @@ notify() {
     local body="$2"
     local level="${3:-info}"
     log "Sending notification ($level): $title"
+    if [ "$level" = error ]; then
+        SCHEDULER_ALERTED=true
+    fi
     if ! sawa notify \
             --title "$title" \
             --body "$body" \
@@ -101,6 +145,7 @@ notify_unreported_failure() {
     local exit_code="$1"
     local title="$2"
     local body="$3"
+    SCHEDULER_ALERTED=true
     if [ "$exit_code" -ge 126 ]; then
         notify "$title" "$body" error
     else
@@ -187,6 +232,166 @@ PY
     fi
 }
 
+# ── Fail loud ────────────────────────────────────────────────────────────────
+#
+# Everything that runs before the "Scheduler tick" line (state directory,
+# lock, .env parsing, venv/python availability) used to fail with one stderr
+# line and no push: under `set -e` main() exited before any notify() or
+# heartbeat call was reachable. Incident 2026-09-04..09-15: one unknown .env
+# key (UW_KEY) silenced intraday stop, daily, weekly and doctor for 11 days.
+#
+# main() installs scheduler_exit_handler as its EXIT trap. Any non-zero exit
+# that nothing has reported (SCHEDULER_ALERTED=false) produces one push per
+# ET day: through `sawa notify` when the venv is usable (it loads .env itself,
+# so it works even when setup_env did not get that far), else through a
+# direct ntfy POST that needs only bash, curl and the NTFY_TOPIC line of .env.
+# The topic is a capability and never enters argv.
+
+# Where once-per-day alert markers live. STATE_DIR when it has been verified,
+# else a private per-user directory under TMPDIR so a broken state directory
+# still produces one alert per day rather than one per tick.
+alert_marker_dir() {
+    if [ "$STATE_DIR_OK" = true ]; then
+        printf '%s\n' "$STATE_DIR"
+        return 0
+    fi
+    local dir="${TMPDIR:-/tmp}/sawa-scheduler-alerts-$(id -u)"
+    mkdir -p -m 700 "$dir" 2>/dev/null || return 1
+    [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+    printf '%s\n' "$dir"
+}
+
+# Append helper output to scheduler.log when it is safe to write there,
+# otherwise to stderr (cron.log). Used by the paths the EXIT trap reaches.
+run_logged() {
+    if [ "$STATE_DIR_OK" = true ]; then
+        "$@" >> "$LOG_FILE" 2>&1
+    else
+        "$@" >&2
+    fi
+}
+
+notify_via_sawa() {
+    local title="$1" body="$2" sawa_bin=""
+    if command -v sawa >/dev/null 2>&1; then
+        sawa_bin=sawa
+    elif [ -x "$PROJECT_DIR/.venv/bin/sawa" ]; then
+        sawa_bin="$PROJECT_DIR/.venv/bin/sawa"
+    else
+        return 1
+    fi
+    # `sawa notify` loads .env itself (python-dotenv) and exits 1 when no
+    # backend is configured or the send failed, so the caller can fall through.
+    run_logged "$sawa_bin" notify \
+        --title "$title" \
+        --body "$body" \
+        --level error \
+        --tag rotating_light \
+        --tag scheduler
+}
+
+notify_last_resort() {
+    local title="$1" body="$2" env_file="$PROJECT_DIR/.env" topic url
+    [ -f "$env_file" ] && [ ! -L "$env_file" ] || return 1
+    command -v curl >/dev/null 2>&1 || return 1
+    # Read ONLY the NTFY_TOPIC line, as data (no source, no eval). Accept the
+    # same spellings NtfyNotifier does: bare topic, host/topic, or https URL.
+    topic=$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}NTFY_TOPIC[[:space:]]*=[[:space:]]*//p' "$env_file" \
+        | head -n 1 \
+        | sed -e 's/[[:space:]]\{1,\}#.*$//' -e 's/[[:space:]]*$//' \
+              -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+    [ -n "$topic" ] || return 1
+    case "$topic" in
+        https://*) url="$topic" ;;
+        http://*)  return 1 ;;
+        */*)       url="https://$topic" ;;
+        *)         url="https://ntfy.sh/$topic" ;;
+    esac
+    # Title/body are our own text; strip the two characters curl's config
+    # syntax treats specially and fold to one line.
+    title=$(printf '%s' "$title" | tr -d '"\\' | tr '\n' ' ')
+    body=$(printf '%s' "$body" | tr -d '"\\' | tr '\n' ' ')
+    # Feed the capability URL to curl through a config on stdin (-K -), so it
+    # never appears in argv / `ps`.
+    printf 'url = "%s"\nheader = "Title: %s"\nheader = "Priority: 5"\nheader = "Tags: rotating_light,scheduler"\ndata = "%s"\n' \
+        "$url" "$title" "$body" \
+        | curl -fsS -m 15 -o /dev/null -K -
+}
+
+scheduler_exit_handler() {
+    local status="$1"
+    set +e
+    trap - EXIT
+    [ "$status" -eq 0 ] && return 0
+    if [ "$SCHEDULER_ALERTED" = true ]; then
+        log "Tick ended with exit $status (stage: $SCHEDULER_STAGE); failure was already reported"
+        return 0
+    fi
+    # Only the first line of the last ERROR, bounded, goes into the push.
+    local last_error="${SCHEDULER_LAST_ERROR%%$'\n'*}"
+    last_error="${last_error:0:240}"
+    log "ERROR: scheduler exited with status $status during stage '$SCHEDULER_STAGE' before any alert was sent"
+
+    local marker_dir marker today
+    today=$(TZ=America/New_York date '+%Y-%m-%d')
+    marker_dir=$(alert_marker_dir) || marker_dir=""
+    marker="${marker_dir:+$marker_dir/}pretick_failure_notified_$today"
+    if [ -n "$marker_dir" ] && [ -e "$marker" ]; then
+        log "A scheduler-failure alert was already sent today; suppressing this one"
+        return 0
+    fi
+
+    local title="Sawa Scheduler FAILED" body
+    body="market_scheduler.sh on $(hostname) exited $status during '$SCHEDULER_STAGE' before running any job."
+    if [ -n "$last_error" ]; then
+        body="$body Last error: $last_error."
+    fi
+    body="$body Every 15-min tick will keep failing until this is fixed (no intraday stop, daily, weekly or doctor). Further alerts suppressed until tomorrow. See ~/.sawa/scheduler/cron.log"
+
+    if notify_via_sawa "$title" "$body"; then
+        log "Failure notification sent via sawa notify"
+    elif notify_last_resort "$title" "$body"; then
+        log "Failure notification sent via direct ntfy POST"
+    else
+        log "ERROR: could not deliver the failure notification by any path"
+        return 0
+    fi
+    # Only a delivered alert is rate-limited; a failed delivery is retried
+    # on the next tick.
+    if [ -n "$marker_dir" ]; then
+        touch "$marker" 2>/dev/null || true
+        find "$marker_dir" -maxdepth 1 -name 'pretick_failure_notified_*' -mtime +7 -delete 2>/dev/null || true
+    fi
+}
+
+# Push ONE warning per .env key that setup_env ignored (marker file per key),
+# dropping markers for keys that disappeared so re-adding a key re-alerts.
+# Called from main(), never from setup_env, so a test or an interactive
+# `source market_scheduler.sh; setup_env` can never reach the real
+# `sawa notify` (which loads the repository .env and pushes to the operator).
+notify_ignored_env_keys_once() {
+    local key marker new_keys="" current=" $SCHEDULER_IGNORED_ENV_KEYS "
+    # Key names passed setup_env's identifier check, so word splitting is safe.
+    for key in $SCHEDULER_IGNORED_ENV_KEYS; do
+        marker="$STATE_DIR/env_ignored_$key"
+        [ -e "$marker" ] && continue
+        touch "$marker"
+        new_keys="$new_keys $key"
+    done
+    for marker in "$STATE_DIR"/env_ignored_*; do
+        [ -e "$marker" ] || continue
+        key=${marker##*/env_ignored_}
+        case "$current" in
+            *" $key "*) ;;
+            *) rm -f "$marker" ;;
+        esac
+    done
+    [ -z "$new_keys" ] && return 0
+    notify "Sawa Scheduler: ignoring .env key(s)" \
+        "Not in the scheduler allowlist, so never exported to jobs:$new_keys. Remove from .env or add to the allowlist in scripts/market_scheduler.sh (setup_env)." \
+        warning
+}
+
 # ── Environment setup ────────────────────────────────────────────────────────
 
 setup_env() {
@@ -205,8 +410,14 @@ setup_env() {
             log "ERROR: refusing symlinked .env"
             return 1
         fi
-        local dotenv_exports
-        if ! dotenv_exports=$(python - "$PROJECT_DIR/.env" <<'PY'
+        # The allowlist is a FILTER: keys outside it are never exported into
+        # this shell or any child, but they no longer abort the tick — a
+        # benign extra key in .env is configuration, not an attack. A short
+        # denylist of process-control names still aborts (loudly, via the EXIT
+        # trap) because their presence means someone is trying to inject code.
+        local dotenv_exports parse_err reason
+        parse_err=$(mktemp 2>/dev/null || echo /dev/null)
+        if ! dotenv_exports=$(python - "$PROJECT_DIR/.env" 2>"$parse_err" <<'PY'
 import os
 import re
 import shlex
@@ -215,6 +426,22 @@ import sys
 from dotenv import dotenv_values
 
 path = sys.argv[1]
+# Names that let a writable .env inject code into this shell or its children.
+denied = {
+    "BASH_ENV",
+    "ENV",
+    "HOME",
+    "IFS",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PATH",
+    "PROMPT_COMMAND",
+    "PS4",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "SHELLOPTS",
+}
 allowed = {
     "CACHE_ENABLED",
     "CACHE_TTL_SECONDS",
@@ -238,6 +465,8 @@ allowed = {
     "POLYGON_S3_SECRET_KEY",
     "SAWA_HEARTBEAT_URL",
     "SAWA_NOTIFIER",
+    "SAWA_TICK_HEARTBEAT_URL",
+    "SAWA_WATCHDOG_HEARTBEAT_URL",
     "SAWA_WEEKLY_HEARTBEAT_URL",
 }
 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -245,20 +474,39 @@ fd = os.open(path, flags)
 os.fchmod(fd, 0o600)
 with os.fdopen(fd, encoding="utf-8") as stream:
     values = dotenv_values(stream=stream)
+ignored = []
 for key, value in values.items():
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
         raise SystemExit(f"invalid environment variable name: {key!r}")
+    if key in denied:
+        raise SystemExit(f"process-control variable is not allowed in scheduler .env: {key}")
     if key not in allowed:
-        raise SystemExit(f"environment variable is not allowed in scheduler .env: {key}")
+        # Never exported, never aborts; reported by name (never value).
+        ignored.append(key)
+        continue
     if value is not None:
         print(f"export {key}={shlex.quote(value)}")
+# Names passed the identifier check above, so this line is safe to eval.
+print(f"SCHEDULER_IGNORED_ENV_KEYS={shlex.quote(' '.join(sorted(ignored)))}")
 PY
         ); then
-            log "ERROR: could not safely parse .env"
+            # The parser's stderr carries key names, line numbers and the
+            # exception text (never values); its last line is the reason.
+            # bash prefixes its own errors ("python: command not found") with
+            # this script's absolute path; drop it, the path is not the news.
+            reason=$(tail -n 1 "$parse_err" 2>/dev/null | sed 's|^[^ ]*market_scheduler\.sh: ||' | head -c 300)
+            rm -f "$parse_err"
+            log "ERROR: could not safely parse .env${reason:+: $reason}"
             return 1
         fi
+        rm -f "$parse_err"
+        SCHEDULER_IGNORED_ENV_KEYS=""
         eval "$dotenv_exports"
         unset dotenv_exports
+        local key
+        for key in $SCHEDULER_IGNORED_ENV_KEYS; do
+            log "WARN: ignoring .env key that is not in the scheduler allowlist: $key"
+        done
     fi
 
     # The scheduler emits its own success summaries (richer than Python's
@@ -329,6 +577,13 @@ PY
             return
         elif [ "$nyse_status" = "closed" ]; then
             log "Polygon API says NYSE: closed"
+            echo "closed"
+            return
+        elif [ "$nyse_status" = "extended-hours" ] || [ "$nyse_status" = "early-hours" ]; then
+            # Documented Polygon states for 04:00-09:30 and 16:00-20:00 ET.
+            # Treating them as an API failure logged "unreachable" twice a tick
+            # for four hours a day and hid genuine outages in the noise.
+            log "Polygon API says NYSE: $nyse_status (treated as closed)"
             echo "closed"
             return
         fi
@@ -502,6 +757,37 @@ stop_intraday() {
     notify "Sawa Intraday Stopped" "Intraday stopped at $stop_time (ran $start_time — $stop_time)"
 }
 
+# ── Retry cap ────────────────────────────────────────────────────────────────
+#
+# main() re-enters run_daily/run_weekly on every closed-evening tick while the
+# done flag is missing. Count attempts per job and period so an unfixable
+# failure (a doctor FAIL the job cannot repair, a provider outage) stops after
+# MAX_JOB_ATTEMPTS instead of hammering the provider until midnight.
+
+# Usage: job_attempts_exhausted <job> <period>. Returns 0 (true) when the cap
+# has been reached, after alerting once; otherwise records this attempt.
+job_attempts_exhausted() {
+    local job="$1" period="$2" attempts=0
+    local file="$STATE_DIR/${job}_attempts_$period"
+    if [ -f "$file" ]; then
+        IFS= read -r attempts < "$file" || attempts=0
+        [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=0
+    fi
+    if [ "$attempts" -ge "$MAX_JOB_ATTEMPTS" ]; then
+        log "${job^}: giving up for $period after $attempts failed attempt(s)"
+        return 0
+    fi
+    attempts=$((attempts + 1))
+    printf '%s\n' "$attempts" > "$file"
+    if [ "$attempts" -eq "$MAX_JOB_ATTEMPTS" ]; then
+        # Final allowed attempt: say so once, before it runs.
+        notify "Sawa ${job^}: last retry" \
+            "sawa $job for $period has failed $((attempts - 1)) time(s); this is attempt $attempts of $MAX_JOB_ATTEMPTS. If it fails again the scheduler stops retrying for $period (touch ~/.sawa/scheduler/${job}_done_$period to skip, or delete ${job}_attempts_$period to re-arm)." \
+            warning
+    fi
+    return 1
+}
+
 # ── Weekly job ───────────────────────────────────────────────────────────────
 
 is_weekly_done_this_week() {
@@ -514,6 +800,10 @@ is_weekly_done_this_week() {
 run_weekly() {
     local week
     week=$(TZ=America/New_York date '+%G-W%V')
+
+    if job_attempts_exhausted weekly "$week"; then
+        return 0
+    fi
 
     log "Starting sawa weekly..."
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/weekly_start_time"
@@ -548,6 +838,7 @@ run_weekly() {
 
     # Clean up old flag files (keep last 8 weeks)
     find "$STATE_DIR" -name "weekly_done_*" -mtime +60 -delete 2>/dev/null || true
+    find "$STATE_DIR" -name "weekly_attempts_*" -mtime +60 -delete 2>/dev/null || true
 }
 
 # ── Daily job ────────────────────────────────────────────────────────────────
@@ -562,6 +853,10 @@ run_daily() {
     local today
     today=$(TZ=America/New_York date '+%Y-%m-%d')
 
+    if job_attempts_exhausted daily "$today"; then
+        return 0
+    fi
+
     log "Starting sawa daily..."
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/daily_start_time"
 
@@ -569,11 +864,13 @@ run_daily() {
     # Consume the complete command stream while retaining only the first
     # inserted-price count, so a verbose run cannot grow shell memory without
     # bound. pipefail preserves sawa's exit status through awk.
+    # sawa/daily.py logs the committed price count as "Inserted N records"
+    # (progress lines read "Inserted N/M ..." and never match).
     inserted=$(sawa daily --log-dir "$PROJECT_DIR/logs" 2>&1 | awk '
-        !found && match($0, /Inserted [0-9,]+ price/) {
+        !found && match($0, /Inserted [0-9,]+ records/) {
             value = substr($0, RSTART, RLENGTH)
             sub(/^Inserted /, "", value)
-            sub(/ price$/, "", value)
+            sub(/ records$/, "", value)
             found = 1
         }
         END { if (found) print value }
@@ -607,6 +904,7 @@ run_daily() {
 
     # Clean up old flag files (keep last 7 days)
     find "$STATE_DIR" -name "daily_done_*" -mtime +7 -delete 2>/dev/null || true
+    find "$STATE_DIR" -name "daily_attempts_*" -mtime +7 -delete 2>/dev/null || true
 }
 
 build_daily_summary() {
@@ -665,9 +963,16 @@ Prices inserted: $inserted"
 # ── Main logic ───────────────────────────────────────────────────────────────
 
 main() {
+    # Command substitutions run in subshells that do not inherit this trap,
+    # so `$(check_market_status)` and friends cannot trigger it.
+    trap 'scheduler_exit_handler $?' EXIT
+    SCHEDULER_STAGE="initialize_scheduler"
     initialize_scheduler
+    SCHEDULER_STAGE="setup_env"
     setup_env
+    notify_ignored_env_keys_once
 
+    SCHEDULER_STAGE="market_status"
     local status
     status=$(check_market_status)
     local et_time
@@ -675,6 +980,12 @@ main() {
     local action_taken=false
 
     log "Scheduler tick — market: $status, time: $et_time"
+    SCHEDULER_STAGE="tick"
+    # Optional per-tick dead-man's switch (SAWA_TICK_HEARTBEAT_URL, e.g. a
+    # healthchecks.io check with period 15 min / grace 60 min): the monitor
+    # alerts on the ABSENCE of ticks, covering the cases where even this
+    # script cannot run (cron stopped, host down, script unreadable).
+    heartbeat "${SAWA_TICK_HEARTBEAT_URL:-}"
 
     if [ "$status" = "open" ]; then
         # Market is open: ensure intraday is running

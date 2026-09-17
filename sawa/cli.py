@@ -932,6 +932,7 @@ def cmd_data_status(args) -> int:
 def cmd_doctor(args) -> int:
     """Run database doctor checks."""
     from sawa.doctor import run_doctor
+    from sawa.utils.heartbeat import ping_heartbeat
 
     logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="doctor")
     db_url = args.database_url or os.environ.get("DATABASE_URL")
@@ -940,6 +941,13 @@ def cmd_doctor(args) -> int:
         logger.error("DATABASE_URL required (env var or --database-url)")
         return 1
 
+    # The watchdog is the dead-man's switch for the scheduler; its own monitor
+    # (healthchecks.io-style) alerts when this ping stops arriving, and gets
+    # the /fail variant whenever any check fails or the run crashes.
+    heartbeat_url = (
+        os.environ.get("SAWA_WATCHDOG_HEARTBEAT_URL") if args.job == "watchdog" else None
+    )
+    success = False
     try:
         with monitored_run("doctor", logger=logger) as ctx:
             ctx["stats"] = run_doctor(
@@ -949,11 +957,14 @@ def cmd_doctor(args) -> int:
                 max_staleness_days=args.max_staleness_days,
                 logger=logger,
             )
-        return 0 if ctx["stats"].get("success") else 1
+        success = bool(ctx["stats"].get("success"))
+        return 0 if success else 1
     except Exception:
         if args.verbose:
             raise
         return 1
+    finally:
+        ping_heartbeat(heartbeat_url, failed=not success, logger=logger)
 
 
 def cmd_mcp_query_insights(args) -> int:
@@ -1029,6 +1040,7 @@ Examples:
   sawa index-show sp500
   sawa index-check AAPL
   sawa doctor --job daily
+  sawa doctor --job watchdog
   sawa mcp-query-insights
 
 Environment Variables:
@@ -1576,9 +1588,14 @@ Environment Variables:
     )
     doctor_parser.add_argument(
         "--job",
-        choices=["all", "daily", "weekly", "quarterly", "coldstart"],
+        choices=["all", "daily", "weekly", "quarterly", "coldstart", "watchdog"],
         default="all",
-        help="Job scope to validate (default: all)",
+        help=(
+            "Job scope to validate (default: all). 'watchdog' is the independent "
+            "freshness/liveness check run from its own cron entry: trading-calendar "
+            "aware data freshness plus scheduler tick, daily_done/weekly_done and "
+            "intraday-orphan checks."
+        ),
     )
     doctor_parser.add_argument("--database-url", help="PostgreSQL URL")
     doctor_parser.add_argument(
@@ -1591,7 +1608,11 @@ Environment Variables:
         "--max-staleness-days",
         type=int,
         default=5,
-        help="Maximum allowed age for latest stock_prices data (default: 5)",
+        help=(
+            "Maximum allowed age in calendar days for the latest stock_prices "
+            "date (default: 5). Ignored by --job watchdog, which expects the "
+            "latest NYSE session exactly."
+        ),
     )
     doctor_parser.add_argument("--log-dir", help="Directory for log files")
     doctor_parser.add_argument("-v", "--verbose", action="store_true")

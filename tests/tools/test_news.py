@@ -195,3 +195,100 @@ class TestGetRecentNewsSentiment:
         summary = result["sentiment_summary"]
         assert summary["total_articles"] == 0
         assert summary["sentiment_score"] == 0.0
+
+
+# ── Freshness reporting ──────────────────────────────────────────────────────
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+_SAME_AS_ANY = object()
+
+
+def _make_agg_with_freshness(
+    total: int, positive: int, negative: int, neutral: int, latest_any: datetime | None,
+    latest_for_ticker: object = _SAME_AS_ANY, latest_in_window: datetime | None = None,
+) -> list[dict]:
+    row = _make_agg(total, positive, negative, neutral)[0]
+    row["latest_any_ticker"] = latest_any
+    row["latest_for_ticker"] = (
+        latest_any if latest_for_ticker is _SAME_AS_ANY else latest_for_ticker
+    )
+    row["latest_in_window"] = latest_in_window
+    return [row]
+
+
+class TestNewsFreshness:
+    @patch("mcp_server.tools.news.execute_query")
+    def test_fresh_feed_has_no_warning_and_reports_watermarks(self, mock_execute):
+        latest = datetime.now(timezone.utc) - timedelta(hours=6)
+        mock_execute.side_effect = [
+            [_make_article("Fresh", "positive", latest.isoformat())],
+            _make_agg_with_freshness(1, 1, 0, 0, latest, latest_in_window=latest),
+        ]
+
+        result = get_recent_news_sentiment("AAPL")
+
+        assert result["warnings"] == []
+        freshness = result["freshness"]
+        assert freshness["latest_article_any_ticker_utc"] == latest.isoformat()
+        assert freshness["latest_article_utc"] == latest.isoformat()
+        assert 0.2 <= freshness["data_age_days"] <= 0.3
+        assert 13.5 <= freshness["effective_days_covered"] <= 14.0
+        assert result["articles_in_window"] == 1
+        assert result["articles_returned"] == 1
+
+    @patch("mcp_server.tools.news.execute_query")
+    def test_stale_feed_warns_and_reports_shrunken_window(self, mock_execute):
+        # Feed stopped 12 days ago; a 14-day window really covers ~2 days.
+        latest = datetime.now(timezone.utc) - timedelta(days=12)
+        mock_execute.side_effect = [
+            [_make_article("Old", "positive", latest.isoformat())] * 3,
+            _make_agg_with_freshness(20, 6, 1, 13, latest, latest_in_window=latest),
+        ]
+
+        result = get_recent_news_sentiment("AAPL", days_back=14, max_articles=3)
+
+        assert len(result["warnings"]) == 1
+        warning = result["warnings"][0]
+        assert "stale" in warning and "12.0 days ago" in warning
+        assert "sawa doctor --job watchdog" in warning
+        assert result["freshness"]["data_age_days"] == 12.0
+        assert 1.9 <= result["freshness"]["effective_days_covered"] <= 2.1
+        assert result["sentiment_summary"]["total_articles"] == 20
+        assert result["articles_returned"] == 3
+
+    @patch("mcp_server.tools.news.execute_query")
+    def test_quiet_ticker_on_a_fresh_feed_is_not_flagged_stale(self, mock_execute):
+        latest_any = datetime.now(timezone.utc) - timedelta(hours=3)
+        mock_execute.side_effect = [
+            [],
+            _make_agg_with_freshness(0, 0, 0, 0, latest_any, latest_for_ticker=None),
+        ]
+
+        result = get_recent_news_sentiment("ZZZQ", days_back=7)
+
+        assert result["warnings"] == []
+        assert result["freshness"]["latest_article_utc"] is None
+        assert result["freshness"]["effective_days_covered"] == 0.0
+
+    @patch("mcp_server.tools.news.execute_query")
+    def test_empty_news_table_warns(self, mock_execute):
+        mock_execute.side_effect = [[], _make_agg_with_freshness(0, 0, 0, 0, None)]
+
+        result = get_recent_news_sentiment("AAPL")
+
+        assert any("never loaded" in w for w in result["warnings"])
+        assert result["freshness"]["data_age_days"] is None
+
+    @patch("mcp_server.tools.news.execute_query")
+    def test_datetime_rows_are_rendered_as_iso8601(self, mock_execute):
+        latest = datetime(2026, 9, 3, 19, 6, tzinfo=timezone.utc)
+        article = _make_article("Row", "neutral")
+        article["published_utc"] = latest
+        mock_execute.side_effect = [[article], _make_agg_with_freshness(1, 0, 0, 1, latest)]
+
+        result = get_recent_news_sentiment("AAPL")
+
+        assert result["articles"][0]["published_utc"] == "2026-09-03T19:06:00+00:00"
+        assert result["freshness"]["latest_article_any_ticker_utc"] == "2026-09-03T19:06:00+00:00"

@@ -19,7 +19,18 @@ POLYGON_S3_SECRET_KEY=...
 FRED_API_KEY=...                 # FRED — market internals (VIX, VIX3M, HY spread)
 DATABASE_URL=postgresql://user:pass@host:5432/dbname
 NTFY_TOPIC=https://ntfy.sh/...   # optional; pipeline + scheduler push notifications
+SAWA_HEARTBEAT_URL=https://...   # optional; dead-man's switches, see Monitoring
+SAWA_WEEKLY_HEARTBEAT_URL=https://...
+SAWA_TICK_HEARTBEAT_URL=https://...
+SAWA_WATCHDOG_HEARTBEAT_URL=https://...
 ```
+
+`scripts/market_scheduler.sh` exports only an allowlisted set of keys from
+`.env` to the jobs it runs (`setup_env`). An unknown key is ignored — logged on
+every tick and pushed as one warning — and a process-control name (`PATH`,
+`PYTHONPATH`, `LD_PRELOAD`, ...) aborts the tick with an error push. Add new
+keys to that allowlist (and to `.env.example`, which a test cross-checks)
+before relying on them from a scheduled job.
 
 Missing API keys behave differently by key:
 
@@ -150,7 +161,8 @@ Pulls balance sheets, income statements, cash flows, and financial ratios.
 ### Recommended: `scripts/market_scheduler.sh`
 
 A single cron entry handles intraday streaming during market hours, runs
-`daily` ~1h after close, and `weekly` on Saturdays:
+`daily` ~1h after close, and `weekly` on the first closed-market evening of
+each ISO week (normally Monday):
 
 ```cron
 */15 * * * 1-5 /path/to/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
@@ -159,7 +171,14 @@ A single cron entry handles intraday streaming during market hours, runs
 State lives under `~/.sawa/scheduler/`. Sends ntfy notifications if
 `NTFY_TOPIC` is set. The scheduler runs `sawa doctor --job daily` and
 `sawa doctor --job weekly` after successful jobs; if doctor exits non-zero,
-the job is not marked done and an error notification is sent.
+the job is not marked done and an error notification is sent. A failed daily
+or weekly is retried on the next closed-evening tick at most
+`MAX_JOB_ATTEMPTS` (3) times per date/week (`daily_attempts_<date>`,
+`weekly_attempts_<week>` counters in the state directory); touch the
+`*_done_*` flag to skip, or delete the counter to re-arm. A tick that dies
+before it can run anything (bad `.env`, missing venv, unwritable state
+directory) pushes one `Sawa Scheduler FAILED` alert per day from its EXIT
+trap — via `sawa notify` when the venv works, else via a direct ntfy POST.
 
 ### Alternative: discrete cron entries
 
@@ -357,15 +376,54 @@ data/
 
 ## Monitoring
 
-Production deployments should consider:
+Three layers, from cheapest to most independent. Only the first exists by
+default; the other two need an operator to arm them.
 
-1. **Job monitoring**: configure `NTFY_TOPIC`; `market_scheduler.sh` already
-   sends start/stop/failure notifications.
-2. **Healthchecks**: pair the cron call with a heartbeat ping:
+1. **In-job pushes** (armed when `NTFY_TOPIC` is set): `market_scheduler.sh`
+   sends intraday start/stop, daily/weekly summaries and failure alerts;
+   `monitored_run` inside every `sawa` job pushes `Sawa: <job> FAILED`; the
+   scheduler's EXIT trap pushes `Sawa Scheduler FAILED` (once per day) when a
+   tick aborts before running any job. These only fire from a process that
+   actually ran: cron stopped, host down, or the script unreadable produces
+   nothing here.
+
+2. **Watchdog** (independent cron line, shares no failure domain with the
+   scheduler's `setup_env`):
    ```cron
-   0 18 * * 1-5 /path/to/scripts/daily.sh && curl -fsS https://hc-ping.com/UUID
+   30 12 * * * cd /home/seed/code/sawa && SAWA_NOTIFY_SUCCESS=0 .venv/bin/sawa doctor --job watchdog --log-dir logs >> "$HOME/.sawa/scheduler/watchdog.log" 2>&1
    ```
-3. **Data freshness**: `sawa data-status` reports latest date per price table.
-   Schedule as a sanity check.
+   `sawa doctor --job watchdog` (08:30 EDT / 07:30 EST on a UTC host) checks,
+   against the NYSE trading calendar, that `stock_prices`,
+   `technical_indicators`, `market_internals` and `news_articles` reach the
+   latest expected session, and reads `~/.sawa/scheduler/` directly: newest
+   `Scheduler tick` line < 45 min old (unless a job is running),
+   `daily_done_<session>` and `weekly_done_<ISO week>` present, and no
+   `sawa intraday` process alive outside 09:00-16:30 ET. Any FAIL pushes
+   `Sawa: doctor FAILED` naming the failing checks through `sawa`'s own
+   notifier (`sawa` loads `.env` itself and is not subject to the scheduler's
+   allowlist). Run it by hand any time: `sawa doctor --job watchdog`. Install
+   the cron line only after the code that knows `--job watchdog` is deployed.
+
+3. **Dead-man's switches** (detect that *nothing* ran, including the
+   watchdog): create checks on healthchecks.io (or equivalent) and put their
+   ping URLs in `.env` (all four names are allowlisted):
+
+   | Variable | Pinged by | Suggested period / grace |
+   |----------|-----------|--------------------------|
+   | `SAWA_HEARTBEAT_URL` | scheduler after a successful daily (`/fail` on failure) | 1 day / 4 h |
+   | `SAWA_WEEKLY_HEARTBEAT_URL` | scheduler after a successful weekly | 7 days / 1 day |
+   | `SAWA_TICK_HEARTBEAT_URL` | scheduler right after every `Scheduler tick` line | 15 min / 60 min |
+   | `SAWA_WATCHDOG_HEARTBEAT_URL` | `sawa doctor --job watchdog` (`/fail` when any check fails) | 1 day / 1 h |
+
+   Pings are HTTPS-only GETs with redirects disabled; the URL never appears in
+   argv or logs.
+
 4. **Database size**: views in `sqlschema/06_views.sql` and
    `22_views_advanced.sql` are good targets for slow-query monitoring.
+
+### What alerts when the scheduler itself does not run
+
+Layers 2 and 3, plus the EXIT-trap push in layer 1 when the script at least
+starts. The 2026-09-04 outage (an unknown key in `.env` made `setup_env` abort
+on every 15-minute tick for 11 days) produced no push at all because only the
+in-job pushes existed and the abort happened before any of them.
