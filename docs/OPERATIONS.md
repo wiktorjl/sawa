@@ -37,9 +37,11 @@ Missing API keys behave differently by key:
 - `POLYGON_API_KEY` (or `--api-key`) is required up front. If it is missing,
   `daily`/`weekly`/`quarterly`/`coldstart` log an error and exit non-zero
   before doing any work — Polygon underpins almost every step.
-- `FRED_API_KEY` is optional. If it is missing, only the FRED market-internals
-  step is skipped: the job logs an error, sends an ntfy alert (if `NTFY_TOPIC`
-  is set) via `alert_missing_api_key`, and still exits 0.
+- `FRED_API_KEY` is optional for collection. If it is missing, FRED collection
+  is skipped; in `daily`, this also skips CBOE because both share the same
+  market-internals block. The job reports degradation and sends an ntfy alert
+  (if `NTFY_TOPIC` is set) via `alert_missing_api_key`. The post-job doctor can
+  still fail if required data is stale.
 
 ### Database
 
@@ -69,6 +71,7 @@ TA-Lib needs the C library: `brew install ta-lib` (macOS) or
 | `sawa daily` | Prices, news, TA, market internals | Daily after market close |
 | `sawa weekly` | Economy, overviews, news, corporate actions, character | Weekly |
 | `sawa quarterly` | Fundamentals + financial ratios | Quarterly |
+| `sawa maintenance` | Universe + fundamentals/ratios + earnings | Weekly; monthly full filing replay |
 | `sawa intraday` | WebSocket 5-min bars (15-min delayed) | During market hours |
 | `sawa doctor` | Database sanity/completeness checks after jobs | After scheduled jobs |
 | `sawa add-symbol` | Add new ticker(s) ad-hoc | As needed |
@@ -152,6 +155,8 @@ corporate-action table readability.
 sawa quarterly
 sawa quarterly --skip-fundamentals
 sawa quarterly --skip-ratios
+sawa quarterly --full-history  # reconcile older filing gaps
+sawa maintenance              # universe + fundamentals/ratios + earnings
 ```
 
 Pulls balance sheets, income statements, cash flows, and financial ratios.
@@ -161,16 +166,19 @@ Pulls balance sheets, income statements, cash flows, and financial ratios.
 ### Recommended: `scripts/market_scheduler.sh`
 
 A single cron entry handles intraday streaming during market hours, runs
-`daily` ~1h after close, and `weekly` on the first closed-market evening of
-each ISO week (normally Monday):
+`daily` at/after 17:00 ET, and `weekly` on the first eligible evening of
+each ISO week (normally Monday). A separately locked background maintenance
+worker refreshes universe membership, fundamentals/ratios and Yahoo earnings
+weekly, with monthly full-history filing reconciliation:
 
 ```cron
-*/15 * * * 1-5 /path/to/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
+*/15 * * * * /path/to/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
 ```
 
 State lives under `~/.sawa/scheduler/`. Sends ntfy notifications if
 `NTFY_TOPIC` is set. The scheduler runs `sawa doctor --job daily` and
-`sawa doctor --job weekly` after successful jobs; if doctor exits non-zero,
+`sawa doctor --job weekly` after successful jobs, plus `--job quarterly`
+after maintenance; if doctor exits non-zero,
 the job is not marked done and an error notification is sent. A failed daily
 or weekly is retried on the next closed-evening tick at most
 `MAX_JOB_ATTEMPTS` (3) times per date/week (`daily_attempts_<date>`,
@@ -184,10 +192,13 @@ trap — via `sawa notify` when the venv works, else via a direct ntfy POST.
 
 ```cron
 0 18 * * 1-5 /path/to/sawa/scripts/daily.sh
-0  2 * * 6   /path/to/sawa/scripts/weekly.sh   # Saturday, matching market_scheduler.sh
+0  2 * * 6   /path/to/sawa/scripts/weekly.sh   # alternative Saturday schedule
 ```
 
-Quarterly is small — run by hand or once a quarter.
+Discrete schedules also need a recurring `sawa maintenance` invocation;
+the unified scheduler already supplies it. Intraday shutdown waits through
+the delayed-feed/correction drain and verifies the worker's final-write status.
+Maintenance uses its own lock so a lengthy refresh cannot block the next open.
 
 ## Database Doctor
 
@@ -269,11 +280,16 @@ logs/
   daily_YYYYMMDD_HHMMSS.log
   weekly_YYYYMMDD_HHMMSS.log
   quarterly_YYYYMMDD_HHMMSS.log
+  maintenance_YYYYMMDD_HHMMSS.log
   ta_backfill_YYYYMMDD_HHMMSS.log
   character_YYYYMMDD_HHMMSS.log
 ```
 
 Console output is INFO; the file gets DEBUG.
+
+At log setup, timestamped run logs older than 90 days are pruned only when
+their modification time is also old. `SAWA_LOG_RETENTION_DAYS` overrides this;
+`0` disables pruning. Audit JSON, symlinks and recently written logs are excluded.
 
 ## Troubleshooting
 

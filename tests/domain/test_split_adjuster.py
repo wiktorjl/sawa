@@ -104,6 +104,59 @@ def test_empty_registry_is_a_no_op() -> None:
     assert adjuster.adjust_row(_bar()) == _bar()
 
 
+def test_fractional_provider_split_survives_integer_storage_and_rebases_exactly() -> None:
+    split = StockSplit.from_polygon({
+        "ticker": "NIPMY", "execution_date": "2024-01-02", "split_from": 1, "split_to": 1.5,
+    })
+    adjuster = SplitAdjuster.from_rows([split.to_tuple()])
+    adjusted = adjuster.adjust_row(_bar(
+        ticker="NIPMY", date="2024-01-01", open="15", high="18", low="12", close="15",
+        volume="1001",
+    ))
+    assert adjusted["close"] == Decimal("10.00000000")
+    assert adjusted["high"] == Decimal("12.00000000")
+    assert adjusted["low"] == Decimal("8.00000000")
+    assert adjusted["volume"] == 1502
+
+
+def test_high_precision_axia_split_survives_bigint_round_trip_exactly() -> None:
+    split = StockSplit.from_polygon({
+        "ticker": "AXIA", "execution_date": "2025-12-22",
+        "split_from": 1, "split_to": 1.2628378881074,
+    })
+    assert split.to_tuple() == (
+        "AXIA", date(2025, 12, 22), 5_000_000_000_000, 6_314_189_440_537,
+    )
+    adjuster = SplitAdjuster.from_rows([split.to_tuple()])
+    assert adjuster.factor("AXIA", date(2025, 12, 19)) == Fraction(
+        6_314_189_440_537, 5_000_000_000_000
+    )
+    adjusted = adjuster.adjust_row(_bar(
+        ticker="AXIA", date="2025-12-19", open="126.28378881074",
+        high="151.540546572888", low="101.027031048592", close="126.28378881074",
+        volume=1_000_000_000_000,
+    ))
+    assert adjusted["close"] == Decimal("100.00000000")
+    assert adjusted["high"] == Decimal("120.00000000")
+    assert adjusted["low"] == Decimal("80.00000000")
+    assert adjusted["volume"] == 1_262_837_888_107
+
+
+@pytest.mark.parametrize("field", ["split_from", "split_to"])
+def test_stored_split_share_counts_remain_bounded_by_bigint(field: str) -> None:
+    values = {"split_from": 1, "split_to": 1}
+    values[field] = 9_223_372_036_854_775_807
+    adjuster = SplitAdjuster.from_rows([
+        ("AXIA", date(2025, 12, 22), values["split_from"], values["split_to"])
+    ])
+    assert len(adjuster) == 1
+    values[field] += 1
+    with pytest.raises(ValueError, match="positive integer"):
+        SplitAdjuster.from_rows([
+            ("AXIA", date(2025, 12, 22), values["split_from"], values["split_to"])
+        ])
+
+
 @pytest.mark.parametrize(
     "broken",
     [

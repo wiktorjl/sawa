@@ -8,6 +8,9 @@ Uses WebSocket for live data (15-min delayed).
 
 import asyncio
 import logging
+import os
+import signal
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -15,7 +18,40 @@ import psycopg
 from sawa.api.websocket_client import PolygonWebSocketClient
 from sawa.database import get_symbols_from_db
 from sawa.utils import setup_logging
-from sawa.utils.security import redact_sensitive_text
+from sawa.utils.security import open_private_text, redact_sensitive_text
+
+
+async def _run_stream(client: PolygonWebSocketClient, logger: logging.Logger) -> None:
+    """Install handlers even when a background shell inherited SIGINT ignored.
+
+    Cancel the consumer exactly once; its finally block owns the final database
+    flush. Repeated signals must not cancel that flush while it is in flight.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(client.run())
+    requested = False
+    previous: dict[signal.Signals, Any] = {}
+
+    def stop(signum: signal.Signals) -> None:
+        nonlocal requested
+        if not requested:
+            requested = True
+            logger.info("Received %s; draining intraday writes", signum.name)
+            task.cancel()
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.getsignal(signum)
+            loop.add_signal_handler(signum, stop, signum)
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not requested:
+                raise
+    finally:
+        for signum, handler in previous.items():
+            loop.remove_signal_handler(signum)
+            signal.signal(signum, handler)
 
 
 def run_intraday(
@@ -55,14 +91,17 @@ def run_intraday(
             "reconnectable_failures",
             "late_events_rejected",
             "out_of_session_events_ignored",
+            "history_minutes_recovered",
+            "history_recovery_failures",
         )
         for name in telemetry_names:
             stats[name] = counter(name)
         stats["stream_recovery_pending"] = bool(
-            getattr(client, "stream_recovery_pending", False)
-            if client is not None
-            else False
+            getattr(client, "stream_recovery_pending", False) if client is not None else False
         )
+        # bool() on a test/injected mock is not evidence of unfinished work.
+        history_pending = getattr(client, "history_recovery_pending", False)
+        stats["history_recovery_pending"] = history_pending is True
 
         dropped = stats["dropped_buffered_bars"]
         accepted = stats["minute_events_accepted"]
@@ -79,7 +118,7 @@ def run_intraday(
                 f"data loss: {dropped} unpersisted intraday bar(s) were dropped; "
                 "historical recovery is required"
             )
-        if accepted == 0:
+        if accepted == 0 and stats["history_minutes_recovered"] == 0:
             hard_failures.append(
                 "stream stopped without accepting any valid regular-session minute bars"
             )
@@ -91,27 +130,29 @@ def run_intraday(
             # Provider-declared status failures remain fatal even if transport
             # later resumes; a valid bar does not retract the provider error.
             hard_failures.append("provider reported a stream status error")
-            degraded_reasons.append(
-                f"provider reported {provider_errors} stream status error(s)"
-            )
+            degraded_reasons.append(f"provider reported {provider_errors} stream status error(s)")
         if reconnectable_failures:
             degraded_reasons.append(
-                "encountered "
-                f"{reconnectable_failures} reconnectable stream failure(s)"
+                f"encountered {reconnectable_failures} reconnectable stream failure(s)"
             )
         if recovery_pending:
             hard_failures.append(
                 "stream stopped before a reconnecting transport/startup failure "
                 "was proven recovered by a valid minute bar"
             )
+        if stats["history_recovery_pending"]:
+            hard_failures.append("historical intraday reconciliation is incomplete")
+        if stats["history_recovery_failures"]:
+            degraded_reasons.append(
+                f"encountered {stats['history_recovery_failures']} "
+                "historical recovery request failure(s)"
+            )
         late = stats["late_events_rejected"]
         if late:
             degraded_reasons.append(f"rejected {late} late minute event(s)")
         outside = stats["out_of_session_events_ignored"]
         if outside:
-            degraded_reasons.append(
-                f"ignored {outside} out-of-session minute event(s)"
-            )
+            degraded_reasons.append(f"ignored {outside} out-of-session minute event(s)")
 
         if hard_failures:
             stats["success"] = False
@@ -153,7 +194,7 @@ def run_intraday(
         # Run WebSocket client (blocks until interrupted)
         logger.info("Starting WebSocket connection...")
         logger.info("Press Ctrl+C to stop")
-        asyncio.run(client.run())
+        asyncio.run(_run_stream(client, logger))
 
         record_stream_outcome()
         logger.info("WebSocket streaming stopped")
@@ -166,5 +207,13 @@ def run_intraday(
         logger.error("Intraday streaming failed: %s", safe_error)
         stats["error"] = safe_error
         raise
+    finally:
+        # The scheduler survives across processes and cannot wait() on a child
+        # launched by an earlier cron tick. Publish a completion result only
+        # after final persistence, so process disappearance isn't called success.
+        exit_file = os.environ.get("SAWA_INTRADAY_EXIT_FILE")
+        if exit_file:
+            with open_private_text(Path(exit_file), "w") as handle:
+                handle.write("0\n" if stats.get("success") else "1\n")
 
     return stats

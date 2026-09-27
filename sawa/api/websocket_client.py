@@ -15,7 +15,11 @@ import psycopg
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from sawa.api.async_client import AsyncPolygonClient
 from sawa.database.intraday_load import load_intraday_bars
+from sawa.repositories.rate_limiter import TokenBucket
+from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
+from sawa.utils.market_hours import regular_session_close
 from sawa.utils.security import redact_sensitive_text
 
 # Polygon WebSocket URLs
@@ -40,6 +44,9 @@ STREAM_STALL_MINUTES = 30
 # Massive/Polygon can rebroadcast a recalculated minute for 15 minutes after
 # late trades arrive. Keep minute-level state for that full correction horizon.
 CORRECTION_HORIZON_MINUTES = 15
+FEED_DELAY_MINUTES = 15
+HISTORY_CONCURRENCY = 5
+HISTORY_RETRY_SECONDS = 60
 MARKET_TIMEZONE = ZoneInfo("America/New_York")
 REGULAR_SESSION_OPEN = time(9, 30)
 REGULAR_SESSION_CLOSE = time(16, 0)
@@ -100,6 +107,7 @@ class PolygonWebSocketClient:
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
         handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT_SECONDS,
         max_buffered_bars: int = DEFAULT_MAX_BUFFERED_BARS,
+        recover_history: bool = True,
     ):
         """
         Args:
@@ -170,9 +178,7 @@ class PolygonWebSocketClient:
         # eviction O(1).  A list plus identity-to-position map still becomes
         # quadratic once the cap is full because removing index zero shifts and
         # reindexes every remaining entry for each new bar.
-        self._buffered_snapshots: OrderedDict[
-            tuple[Any, Any, Any], dict[str, Any]
-        ] = OrderedDict()
+        self._buffered_snapshots: OrderedDict[tuple[Any, Any, Any], dict[str, Any]] = OrderedDict()
         # Exact, process-lifetime loss telemetry for the bounded persistence
         # retry buffer. A non-zero value means bars were not persisted by this
         # process and should be recovered from the upstream historical API.
@@ -215,9 +221,189 @@ class PolygonWebSocketClient:
         self.latest_session_by_ticker: dict[str, date] = {}
         self.late_events_rejected = 0
         self.out_of_session_events_ignored = 0
+        self.recover_history = recover_history
+        self.history_minutes_recovered = 0
+        self.history_recovery_failures = 0
+        self._history_windows: dict[str, tuple[datetime, datetime]] = {}
+        self._history_task: asyncio.Task[None] | None = None
+        self._history_retry_after = datetime.min.replace(tzinfo=timezone.utc)
+        self._history_limiter = TokenBucket(
+            rate=DEFAULT_API_RATE_LIMIT, capacity=float(HISTORY_CONCURRENCY)
+        )
 
-        # Try delayed endpoint by default (fallback to real-time if access granted)
+        # Recovery cutoffs and scheduler drain use this endpoint's 15-minute delay.
         self.uri = DELAYED_WEBSOCKET_URL
+
+    @property
+    def history_recovery_pending(self) -> bool:
+        """Unreconciled windows include failed requests and queued/in-flight work."""
+        return bool(self._history_windows)
+
+    def _schedule_history_recovery(self) -> None:
+        """Queue this session without delaying socket consumption.
+
+        Re-fetch the session prefix, including interior gaps after a process
+        restart. A MAX(timestamp) alone cannot detect those gaps. Never re-create
+        prior sessions that the daily job intentionally deleted after EOD.
+        """
+        if not self.recover_history:
+            return
+        now = datetime.now(timezone.utc)
+        local = now.astimezone(MARKET_TIMEZONE)
+        close = regular_session_close(local.date())
+        if close is None:
+            return
+        start = local.replace(hour=9, minute=30, second=0, microsecond=0)
+        # Recover every elapsed source minute, including a partial N-minute
+        # window. Rounding to an N-minute boundary would strand minutes missed
+        # before a reconnect midway through that window. Raw REST minutes match
+        # the unadjusted WebSocket price basis.
+        end = min(
+            now - timedelta(minutes=FEED_DELAY_MINUTES),
+            close.astimezone(timezone.utc),
+        ).replace(second=0, microsecond=0)
+        start = start.astimezone(timezone.utc)
+        if end <= start:
+            return
+        for ticker in self.tickers:
+            self._history_windows[ticker] = (start, end)
+        self._start_history_worker()
+
+    def _start_history_worker(self) -> None:
+        if (
+            self._history_windows
+            and (self._history_task is None or self._history_task.done())
+            and datetime.now(timezone.utc) >= self._history_retry_after
+        ):
+            self._history_task = asyncio.create_task(self._recover_history())
+
+    def _merge_history_minutes(
+        self,
+        ticker: str,
+        rows: list[dict[str, Any]],
+        start: datetime,
+        end: datetime,
+    ) -> int:
+        """Reconstruct source-minute lineage before exposing any recovered bar.
+
+        Validation is all-or-nothing per ticker. Live minutes already held in
+        memory win over the REST response, which may have been sampled earlier.
+        Existing database masks remain protected by the normal upsert contract.
+        """
+        replay = PolygonWebSocketClient(
+            self.api_key,
+            self.database_url,
+            [ticker],
+            bar_size=self.bar_size,
+            logger=self.logger,
+            recover_history=False,
+        )
+        accepted = 0
+        for row in rows:
+            stamp = row.get("t")
+            if isinstance(stamp, bool) or not isinstance(stamp, int):
+                raise ValueError("history minute has invalid timestamp")
+            event_time = datetime.fromtimestamp(stamp / 1000, tz=timezone.utc)
+            if not start <= event_time < end:
+                continue
+            if not replay._aggregate_bar({"sym": ticker, "s": stamp, **row}):
+                raise ValueError("history minute has invalid OHLCV or session identity")
+            accepted += 1
+
+        # Merge source minutes, not OHLC snapshots: adding volumes or extrema
+        # from overlapping snapshots would double-count/corrupt reconstructed bars.
+        retain_from = datetime.now(timezone.utc) - timedelta(
+            minutes=FEED_DELAY_MINUTES + CORRECTION_HORIZON_MINUTES + self.bar_size
+        )
+        for key, recovered in replay.bar_aggregator.items():
+            live = self.bar_aggregator.get(key)
+            if live is not None:
+                for minute_time, minute in live["_minutes"].items():
+                    if not replay._aggregate_bar(
+                        {
+                            "sym": ticker,
+                            "s": int(minute_time.timestamp() * 1000),
+                            "o": minute["open"],
+                            "h": minute["high"],
+                            "l": minute["low"],
+                            "c": minute["close"],
+                            "v": minute["volume"],
+                        }
+                    ):
+                        raise ValueError("combined history/live minute state is invalid")
+                self.bar_aggregator[key] = recovered
+            elif recovered["timestamp"] >= retain_from:
+                # Keep recent reconstructed minutes so a later one-minute
+                # correction can replace that minute in a full-lineage bar.
+                # Retaining the entire day for every ticker would grow memory
+                # with the full universe instead of the correction horizon.
+                self.bar_aggregator[key] = recovered
+                self.last_received_wallclock_by_ticker[ticker] = datetime.now(timezone.utc)
+            recovered["_dirty"] = False  # Already queued below; later corrections set dirty.
+            self._buffer_snapshot(recovered)
+        return accepted
+
+    async def _recover_history(self) -> None:
+        """Bounded REST workers; failures stay queued for an explicit retry."""
+        client = AsyncPolygonClient(self.api_key, self.logger, rate_limiter=self._history_limiter)
+        pending = list(self._history_windows.items())
+        queue = iter(pending)
+        recovered = 0
+        failed = 0
+
+        async def worker() -> None:
+            nonlocal recovered, failed
+            for ticker, window in queue:
+                start, end = window
+                try:
+                    # A large universe can take longer than the in-memory
+                    # correction horizon to reconcile. Extend each request to
+                    # its own available minute, so an old partial prefix can
+                    # still become a superset of already-persisted live minutes
+                    # after those live source minutes have been finalized.
+                    close = regular_session_close(start.astimezone(MARKET_TIMEZONE).date())
+                    if close is not None:
+                        available = min(
+                            datetime.now(timezone.utc) - timedelta(minutes=FEED_DELAY_MINUTES),
+                            close.astimezone(timezone.utc),
+                        ).replace(second=0, microsecond=0)
+                        end = max(end, available)
+                    rows = await client.get_aggregates(
+                        ticker,
+                        start.astimezone(MARKET_TIMEZONE).date(),
+                        end.astimezone(MARKET_TIMEZONE).date(),
+                        timespan="minute",
+                        adjusted=False,
+                        sort="asc",
+                        limit=50000,
+                    )
+                    count = self._merge_history_minutes(ticker, rows, start, end)
+                    self.history_minutes_recovered += count
+                    recovered += 1
+                    if self._history_windows.get(ticker) == window:
+                        del self._history_windows[ticker]
+                except Exception as exc:
+                    failed += 1
+                    self.history_recovery_failures += 1
+                    self.logger.warning(
+                        "Intraday history recovery failed for %s: %s",
+                        ticker,
+                        _safe_exception(exc),
+                    )
+
+        self.logger.info("Reconciling intraday history for %d tickers", len(pending))
+        try:
+            await asyncio.gather(*(worker() for _ in range(HISTORY_CONCURRENCY)))
+        finally:
+            self._history_retry_after = datetime.now(timezone.utc) + timedelta(
+                seconds=HISTORY_RETRY_SECONDS
+            )
+            self.logger.info(
+                "Intraday reconciliation: %d tickers recovered, %d failed, %d pending",
+                recovered,
+                failed,
+                len(self._history_windows),
+            )
 
     @property
     def buffer(self) -> list[dict[str, Any]]:
@@ -234,9 +420,7 @@ class PolygonWebSocketClient:
         """Replace the retry buffer from a list-shaped compatibility value."""
         rebuilt: OrderedDict[tuple[Any, Any, Any], dict[str, Any]] = OrderedDict()
         for bar in bars:
-            snapshot = {
-                key: value for key, value in bar.items() if not key.startswith("_")
-            }
+            snapshot = {key: value for key, value in bar.items() if not key.startswith("_")}
             identity = self._buffer_identity(snapshot)
             buffered = rebuilt.get(identity)
             if buffered is None or self._snapshot_supersedes(snapshot, buffered):
@@ -244,9 +428,7 @@ class PolygonWebSocketClient:
         self._buffered_snapshots = rebuilt
         self._enforce_buffer_limit()
 
-    async def _send_handshake_message(
-        self, message: dict[str, str], phase: str
-    ) -> None:
+    async def _send_handshake_message(self, message: dict[str, str], phase: str) -> None:
         """Send one startup message without allowing a silent socket to hang."""
         if self.websocket is None:
             raise ConnectionError(f"{phase} failed: WebSocket not connected")
@@ -265,13 +447,9 @@ class PolygonWebSocketClient:
         if self.websocket is None:
             raise ConnectionError(f"{phase} failed: WebSocket not connected")
         try:
-            response = await asyncio.wait_for(
-                self.websocket.recv(), timeout=self.handshake_timeout
-            )
+            response = await asyncio.wait_for(self.websocket.recv(), timeout=self.handshake_timeout)
         except asyncio.TimeoutError as exc:
-            raise ConnectionError(
-                f"{phase} timed out after {self.handshake_timeout:g}s"
-            ) from exc
+            raise ConnectionError(f"{phase} timed out after {self.handshake_timeout:g}s") from exc
 
         self.logger.debug("%s response received", phase)
         try:
@@ -281,9 +459,7 @@ class PolygonWebSocketClient:
 
         if isinstance(data, dict):
             return [data]
-        if isinstance(data, list) and data and all(
-            isinstance(item, dict) for item in data
-        ):
+        if isinstance(data, list) and data and all(isinstance(item, dict) for item in data):
             return data
         raise ConnectionError(f"{phase} returned a non-object status response")
 
@@ -317,22 +493,14 @@ class PolygonWebSocketClient:
             auth_msg = {"action": "auth", "params": self.api_key}
             await self._send_handshake_message(auth_msg, "Authentication")
 
-            connected_statuses = await self._recv_handshake_statuses(
-                "Connection handshake"
-            )
+            connected_statuses = await self._recv_handshake_statuses("Connection handshake")
             errors = self._provider_errors(connected_statuses)
             if errors:
-                raise ConnectionError(
-                    f"Connection handshake failed: {'; '.join(errors)}"
-                )
-            if not any(
-                item.get("status") == "connected" for item in connected_statuses
-            ):
+                raise ConnectionError(f"Connection handshake failed: {'; '.join(errors)}")
+            if not any(item.get("status") == "connected" for item in connected_statuses):
                 raise ConnectionError("Connection was not confirmed by provider")
 
-            auth_statuses = await self._recv_handshake_statuses(
-                "Authentication handshake"
-            )
+            auth_statuses = await self._recv_handshake_statuses("Authentication handshake")
             errors = self._provider_errors(auth_statuses)
             if errors:
                 raise ConnectionError(f"Authentication failed: {'; '.join(errors)}")
@@ -370,9 +538,7 @@ class PolygonWebSocketClient:
             # A connection is not usable until Polygon explicitly confirms the
             # subscription. Errors and ambiguous status responses must not fall
             # through into a healthy-looking stream.
-            statuses = await self._recv_handshake_statuses(
-                "Subscription handshake"
-            )
+            statuses = await self._recv_handshake_statuses("Subscription handshake")
             errors = self._provider_errors(statuses)
             if errors:
                 raise ConnectionError(f"Subscription failed: {'; '.join(errors)}")
@@ -386,8 +552,7 @@ class PolygonWebSocketClient:
             raise
         except Exception as exc:
             raise ConnectionError(
-                "Unexpected subscription handshake failure: "
-                f"{_safe_exception(exc)}"
+                f"Unexpected subscription handshake failure: {_safe_exception(exc)}"
             ) from exc
 
         self.logger.info(f"✓ Subscribed to {len(self.tickers)} tickers")
@@ -436,9 +601,7 @@ class PolygonWebSocketClient:
                 or not isinstance(value, (int, float))
                 or (isinstance(value, float) and not math.isfinite(value))
             ):
-                self.logger.warning(
-                    f"Ignoring malformed minute bar for {ticker}: invalid {field}"
-                )
+                self.logger.warning(f"Ignoring malformed minute bar for {ticker}: invalid {field}")
                 self.invalid_minute_events += 1
                 return False
             numeric_fields[field] = value
@@ -448,10 +611,7 @@ class PolygonWebSocketClient:
                 not _price_rounds_to_numeric_20_8(numeric_fields[field])
                 for field in ("o", "h", "l", "c")
             )
-            or any(
-                numeric_fields[field] >= MAX_PRICE_EXCLUSIVE
-                for field in ("o", "h", "l", "c")
-            )
+            or any(numeric_fields[field] >= MAX_PRICE_EXCLUSIVE for field in ("o", "h", "l", "c"))
             or numeric_fields["v"] < 0
             or numeric_fields["v"] > MAX_VOLUME
             or not float(numeric_fields["v"]).is_integer()
@@ -467,9 +627,9 @@ class PolygonWebSocketClient:
         # Anchor every interval to the 09:30 New York session open. UTC/hour
         # flooring misaligns 60-minute windows (09:30 would become 09:00).
         try:
-            event_time = datetime.fromtimestamp(
-                start_ms / 1000, tz=timezone.utc
-            ).replace(second=0, microsecond=0)
+            event_time = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).replace(
+                second=0, microsecond=0
+            )
         except (OverflowError, OSError, ValueError):
             self.logger.warning(f"Ignoring out-of-range minute timestamp for {ticker}")
             self.invalid_minute_events += 1
@@ -483,7 +643,13 @@ class PolygonWebSocketClient:
         numeric_fields["v"] = int(numeric_fields["v"])
         local_event_time = event_time.astimezone(MARKET_TIMEZONE)
         local_market_time = local_event_time.time().replace(tzinfo=None)
-        if not REGULAR_SESSION_OPEN <= local_market_time < REGULAR_SESSION_CLOSE:
+        session_close = regular_session_close(local_event_time.date())
+        if (
+            session_close is None
+            or not REGULAR_SESSION_OPEN
+            <= local_market_time
+            < session_close.time().replace(tzinfo=None)
+        ):
             self.out_of_session_events_ignored += 1
             self.logger.debug(f"Ignoring out-of-session minute bar for {ticker}")
             return False
@@ -496,9 +662,7 @@ class PolygonWebSocketClient:
         )
         elapsed_minutes = int((local_event_time - session_anchor).total_seconds() // 60)
         window_offset = (elapsed_minutes // self.bar_size) * self.bar_size
-        bar_start = (session_anchor + timedelta(minutes=window_offset)).astimezone(
-            timezone.utc
-        )
+        bar_start = (session_anchor + timedelta(minutes=window_offset)).astimezone(timezone.utc)
         market_date = local_event_time.date()
 
         latest_session = self.latest_session_by_ticker.get(ticker)
@@ -576,9 +740,7 @@ class PolygonWebSocketClient:
                 "volume": total_volume,
                 "source_minute_count": len(ordered_minutes),
                 "source_minute_mask": sum(
-                    1
-                    << int((timestamp - bar_start).total_seconds() // 60)
-                    for timestamp in minutes
+                    1 << int((timestamp - bar_start).total_seconds() // 60) for timestamp in minutes
                 ),
                 "_dirty": True,
             }
@@ -595,9 +757,7 @@ class PolygonWebSocketClient:
         )
 
     @staticmethod
-    def _snapshot_supersedes(
-        incoming: dict[str, Any], buffered: dict[str, Any]
-    ) -> bool:
+    def _snapshot_supersedes(incoming: dict[str, Any], buffered: dict[str, Any]) -> bool:
         """Return whether an incoming revision authoritatively replaces one bar."""
         incoming_mask = incoming.get("source_minute_mask")
         buffered_mask = buffered.get("source_minute_mask")
@@ -609,9 +769,7 @@ class PolygonWebSocketClient:
 
     def _buffer_snapshot(self, bar: dict[str, Any]) -> None:
         """Coalesce a corrected authoritative snapshot into the write buffer."""
-        snapshot = {
-            key: value for key, value in bar.items() if not key.startswith("_")
-        }
+        snapshot = {key: value for key, value in bar.items() if not key.startswith("_")}
         identity = self._buffer_identity(snapshot)
         buffered = self._buffered_snapshots.get(identity)
         if buffered is not None:
@@ -673,14 +831,9 @@ class PolygonWebSocketClient:
                 last_received is not None
                 and now
                 > last_received
-                + timedelta(
-                    minutes=STREAM_STALL_MINUTES + CORRECTION_HORIZON_MINUTES
-                )
+                + timedelta(minutes=STREAM_STALL_MINUTES + CORRECTION_HORIZON_MINUTES)
             )
-            complete = flush_all or (
-                (watermark is not None and watermark >= bar_end)
-                or stalled
-            )
+            complete = flush_all or ((watermark is not None and watermark >= bar_end) or stalled)
             finalized = flush_all or (
                 (watermark is not None and watermark > bar_end + correction_delta)
                 or stalled_beyond_corrections
@@ -736,9 +889,7 @@ class PolygonWebSocketClient:
                 errors = self._provider_errors([item])
                 if errors:
                     self.provider_status_errors += 1
-                    raise ConnectionError(
-                        "Provider stream status error: " + "; ".join(errors)
-                    )
+                    raise ConnectionError("Provider stream status error: " + "; ".join(errors))
                 self.logger.debug("Provider stream status received")
 
         # Log when we receive bars (but not too verbose)
@@ -763,11 +914,7 @@ class PolygonWebSocketClient:
         # event loop with quadratic identity scans when a write fails.
         for bars in (failed_bars, received_during_write):
             for bar in bars:
-                snapshot = {
-                    key: value
-                    for key, value in bar.items()
-                    if not key.startswith("_")
-                }
+                snapshot = {key: value for key, value in bar.items() if not key.startswith("_")}
                 identity = self._buffer_identity(snapshot)
                 buffered = merged.get(identity)
                 if buffered is None or self._snapshot_supersedes(snapshot, buffered):
@@ -828,11 +975,11 @@ class PolygonWebSocketClient:
                 await asyncio.sleep(10)  # Check every 10 seconds
 
                 self._flush_completed_bars()
+                self._start_history_worker()
                 should_flush = (
                     len(self._buffered_snapshots) >= self.batch_size
-                    or (
-                        datetime.now(timezone.utc) - self.last_flush
-                    ).total_seconds() >= self.batch_timeout
+                    or (datetime.now(timezone.utc) - self.last_flush).total_seconds()
+                    >= self.batch_timeout
                 )
 
                 if should_flush:
@@ -894,6 +1041,7 @@ class PolygonWebSocketClient:
                     if self.websocket is None:
                         raise RuntimeError("WebSocket not connected")
 
+                    self._schedule_history_recovery()
                     backoff = 1.0  # reset after a successful connect+subscribe
                     self.logger.info("Streaming started. Press Ctrl+C to stop.")
 
@@ -936,14 +1084,18 @@ class PolygonWebSocketClient:
                 backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF)
         finally:
             self.running = False
+            if self._history_task is not None:
+                self._history_task.cancel()
+                try:
+                    await self._history_task
+                except asyncio.CancelledError:
+                    pass
             periodic_error: Exception | None = None
             try:
                 await self._cancel_periodic_flush(flush_task)
             except Exception as e:
                 periodic_error = e
-                self.logger.error(
-                    "Periodic flush task failed: %s", _safe_exception(e)
-                )
+                self.logger.error("Periodic flush task failed: %s", _safe_exception(e))
             shutdown_error: Exception | None = None
             try:
                 await self.shutdown()
@@ -981,9 +1133,7 @@ class PolygonWebSocketClient:
         finally:
             close_error = await self._close_current_websocket()
             if close_error is not None:
-                self.logger.error(
-                    "WebSocket close failed: %s", _safe_exception(close_error)
-                )
+                self.logger.error("WebSocket close failed: %s", _safe_exception(close_error))
 
         if flush_error is not None:
             if flush_cause is not None:

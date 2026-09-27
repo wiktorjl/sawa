@@ -153,13 +153,14 @@ to inspect historical audit records from older deployments.
 sawa daily          # Run after market close -- prices, news, technical indicators, market internals
 sawa weekly         # Economy, overviews, news, corporate actions, stock character classification
 sawa quarterly      # Fundamentals (balance sheets, income, cash flow, ratios)
+sawa maintenance    # Universe discovery, fundamentals/ratios, Yahoo earnings
 sawa doctor         # Check whether database contents look healthy
 ```
 
 For unattended operation see `scripts/market_scheduler.sh` — a single
 cron-driven script that manages intraday streaming during market hours and
-runs `daily` / `weekly` after close, then runs scoped doctor checks before
-marking those jobs complete. See [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
+runs `daily` / `weekly` after close, with separately locked weekly maintenance.
+Scoped doctor checks gate completion markers. See [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
 for the full operational playbook.
 
 ## Prerequisites
@@ -255,9 +256,10 @@ Schema files in `sqlschema/` are applied in numeric order. Core tables:
 | Polygon S3 (`files.polygon.io`) | `POLYGON_S3_*` | Bulk historical daily OHLCV (used by `coldstart`; faster than REST for multi-year backfills) |
 | Polygon WebSocket (`delayed.polygon.io`) | `POLYGON_API_KEY` | Live 5-min bars during market hours (15-min delayed on the basic tier) |
 | FRED (`api.stlouisfed.org`) | `FRED_API_KEY` | Market internals: VIX (`VIXCLS`), VIX3M (`VXVCLS`), HY credit spread (`BAMLH0A0HYM2`) |
+| CBOE (`cdn-api.cboe.com`) | none | Same-session VIX/VIX3M closes and historical gap repair |
 | Wikipedia | none | S&P 500 constituent list (HTML scrape) |
 | `data/nasdaq1000_symbols.txt` | none | NASDAQ-5000 constituent list (bundled into the wheel) |
-| `yfinance` (optional script) | none | Earnings dates via `scripts/populate_earnings.py` (Polygon's earnings endpoint currently returns no data) |
+| `yfinance` | none | Earnings dates, EPS estimates/actuals and surprises via scheduled `maintenance` |
 
 Technical indicators and the stock-character tables are **computed
 locally** from `stock_prices` (TA-Lib) — they have no external source.

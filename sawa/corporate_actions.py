@@ -17,7 +17,6 @@ from sawa.domain.corporate_actions import (
     Earnings,
     SplitAdjuster,
     StockSplit,
-    is_unrepresentable_split_ratio,
 )
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
@@ -380,23 +379,9 @@ def run_corporate_actions_update(
             stats["splits_fetched"] = len(raw_splits)
             logger.info(f"  Found {len(raw_splits)} splits")
 
-            if raw_splits and not dry_run:
-                # Fund reorganizations arrive on this endpoint with fractional
-                # ratios the integer schema cannot hold. Skip only those, so a
-                # tracked ticker's real split still loads.
+            if raw_splits:
                 raw_splits = _tracked_only(raw_splits, "split(s)")
-                fractional = [s for s in raw_splits if is_unrepresentable_split_ratio(s)]
-                if fractional:
-                    stats["splits_fractional_skipped"] = len(fractional)
-                    logger.warning(
-                        f"  Skipped {len(fractional)} split(s) with non-integer "
-                        "share ratios (fund reorganizations)"
-                    )
-                splits = [
-                    StockSplit.from_polygon(s)
-                    for s in raw_splits
-                    if not is_unrepresentable_split_ratio(s)
-                ]
+                splits = [StockSplit.from_polygon(s) for s in raw_splits]
                 if any(
                     split.execution_date < start_date
                     or split.execution_date > end_date
@@ -409,14 +394,17 @@ def run_corporate_actions_update(
                 # Filter to known tickers
                 splits = [s for s in splits if s.ticker in ticker_set]
                 stats["splits_eligible"] = len(splits)
-                split_result = load_splits(conn, splits, logger, commit=False)
-                stats["splits_loaded"] = int(split_result)
-                stats["splits_persistence"] = split_result.summary()
-                # Only persisted split rows may trigger price/TA repair.
-                stats["split_tickers"] = list(split_result.persisted_tickers)
-                if not split_result.fully_persisted:
-                    stats["errors"].append("split persistence was incomplete")
-                logger.info(f"  Loaded {stats['splits_loaded']} splits")
+                if dry_run:
+                    logger.info(f"  [DRY RUN] Would load {len(splits)} validated splits")
+                else:
+                    split_result = load_splits(conn, splits, logger, commit=False)
+                    stats["splits_loaded"] = int(split_result)
+                    stats["splits_persistence"] = split_result.summary()
+                    # Only persisted split rows may trigger price/TA repair.
+                    stats["split_tickers"] = list(split_result.persisted_tickers)
+                    if not split_result.fully_persisted:
+                        stats["errors"].append("split persistence was incomplete")
+                    logger.info(f"  Loaded {stats['splits_loaded']} splits")
             elif dry_run:
                 logger.info("  [DRY RUN] Would load splits")
 

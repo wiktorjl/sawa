@@ -201,6 +201,18 @@ def test_weekly_propagates_unsuccessful_character_batch() -> None:
     assert "character" in stats["step_errors"]
 
 
+def test_weekly_surfaces_stale_character_inputs_without_failing_valid_tickers() -> None:
+    stats = _run_weekly_with_mocks(
+        character={"success": True, "degraded": True, "classified": 1,
+                   "total": 2, "errors": 0, "stale_sources": 1}
+    )
+    assert stats["success"] is True
+    assert stats["degraded"] is True
+    assert "stock character skipped stale source histories (1 tickers)" in (
+        stats["degraded_reasons"]
+    )
+
+
 def test_weekly_propagates_all_empty_corporate_action_failure() -> None:
     stats = _run_weekly_with_mocks(
         run_corporate_actions_update={
@@ -249,9 +261,9 @@ def test_get_economy_start_dates_uses_each_table(monkeypatch) -> None:
     result = weekly.get_economy_start_dates(object(), date(2026, 4, 24))
 
     assert result == {
-        "treasury-yields": "2026-04-16",
-        "inflation": "2025-12-01",
-        "inflation-expectations": "2026-01-01",
+        "treasury-yields": "2025-04-16",
+        "inflation": "2024-12-01",
+        "inflation-expectations": "2025-01-01",
         "labor-market": "2025-04-24",
     }
     assert calls == list(weekly.ECONOMY_ENDPOINT_TABLES.values())

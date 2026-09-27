@@ -349,6 +349,37 @@ def cmd_quarterly(args) -> int:
                 output_dir=Path(args.output_dir),
                 skip_fundamentals=args.skip_fundamentals,
                 skip_ratios=args.skip_ratios,
+                full_history=getattr(args, "full_history", False),
+                dry_run=args.dry_run,
+                logger=logger,
+            )
+        return 0 if ctx["stats"].get("success") else 1
+    except Exception:
+        if args.verbose:
+            raise
+        return 1
+
+
+def cmd_maintenance(args) -> int:
+    """Refresh the universe, financial statements, ratios, and earnings."""
+    from sawa.maintenance import run_maintenance
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="maintenance")
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    db_url = args.database_url or os.environ.get("DATABASE_URL")
+    if not api_key or not db_url:
+        logger.error("POLYGON_API_KEY and DATABASE_URL are required")
+        return 1
+    try:
+        with monitored_run("maintenance", logger=logger) as ctx:
+            ctx["stats"] = run_maintenance(
+                api_key,
+                db_url,
+                output_dir=Path(args.output_dir),
+                skip_universe=args.skip_universe,
+                skip_fundamentals=args.skip_fundamentals,
+                skip_earnings=args.skip_earnings,
+                full_history=args.full_history,
                 dry_run=args.dry_run,
                 logger=logger,
             )
@@ -1269,8 +1300,26 @@ Environment Variables:
     )
     quarterly_parser.add_argument("--log-dir", help="Directory for log files")
     quarterly_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    quarterly_parser.add_argument(
+        "--full-history", action="store_true", help="Reconcile all available statement history"
+    )
     quarterly_parser.add_argument("-v", "--verbose", action="store_true")
     quarterly_parser.set_defaults(func=cmd_quarterly)
+
+    maintenance_parser = subparsers.add_parser(
+        "maintenance", help="Refresh universe, fundamentals, ratios, and earnings"
+    )
+    maintenance_parser.add_argument("--output-dir", default="data")
+    maintenance_parser.add_argument("--api-key")
+    maintenance_parser.add_argument("--database-url")
+    maintenance_parser.add_argument("--skip-universe", action="store_true")
+    maintenance_parser.add_argument("--skip-fundamentals", action="store_true")
+    maintenance_parser.add_argument("--skip-earnings", action="store_true")
+    maintenance_parser.add_argument("--full-history", action="store_true")
+    maintenance_parser.add_argument("--dry-run", action="store_true")
+    maintenance_parser.add_argument("--log-dir")
+    maintenance_parser.add_argument("-v", "--verbose", action="store_true")
+    maintenance_parser.set_defaults(func=cmd_maintenance)
 
     # Technical indicator backfill subcommand
     ta_parser = subparsers.add_parser(

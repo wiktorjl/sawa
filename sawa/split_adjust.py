@@ -20,7 +20,11 @@ from typing import Any
 import psycopg
 
 from sawa.api import PolygonClient
-from sawa.daily import fetch_prices_via_api, insert_prices
+from sawa.daily import fetch_prices_via_api, insert_prices, refresh_52week_extremes_if_needed
+from sawa.domain.issuer_continuity import (
+    REVIEWED_IDENTITY_CORRECTIONS,
+    REVIEWED_ISSUER_SUCCESSORS,
+)
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
@@ -38,10 +42,15 @@ from sawa.utils.security import redact_sensitive_text
 BASIS_PROBE_DATES = 5
 # Open and close on every probe date must agree on the ratio this closely.
 BASIS_RATIO_TOLERANCE = Decimal("0.005")
-# The last pre-horizon close must be within an ordinary day's move of the
-# boundary close, or the tail is not on the boundary's basis at all.
-BASIS_CONTINUITY_BOUNDS = (Decimal("0.34"), Decimal("3"))
+# Keep the provider-window join tight before projecting its basis backwards.
+BASIS_CONTINUITY_BOUNDS = (Decimal("0.8"), Decimal("1.25"))
+# Historical daily moves can exceed the boundary tolerance without indicating
+# mixed bases. Only flag at-least-twofold internal steps for reconciliation.
+# This is a conservative heuristic, not proof of a split or a shared basis:
+# never derive a rebase factor from a jump; changes still require ledger ratios.
+HISTORICAL_SPLIT_LIKE_BOUNDS = (Decimal("0.5"), Decimal("2"))
 _SNAP_MAX_DENOMINATOR = 1000
+MAX_REBASE_GAP_DAYS = 14
 
 
 @dataclass(frozen=True)
@@ -131,12 +140,126 @@ def get_unapplied_splits_in_range(
 
 
 def raw_split_jump_present(previous_close: Decimal, next_close: Decimal, ratio: Fraction) -> bool:
-    """Whether the step across a split date is closer to the raw jump than to none."""
+    """Recognize an unambiguous raw jump; decline ambiguous price moves.
+
+    Proximity alone mistakes genuine market moves for smaller splits. Require
+    an ordinary adjusted move and reject cases consistent with both bases.
+    """
     if previous_close <= 0 or next_close <= 0:
         return False
-    step = (next_close / previous_close).ln()
-    raw_jump = -(Decimal(ratio.numerator) / Decimal(ratio.denominator)).ln()
-    return abs(step - raw_jump) < abs(step)
+    if ratio == 1:
+        return False
+    step = next_close / previous_close
+    corrected = step * Decimal(ratio.numerator) / Decimal(ratio.denominator)
+    raw = Decimal("0.8") <= corrected <= Decimal("1.25")
+    adjusted = Decimal("0.8") <= step <= Decimal("1.25")
+    if raw == adjusted:
+        raise ValueError("split-date price move does not uniquely establish the stored basis")
+    return raw
+
+
+def known_identity_conflict(
+    client: PolygonClient, ticker: str, dates: set[date], rate_limiter: SyncRateLimiter,
+    *, conn=None,
+) -> dict[str, str] | None:
+    """Check issuer identities before applying current splits to older history.
+
+    A ticker can be reused by an unrelated issuer (DFNS, 2021 vs 2026). An
+    adjusted aggregate request does not establish that those prices belong to
+    the same issuer. A CIK correction with both FIGIs unchanged still identifies
+    the same security. Independently reviewed corrections pin exact identity
+    pairs; reviewed successors additionally require their exact dated ledger
+    conversion. Missing CIKs do not establish a mismatch; temporal/basis checks
+    independently protect historical ranges.
+    """
+    if not dates or (max(dates) - min(dates)).days <= MAX_REBASE_GAP_DAYS:
+        return None
+    identities: list[str | None] = []
+    security_ids: list[tuple[str, str]] = []
+    for on in (min(dates), max(dates)):
+        rate_limiter.acquire()
+        details = client.get_single(
+            "ticker-details", path_params={"ticker": ticker}, params={"date": on.isoformat()},
+        )
+        if details is not None and not isinstance(details, dict):
+            raise ValueError("historical ticker identity provider returned a non-object response")
+        cik = (details or {}).get("cik")
+        identities.append(str(cik).lstrip("0") if cik and str(cik).isdecimal() else None)
+        figis = [
+            (details or {}).get(field)
+            for field in ("composite_figi", "share_class_figi")
+        ]
+        security_ids.append((
+            figis[0].strip() if isinstance(figis[0], str) else "",
+            figis[1].strip() if isinstance(figis[1], str) else "",
+        ))
+    old_cik, current_cik = identities
+    if old_cik and current_cik and old_cik != current_cik:
+        old_figis, current_figis = security_ids
+        if all(old_figis) and old_figis == current_figis:
+            return None
+        for correction in REVIEWED_IDENTITY_CORRECTIONS:
+            if (
+                ticker.upper() == correction.ticker
+                and (old_cik, current_cik) == (correction.old_cik, correction.current_cik)
+                and old_figis == (correction.old_composite_figi, correction.share_class_figi)
+                and current_figis == (
+                    correction.current_composite_figi, correction.share_class_figi,
+                )
+            ):
+                return None
+        if conn is not None:
+            for successor in REVIEWED_ISSUER_SUCCESSORS:
+                if (
+                    ticker.upper() == successor.ticker
+                    and (old_cik, current_cik) == (successor.old_cik, successor.current_cik)
+                    and old_figis == (
+                        successor.old_composite_figi, successor.old_share_class_figi,
+                    )
+                    and current_figis == (
+                        successor.current_composite_figi, successor.current_share_class_figi,
+                    )
+                    and min(dates) < successor.execution_date <= max(dates)
+                ):
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT split_from, split_to FROM stock_splits "
+                            "WHERE ticker = %s AND execution_date = %s",
+                            (successor.ticker, successor.execution_date),
+                        )
+                        conversion = cur.fetchone()
+                    if (
+                        conversion is not None
+                        and conversion[0] > 0 and conversion[1] > 0
+                        and Fraction(conversion[1], conversion[0]) == successor.share_ratio
+                    ):
+                        return None
+        return {
+            "old_cik": old_cik, "current_cik": current_cik,
+            "first_date": min(dates).isoformat(), "last_date": max(dates).isoformat(),
+        }
+    return None
+
+
+def recorded_basis_factor(conn, ticker: str, after: date, measured: Fraction) -> Fraction | None:
+    """Match a measured boundary change to one exact suffix of the split ledger."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT split_from, split_to FROM stock_splits "
+            "WHERE ticker = %s AND execution_date > %s AND execution_date <= CURRENT_DATE "
+            "ORDER BY execution_date DESC", (ticker, after),
+        )
+        candidates = {Fraction(1)}
+        cumulative = Fraction(1)
+        for split_from, split_to in cur.fetchall():
+            cumulative *= Fraction(split_to, split_from)
+            candidates.add(cumulative)
+    matched = [
+        factor for factor in candidates
+        if abs(Decimal((factor / measured).numerator) / (factor / measured).denominator - 1)
+        <= BASIS_RATIO_TOLERANCE
+    ]
+    return matched[0] if len(matched) == 1 else None
 
 
 def infer_basis_factor(
@@ -205,6 +328,7 @@ def plan_pre_horizon_rebases(
     already_adjusted: list[str] = []
     skipped: dict[str, str] = {}
     lower, upper = BASIS_CONTINUITY_BOUNDS
+    historical_lower, historical_upper = HISTORICAL_SPLIT_LIKE_BOUNDS
     for ticker in sorted(unreachable_by_ticker):
         tail_dates = unreachable_by_ticker[ticker]
         fetched = fetched_by_ticker.get(ticker, {})
@@ -214,7 +338,17 @@ def plan_pre_horizon_rebases(
             skipped[ticker] = "no stored date overlaps the provider window"
             continue
         tail_date = max(tail_dates)
-        stored = get_stored_price_rows(conn, ticker, [*probe_dates, tail_date])
+        continuous_dates = sorted([*tail_dates, probe_dates[0]])
+        if any(
+            (right - left).days > MAX_REBASE_GAP_DAYS
+            for left, right in zip(continuous_dates, continuous_dates[1:])
+        ):
+            skipped[ticker] = "historical trading gap requires issuer-identity reconciliation"
+            continue
+        stored = get_stored_price_rows(conn, ticker, [*probe_dates, *tail_dates])
+        if any(day not in stored for day in tail_dates):
+            skipped[ticker] = "pre-horizon history changed during planning"
+            continue
         boundary = stored.get(probe_dates[0])
         tail = stored.get(tail_date)
         if boundary is None or tail is None:
@@ -224,7 +358,34 @@ def plan_pre_horizon_rebases(
         if factor is None:
             skipped[ticker] = "provider re-basing at the horizon is not one consistent ratio"
             continue
+        factor = recorded_basis_factor(conn, ticker, probe_dates[0], factor)
+        if factor is None:
+            skipped[ticker] = "boundary ratio does not match one exact recorded split basis"
+            continue
+        try:
+            unapplied = get_unapplied_splits_in_range(conn, ticker, min(tail_dates), min(fetched))
+        except ValueError as exc:
+            skipped[ticker] = str(exc)
+            continue
+        # Screen older history for unexplained split-like steps, not ordinary
+        # volatility. A recorded, unambiguously raw split can explain a step;
+        # only the separately checked window boundary needs tight continuity.
+        mixed = False
+        for left, right in zip(continuous_dates, continuous_dates[1:]):
+            step = stored[right]["close"] / stored[left]["close"]
+            applicable = [ratio for day, ratio, _ in unapplied if left < day <= right]
+            for ratio in applicable:
+                step *= Decimal(ratio.numerator) / ratio.denominator
+            if not historical_lower < step < historical_upper:
+                mixed = True
+                break
+        if mixed:
+            skipped[ticker] = "unexplained pre-horizon discontinuity requires reconciliation"
+            continue
         continuity = tail["close"] / boundary["close"]
+        for execution_date, ratio, _ in unapplied:
+            if tail_date < execution_date <= probe_dates[0]:
+                continuity *= Decimal(ratio.denominator) / ratio.numerator
         if not lower <= continuity <= upper:
             skipped[ticker] = "pre-horizon rows already sit on a different basis than the boundary"
             continue
@@ -243,9 +404,7 @@ def plan_pre_horizon_rebases(
         # The boundary ratio covers splits after the horizon. A tail loaded
         # as-traded also still carries every split inside it as a raw step;
         # apply those to the rows before each one.
-        for execution_date, ratio, rows_before in get_unapplied_splits_in_range(
-            conn, ticker, min(tail_dates), horizon
-        ):
+        for execution_date, ratio, rows_before in unapplied:
             ticker_plans.append(
                 PreHorizonRebase(
                     ticker=ticker,
@@ -423,6 +582,13 @@ def refresh_split_adjusted_prices(
             return stats
 
         end_date = date.today()
+        from sawa.database.price_identity import get_identity_price_cutoffs
+
+        cutoffs = get_identity_price_cutoffs(conn, tickers)
+        start_dates = {
+            ticker: max(min(existing_dates[ticker]), cutoffs.get(ticker, earliest)).isoformat()
+            for ticker in tickers
+        }
         start_str = earliest.strftime(DATE_FORMAT)
         end_str = end_date.strftime(DATE_FORMAT)
 
@@ -437,6 +603,25 @@ def refresh_split_adjusted_prices(
             stats["tickers"] = tickers
             return stats
 
+        try:
+            conflicts = {
+                ticker: conflict for ticker in tickers
+                if (conflict := known_identity_conflict(
+                    client, ticker, existing_dates[ticker], rate_limiter, conn=conn,
+                )) is not None
+            }
+        except Exception as exc:
+            stats["error"] = "issuer-identity verification failed: " + redact_sensitive_text(exc)
+            logger.error(stats["error"])
+            return stats
+        if conflicts:
+            stats["identity_conflicts"] = conflicts
+            stats["error"] = (
+                "ticker reuse requires historical issuer quarantine before split repair"
+            )
+            logger.error(stats["error"])
+            return stats
+
         # Fetch adjusted prices for each ticker
         provider_stats: dict[str, Any] = {}
         prices = fetch_prices_via_api(
@@ -447,7 +632,25 @@ def refresh_split_adjusted_prices(
             logger,
             rate_limiter,
             stats=provider_stats,
+            start_dates=start_dates,
         )
+        # Keep this boundary even for injected/legacy fetchers which do not
+        # enforce their per-ticker request window. A different ticker's longer
+        # history must never reintroduce quarantined or earlier-issuer bars.
+        in_window = []
+        for price in prices:
+            ticker = str(price.get("ticker", "")).upper()
+            try:
+                session = date.fromisoformat(str(price.get("date")))
+                if ticker in start_dates and start_dates[ticker] <= session.isoformat() <= end_str:
+                    in_window.append(price)
+            except ValueError:
+                pass
+        excluded_window = len(prices) - len(in_window)
+        if excluded_window:
+            stats["excluded_out_of_window_rows"] = excluded_window
+            logger.warning("Excluded %d out-of-window adjusted price rows", excluded_window)
+        prices = in_window
         stats["provider"] = provider_stats
         stats["prices_fetched"] = len(prices)
         logger.info(f"Fetched {len(prices)} adjusted price records")
@@ -511,7 +714,8 @@ def refresh_split_adjusted_prices(
                 unreachable_by_ticker=unreachable_by_ticker,
             )
             planned_tickers = {plan.ticker for plan in rebase_plans}
-            stats["pre_horizon_dates_rebased"] = sum(
+            stats["pre_horizon_dates_rebased"] = 0
+            stats["pre_horizon_dates_planned"] = sum(
                 len(unreachable_by_ticker[ticker]) for ticker in planned_tickers
             )
             stats["pre_horizon_dates_already_adjusted"] = sum(
@@ -561,6 +765,12 @@ def refresh_split_adjusted_prices(
             logger.warning(stats["error"])
             return stats
 
+        if stats.get("pre_horizon_dates_not_adjusted"):
+            stats["degraded"] = True
+            stats["error"] = "unresolved historical price basis requires reconciliation"
+            logger.error(stats["error"])
+            return stats
+
         try:
             inserted = insert_prices(conn, prices, logger, commit=False)
         except Exception as e:
@@ -569,7 +779,7 @@ def refresh_split_adjusted_prices(
             stats["error"] = f"adjusted price persistence failed: {safe_error}"
             logger.error(stats["error"])
             return stats
-        stats["prices_updated"] = inserted
+        stats["prices_attempted"] = inserted
         logger.info(f"Upserted {inserted} adjusted price records")
         if inserted != len(prices):
             conn.rollback()
@@ -597,9 +807,20 @@ def refresh_split_adjusted_prices(
                 )
                 logger.error(stats["error"])
                 return stats
+        try:
+            # Refresh reads our staged price changes. Its successful commit
+            # lands the bars and extrema together; failure can roll both back.
+            refresh_52week_extremes_if_needed(conn, logger, prices_changed=True)
+        except Exception as exc:
+            conn.rollback()
+            stats["error"] = "52-week extremes refresh failed: " + redact_sensitive_text(exc)
+            logger.error(stats["error"])
+            return stats
         conn.commit()
-
+        stats["prices_updated"] = inserted
         stats["tickers_adjusted"] = len(fetched_tickers)
+        if "pre_horizon_dates_planned" in stats:
+            stats["pre_horizon_dates_rebased"] = stats["pre_horizon_dates_planned"]
         stats["success"] = True
 
     return stats

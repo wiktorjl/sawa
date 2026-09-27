@@ -4,6 +4,8 @@ import logging
 from datetime import date
 from unittest import mock
 
+import pytest
+
 from sawa import split_adjust
 
 
@@ -321,14 +323,7 @@ def test_missing_middle_history_date_prevents_any_write() -> None:
     insert.assert_not_called()
 
 
-def test_history_older_than_provider_window_still_adjusts_what_it_can() -> None:
-    """The provider serves a rolling window; older rows can never be re-based.
-
-    Treating that as incompleteness aborted the entire adjustment, so nothing
-    was re-based and the series stayed discontinuous at the split rather than
-    at the unreachable horizon. Rows the provider cannot serve are reported and
-    left untouched; the adjustable range is written.
-    """
+def test_unresolved_old_history_is_visible_and_never_blindly_rebased() -> None:
     prices = [
         {
             "ticker": "RCON",
@@ -373,6 +368,8 @@ def test_history_older_than_provider_window_still_adjusts_what_it_can() -> None:
         },
     ), mock.patch.object(
         split_adjust, "fetch_prices_via_api", side_effect=horizon_limited_fetch
+    ), mock.patch.object(
+        split_adjust, "known_identity_conflict", return_value=None
     ), mock.patch.object(split_adjust, "insert_prices", return_value=3) as insert:
         mpg.connect.return_value = _FakeConn()
         stats = split_adjust.refresh_split_adjusted_prices(
@@ -382,11 +379,12 @@ def test_history_older_than_provider_window_still_adjusts_what_it_can() -> None:
             logger=logging.getLogger(__name__),
         )
 
-    assert stats["success"] is True
+    assert stats["success"] is False
+    assert stats["degraded"] is True
     assert stats["pre_horizon_dates_not_adjusted"] == 2
     assert stats["provider_history_horizon"] == "2026-08-26"
     assert "missing_existing_price_dates" not in stats
-    insert.assert_called_once()
+    insert.assert_not_called()
 
 
 def test_no_blacklist_constant_remains() -> None:
@@ -451,6 +449,8 @@ def _stored_rows(*, tail_close: str = "596.24", boundary_scale: str = "40") -> d
         "close": Decimal(tail_close),
         "volume": Decimal("6761910"),
     }
+    for day in _TAIL[:-1]:
+        stored[day] = dict(stored[_TAIL[-1]])
     return stored
 
 
@@ -459,6 +459,8 @@ def _plan(stored: dict[date, dict], unapplied: list | None = None):
         split_adjust, "get_stored_price_rows", return_value=stored
     ), mock.patch.object(
         split_adjust, "get_unapplied_splits_in_range", return_value=unapplied or []
+    ), mock.patch.object(
+        split_adjust, "recorded_basis_factor", side_effect=lambda _c, _t, _d, factor: factor
     ):
         return split_adjust.plan_pre_horizon_rebases(
             object(),
@@ -514,13 +516,47 @@ def test_plan_reports_a_tail_already_on_the_provider_basis() -> None:
     assert skipped == {}
 
 
+@pytest.mark.parametrize("historical_step", ["1.44", "1.3032", "0.7625", "0.725"])
+def test_adjusted_tail_allows_large_historical_market_moves(historical_step: str) -> None:
+    stored = _stored_rows(boundary_scale="1", tail_close="14.906")
+    stored[_TAIL[0]]["close"] = stored[_TAIL[1]]["close"] / Decimal(historical_step)
+
+    plans, already, skipped = _plan(stored)
+
+    # A past daily move is not evidence for a new factor. Matching boundary
+    # prices and no unapplied ledger splits require no changes to this tail.
+    assert plans == []
+    assert already == ["NVDA"]
+    assert skipped == {}
+
+
+@pytest.mark.parametrize("historical_step", ["0.5", "2"])
+def test_adjusted_tail_still_rejects_unexplained_twofold_steps(historical_step: str) -> None:
+    stored = _stored_rows(boundary_scale="1", tail_close="14.906")
+    stored[_TAIL[0]]["close"] = stored[_TAIL[1]]["close"] / Decimal(historical_step)
+
+    plans, already, skipped = _plan(stored)
+
+    assert plans == []
+    assert already == []
+    assert "discontinuity" in skipped["NVDA"]
+
+
+def test_provider_boundary_keeps_tight_continuity_despite_wider_historical_screen() -> None:
+    plans, already, skipped = _plan(_stored_rows(boundary_scale="1", tail_close="20"))
+
+    assert plans == []
+    assert already == []
+    assert "different basis than the boundary" in skipped["NVDA"]
+
+
 def test_plan_skips_a_tail_that_is_discontinuous_with_the_boundary() -> None:
     # Boundary rows are as-traded (593.16) but the tail was already re-based
     # (14.906): applying the boundary ratio would push it 40x too low.
     plans, already, skipped = _plan(_stored_rows(tail_close="14.906"))
     assert plans == []
     assert already == []
-    assert "different basis" in skipped["NVDA"]
+    assert "discontinuity" in skipped["NVDA"]
 
 
 def test_plan_skips_when_the_provider_ratio_is_not_consistent() -> None:
@@ -649,6 +685,8 @@ def _refresh_with_pre_horizon_tail(*, rebase_rowcount: int) -> tuple[dict, _Fake
     ), mock.patch.object(
         split_adjust, "get_unapplied_splits_in_range", return_value=[]
     ), mock.patch.object(
+        split_adjust, "recorded_basis_factor", side_effect=lambda _c, _t, _d, factor: factor
+    ), mock.patch.object(
         split_adjust, "fetch_prices_via_api", side_effect=horizon_limited_fetch
     ), mock.patch.object(
         split_adjust, "insert_prices", return_value=len(fetched)
@@ -685,5 +723,94 @@ def test_refresh_rolls_back_when_the_rebase_touches_an_unexpected_row_count() ->
     assert stats["success"] is False
     assert "touched 2/3" in stats["error"]
     rebase.assert_called_once()
+    assert conn.commits == 0
+    assert conn.rollbacks == 1
+
+
+@pytest.mark.parametrize("older_close", ["14.90", "298.12"])
+def test_mixed_older_price_bases_are_not_scaled_by_the_boundary_ratio(older_close: str) -> None:
+    stored = _stored_rows()
+    stored[_TAIL[0]] = {**stored[_TAIL[0]], "close": Decimal(older_close)}
+    plans, already, skipped = _plan(stored)
+    assert plans == [] and already == []
+    assert "discontinuity" in skipped["NVDA"]
+
+
+@pytest.mark.parametrize(
+    ("ledger", "measured", "expected"),
+    [
+        ([(1, 10), (1, 4)], Fraction(400001, 10000), Fraction(40)),
+        ([(2, 3)], Fraction(3, 2), Fraction(3, 2)),
+        ([(2, 3)], Fraction(7, 5), None),
+        ([], Fraction(40), None),
+        ([(1000, 1001)], Fraction(1), None),  # two indistinguishable candidates
+    ],
+)
+def test_boundary_rebase_requires_one_exact_recorded_split_basis(
+    ledger: list[tuple], measured: Fraction, expected: Fraction | None,
+) -> None:
+    conn = mock.MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchall.return_value = ledger
+    assert split_adjust.recorded_basis_factor(conn, "NVDA", _HORIZON, measured) == expected
+
+
+def test_small_split_and_real_price_move_are_not_guessed_from_proximity() -> None:
+    with pytest.raises(ValueError, match="uniquely establish"):
+        split_adjust.raw_split_jump_present(Decimal("10"), Decimal("8"), Fraction(3, 2))
+
+
+def test_known_reused_ticker_is_rejected_before_price_fetch_or_writes() -> None:
+    client = mock.Mock()
+    client.get_single.side_effect = [
+        {"ticker": "DFNS", "cik": "0001777946"},
+        {"ticker": "DFNS", "cik": "0001787518"},
+    ]
+    conn = _FakeConn()
+    with (
+        mock.patch.object(split_adjust.psycopg, "connect", return_value=conn),
+        mock.patch.object(split_adjust, "PolygonClient", return_value=client),
+        mock.patch.object(split_adjust, "SyncRateLimiter"),
+        mock.patch.object(split_adjust, "get_earliest_price_date", return_value=date(2021, 2, 18)),
+        mock.patch.object(split_adjust, "get_existing_price_dates", return_value={
+            "DFNS": {date(2021, 2, 18), date(2026, 9, 25)},
+        }),
+        mock.patch.object(split_adjust, "fetch_prices_via_api") as fetch,
+        mock.patch.object(split_adjust, "insert_prices") as insert,
+    ):
+        stats = split_adjust.refresh_split_adjusted_prices(
+            "key", "unused", ["DFNS"], logger=logging.getLogger(__name__),
+        )
+    assert stats["success"] is False
+    assert stats["identity_conflicts"]["DFNS"]["old_cik"] == "1777946"
+    assert "ticker reuse" in stats["error"]
+    fetch.assert_not_called()
+    insert.assert_not_called()
+    assert conn.commits == 0
+
+
+def test_identity_check_accepts_same_cik_with_different_zero_padding() -> None:
+    client = mock.Mock()
+    client.get_single.side_effect = [{"cik": "0001787518"}, {"cik": "1787518"}]
+    assert split_adjust.known_identity_conflict(
+        client, "DFNS", {date(2026, 2, 9), date(2026, 9, 25)}, mock.Mock(),
+    ) is None
+
+
+def test_split_repair_refreshes_same_date_extrema() -> None:
+    with mock.patch.object(split_adjust, "refresh_52week_extremes_if_needed") as refresh:
+        stats, conn, _ = _refresh_with_pre_horizon_tail(rebase_rowcount=3)
+    assert stats["success"] is True
+    assert refresh.call_args.args[0] is conn
+    assert refresh.call_args.kwargs == {"prices_changed": True}
+
+
+def test_failed_extrema_refresh_rolls_back_price_repair() -> None:
+    with mock.patch.object(
+        split_adjust, "refresh_52week_extremes_if_needed", side_effect=RuntimeError("view failed"),
+    ):
+        stats, conn, _ = _refresh_with_pre_horizon_tail(rebase_rowcount=3)
+    assert stats["success"] is False
+    assert stats["prices_updated"] == 0
+    assert stats["pre_horizon_dates_rebased"] == 0
     assert conn.commits == 0
     assert conn.rollbacks == 1

@@ -223,3 +223,14 @@ def test_as_is_restores_unchanged_only_without_a_later_split() -> None:
     )
     assert refused.restore is None
     assert refused.reason.startswith("refused --as-is: 1 recorded split(s)")
+
+
+def test_identity_archive_cannot_be_restored_by_as_is_override() -> None:
+    # ARCHIVED_ROWS excludes identity_mismatch rows, even when --as-is is used.
+    conn = _conn(archived=[], boundary=None, splits=[])
+    decision = restore.decide(
+        conn, "DFNS", 133, date(2021, 2, 18), date(2021, 8, 26), date(2026, 2, 9),
+        as_is=True,
+    )
+    assert decision.restore is None
+    assert "identity quarantines" in decision.reason

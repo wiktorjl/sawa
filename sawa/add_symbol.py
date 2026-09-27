@@ -361,7 +361,12 @@ def fetch_and_insert_prices(
             else "Price history returned no rows"
         )
         raise ProviderError(message, provider="polygon")
-    return insert_prices(conn, prices, logger)
+    persisted = insert_prices(conn, prices, logger)
+    if not persisted:
+        raise ProviderError(
+            "Price history contained no eligible current-issuer rows", provider="polygon"
+        )
+    return persisted
 
 
 def run_add_symbols(

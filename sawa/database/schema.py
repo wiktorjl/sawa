@@ -120,6 +120,7 @@ REQUIRED_SCHEMA_FILENAMES = frozenset(
         "46_dividend_identity.sql",
         "47_widen_indicator_overflow_headroom.sql",
         "48_widen_price_for_compounded_reverse_splits.sql",
+        "49_widen_split_ratio_precision.sql",
     }
 )
 

@@ -34,6 +34,21 @@ def test_stock_character_tables_cascade_with_companies_on_fresh_schema() -> None
     ) == 4
 
 
+def test_fractional_split_storage_is_exact_bigint_and_upgrade_only_widens() -> None:
+    fresh = _read("18_corporate_actions.sql")
+    migration = _read("49_widen_split_ratio_precision.sql")
+
+    assert "split_from BIGINT NOT NULL" in fresh
+    assert "split_to BIGINT NOT NULL" in fresh
+    assert "ARRAY['split_from', 'split_to']" in migration
+    assert "ALTER TABLE public.stock_splits ALTER COLUMN %I TYPE BIGINT" in migration
+    assert "pg_catalog.int8'::pg_catalog.regtype THEN\n            CONTINUE;" in migration
+    assert "pg_catalog.int2" in migration and "pg_catalog.int4" in migration
+    assert "RAISE EXCEPTION" in migration
+    assert "pg_catalog.to_regclass('public.stock_splits')" in migration
+    assert "FROM pg_catalog.pg_attribute" in migration
+
+
 def test_stock_character_existing_tables_get_future_safe_foreign_keys() -> None:
     sql = _read("33_schema_integrity_and_time_semantics.sql")
 

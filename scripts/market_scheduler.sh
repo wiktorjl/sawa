@@ -23,6 +23,7 @@ LOG_FILE="$STATE_DIR/scheduler.log"
 # .env in setup_env to make it available to the child process.
 DAILY_WAIT_HOURS=1  # hours after close before running daily
 INTRADAY_STOP_TIMEOUT=60  # seconds to wait for graceful shutdown
+INTRADAY_DRAIN_SECONDS=1800  # 15-min delayed feed + 15-min correction horizon
 # A daily/weekly that fails (job or doctor) is retried on every closed-market
 # evening tick; without a cap an unfixable doctor FAIL re-ran the 75-minute
 # daily back-to-back until midnight (2026-08-31: 7 attempts). Per-date cap.
@@ -464,6 +465,7 @@ allowed = {
     "POLYGON_S3_ACCESS_KEY",
     "POLYGON_S3_SECRET_KEY",
     "SAWA_HEARTBEAT_URL",
+    "SAWA_LOG_RETENTION_DAYS",
     "SAWA_NOTIFIER",
     "SAWA_TICK_HEARTBEAT_URL",
     "SAWA_WATCHDOG_HEARTBEAT_URL",
@@ -683,7 +685,9 @@ start_intraday() {
     # sawa intraday already writes rotating logs to $PROJECT_DIR/logs (see
     # --log-dir). Capturing stdout/stderr separately here just produces an
     # unrotated duplicate that fills the disk (incident 2026-06-04).
-    sawa intraday --log-dir "$PROJECT_DIR/logs" >/dev/null 2>&1 9>&- &
+    rm -f "$STATE_DIR/intraday.exit" "$STATE_DIR/intraday_closed_since"
+    SAWA_INTRADAY_EXIT_FILE="$STATE_DIR/intraday.exit" \
+        sawa intraday --log-dir "$PROJECT_DIR/logs" >/dev/null 2>&1 9>&- &
     local pid=$!
     local start_token="" identity_ready=false
     for _attempt in {1..20}; do
@@ -727,8 +731,8 @@ stop_intraday() {
     local pid="$INTRADAY_PID" start_token="$INTRADAY_START_TOKEN"
     log "Stopping intraday (PID $pid)..."
 
-    # Graceful shutdown via SIGINT
-    kill -INT "$pid" 2>/dev/null || true
+    # Python explicitly handles both signals, including background SIGINT ignore.
+    kill -TERM "$pid" 2>/dev/null || true
 
     # Wait for process to exit
     local waited=0
@@ -742,8 +746,10 @@ stop_intraday() {
     done
 
     # Force kill if still running
+    local forced=false
     if intraday_identity_matches "$pid" "$start_token"; then
-        log "WARN: Intraday did not exit gracefully, sending SIGKILL"
+        forced=true
+        log "ERROR: Intraday did not exit gracefully, sending SIGKILL"
         kill -9 "$pid" 2>/dev/null || true
     fi
 
@@ -753,8 +759,40 @@ stop_intraday() {
     local start_time stop_time
     start_time=$(cat "$STATE_DIR/intraday_start_time" 2>/dev/null || echo "unknown")
     stop_time=$(cat "$STATE_DIR/intraday_stop_time")
-    log "Intraday stopped at $stop_time (started $start_time)"
-    notify "Sawa Intraday Stopped" "Intraday stopped at $stop_time (ran $start_time — $stop_time)"
+    local result=""
+    if [ -f "$STATE_DIR/intraday.exit" ]; then
+        IFS= read -r result < "$STATE_DIR/intraday.exit" || true
+    fi
+    if [ "$forced" = true ] || [ "$result" != 0 ]; then
+        log "ERROR: Intraday ended without a successful final persistence result"
+        local exit_code=128  # missing/invalid status: the job could not report it
+        if [ "$forced" = true ]; then
+            exit_code=137
+        elif [ "$result" = 1 ]; then
+            exit_code=1  # monitored_run already sent the detailed failure alert
+        fi
+        notify_unreported_failure "$exit_code" "Sawa Intraday FAILED" \
+            "Intraday stopped at $stop_time without confirmed final persistence (forced=$forced, result=${result:-missing}); inspect intraday logs."
+        return 1
+    fi
+    log "Intraday stopped successfully at $stop_time (started $start_time)"
+    notify "Sawa Intraday Stopped" "Intraday persisted its final bars and stopped at $stop_time (ran $start_time — $stop_time)"
+}
+
+intraday_drain_complete() {
+    # Start the drain clock when the provider first reports the regular session
+    # closed. This follows early/unscheduled closes instead of assuming 16:00.
+    # A delayed cron tick only extends the drain; it never shortens it.
+    local now closed_since=""
+    now=$(date '+%s')
+    if [ -f "$STATE_DIR/intraday_closed_since" ]; then
+        IFS= read -r closed_since < "$STATE_DIR/intraday_closed_since" || true
+    fi
+    if ! [[ "$closed_since" =~ ^[0-9]+$ ]]; then
+        closed_since="$now"
+        printf '%s\n' "$closed_since" > "$STATE_DIR/intraday_closed_since"
+    fi
+    [ "$((now - closed_since))" -ge "$INTRADAY_DRAIN_SECONDS" ]
 }
 
 # ── Retry cap ────────────────────────────────────────────────────────────────
@@ -827,7 +865,7 @@ run_weekly() {
     fi
 
     # Mark weekly as done
-    touch "$STATE_DIR/weekly_done_$week"
+    touch "$STATE_DIR/weekly_done_$week" || return 1
 
     local start_time end_time
     start_time=$(cat "$STATE_DIR/weekly_start_time")
@@ -839,6 +877,76 @@ run_weekly() {
     # Clean up old flag files (keep last 8 weeks)
     find "$STATE_DIR" -name "weekly_done_*" -mtime +60 -delete 2>/dev/null || true
     find "$STATE_DIR" -name "weekly_attempts_*" -mtime +60 -delete 2>/dev/null || true
+}
+
+# Fundamentals, universe onboarding and earnings have independent completion
+# markers, so an unrelated daily/weekly failure cannot suppress maintenance.
+is_maintenance_done_this_week() {
+    local week
+    week=$(TZ=America/New_York date '+%G-W%V')
+    [ -f "$STATE_DIR/maintenance_done_$week" ]
+}
+
+run_maintenance() {
+    local week exit_code=0
+    week=$(TZ=America/New_York date '+%G-W%V')
+    if job_attempts_exhausted maintenance "$week"; then
+        return 0
+    fi
+    log "Starting sawa maintenance..."
+    sawa maintenance --log-dir "$PROJECT_DIR/logs" \
+        >/dev/null 2>&1 || exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        log "ERROR: sawa maintenance failed (exit $exit_code)"
+        notify_unreported_failure "$exit_code" "Sawa Maintenance FAILED" \
+            "sawa maintenance exited with code $exit_code"
+        return 1
+    fi
+    if ! run_doctor quarterly; then
+        return 1
+    fi
+    touch "$STATE_DIR/maintenance_done_$week" || return 1
+    log "Maintenance completed for $week"
+    notify "Sawa Maintenance Complete" "Universe, fundamentals and earnings updated for $week"
+    find "$STATE_DIR" -name 'maintenance_done_*' -mtime +60 -delete 2>/dev/null || true
+    find "$STATE_DIR" -name 'maintenance_attempts_*' -mtime +60 -delete 2>/dev/null || true
+}
+
+start_maintenance() {
+    # Maintenance can span thousands of onboarding/financial/earnings requests.
+    # Its own lock prevents duplicate workers without holding the market-control
+    # lock overnight and starving the next session's intraday start/stop ticks.
+    (
+        trap - EXIT
+        exec 9>&-
+        exec 8>"$STATE_DIR/maintenance.lock"
+        local lock_rc=0
+        flock -n 8 || lock_rc=$?
+        if [ "$lock_rc" -eq 1 ]; then
+            exit 0
+        elif [ "$lock_rc" -ne 0 ]; then
+            log "ERROR: Could not acquire maintenance lock (exit $lock_rc)"
+            notify "Sawa Maintenance FAILED" "Could not acquire maintenance worker lock" error
+            exit 1
+        fi
+        if is_maintenance_done_this_week; then
+            exit 0
+        fi
+        if ! evening_jobs_allowed; then
+            log "Maintenance deferred: evening launch window ended"
+            exit 0
+        fi
+        run_maintenance
+    ) </dev/null >/dev/null 2>&1 &
+    log "Maintenance worker launched (PID $!)"
+}
+
+evening_jobs_allowed() {
+    # Re-read time after each potentially long predecessor. The status/hour
+    # sampled at the beginning of a tick cannot authorize a next-morning job.
+    local hour
+    hour=$(TZ=America/New_York date '+%-H')
+    [ "$hour" -ge "$((16 + DAILY_WAIT_HOURS))" ]
 }
 
 # ── Daily job ────────────────────────────────────────────────────────────────
@@ -892,7 +1000,7 @@ run_daily() {
     fi
 
     # Mark daily as done
-    touch "$STATE_DIR/daily_done_$today"
+    touch "$STATE_DIR/daily_done_$today" || return 1
 
     # Build summary
     local summary
@@ -978,6 +1086,7 @@ main() {
     local et_time
     et_time=$(TZ=America/New_York date '+%H:%M ET')
     local action_taken=false
+    local tick_exit=0
 
     log "Scheduler tick — market: $status, time: $et_time"
     SCHEDULER_STAGE="tick"
@@ -988,19 +1097,28 @@ main() {
     heartbeat "${SAWA_TICK_HEARTBEAT_URL:-}"
 
     if [ "$status" = "open" ]; then
+        rm -f "$STATE_DIR/intraday_closed_since"
         # Market is open: ensure intraday is running
         if is_intraday_running; then
             log "Intraday: already running (PID $(cat "$STATE_DIR/intraday.pid"))"
         else
-            start_intraday
+            start_intraday || tick_exit=1
             action_taken=true
         fi
     else
         # Market is closed
         # Stop intraday if still running
         if is_intraday_running; then
-            stop_intraday
-            action_taken=true
+            if intraday_drain_complete; then
+                stop_intraday || tick_exit=1
+                action_taken=true
+            else
+                log "Intraday: draining delayed bars and corrections after session close"
+                # EOD cleanup must follow the final intraday write. Long batch
+                # jobs also hold the scheduler lock, preventing the next drain
+                # tick from stopping the streamer if they were started now.
+                return "$tick_exit"
+            fi
         fi
 
         # Run daily after market close + wait period
@@ -1013,7 +1131,7 @@ main() {
         elif is_daily_done_today; then
             log "Daily: already completed today"
         else
-            run_daily
+            run_daily || tick_exit=1
             action_taken=true
         fi
 
@@ -1024,12 +1142,16 @@ main() {
         # per-week weekly_done flag; the in-job get_last_date backfill makes a
         # later catch-up correct. Gated on $close_hour so it doesn't fire
         # mid-session on a closed-but-early tick (e.g. a holiday morning).
-        if [ "$hour" -lt "$close_hour" ]; then
+        if ! evening_jobs_allowed; then
             : # too early for the weekly job too; wait for the evening tick
         elif is_weekly_done_this_week; then
             log "Weekly: already completed this week"
         else
-            run_weekly
+            run_weekly || tick_exit=1
+            action_taken=true
+        fi
+        if evening_jobs_allowed && ! is_maintenance_done_this_week; then
+            start_maintenance || tick_exit=1
             action_taken=true
         fi
     fi
@@ -1037,6 +1159,7 @@ main() {
     if [ "$action_taken" = false ]; then
         log "No action needed"
     fi
+    return "$tick_exit"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

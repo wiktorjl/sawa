@@ -20,6 +20,11 @@ from psycopg import sql
 
 from sawa.api.client import PolygonClient
 from sawa.database.news import NewsLoadResult, fetch_news_for_symbols
+from sawa.database.price_identity import (
+    filter_identity_price_rows,
+    get_identity_price_cutoffs,
+    price_precedes_identity_cutoff,
+)
 from sawa.domain.corporate_actions import SplitAdjuster
 from sawa.domain.price_validation import (
     is_plausible_daily_price_date,
@@ -52,6 +57,7 @@ class PersistenceResult(int):
     source_rows: int
     eligible_rows: int
     skipped_rows: int
+    excluded_identity_rows: int
 
     def __new__(
         cls,
@@ -62,6 +68,7 @@ class PersistenceResult(int):
         source_rows: int,
         eligible_rows: int,
         skipped_rows: int = 0,
+        excluded_identity_rows: int = 0,
     ) -> PersistenceResult:
         result = super().__new__(cls, inserted)
         result.table = table
@@ -69,6 +76,7 @@ class PersistenceResult(int):
         result.source_rows = source_rows
         result.eligible_rows = eligible_rows
         result.skipped_rows = skipped_rows
+        result.excluded_identity_rows = excluded_identity_rows
         return result
 
     @property
@@ -96,6 +104,7 @@ class PersistenceResult(int):
             "eligible_rows": self.eligible_rows,
             "inserted_rows": int(self),
             "skipped_rows": self.skipped_rows,
+            "excluded_identity_rows": self.excluded_identity_rows,
             "failed_rows": self.failed_rows,
             "fully_persisted": self.fully_persisted,
         }
@@ -119,11 +128,13 @@ def require_complete_persistence(
         raise RuntimeError(
             f"{result.table} persisted {int(result)}/{result.source_rows} source row(s)"
         )
-    if expected_rows is not None and int(result) != expected_rows:
+    if expected_rows is not None and int(result) != expected_rows - result.excluded_identity_rows:
         raise RuntimeError(
             f"{result.table} persisted {int(result)}/{expected_rows} expected row(s)"
         )
-    if require_nonempty and (result.source_rows == 0 or int(result) == 0):
+    if require_nonempty and (
+        result.source_rows == 0 or (int(result) == 0 and not result.excluded_identity_rows)
+    ):
         raise RuntimeError(f"{result.table} artifact persisted no rows")
 
 
@@ -181,6 +192,7 @@ def load_csv_to_table(
     valid_tickers: set[str] | None = None,
     strict: bool = False,
     row_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    identity_cutoffs: dict[str, date] | None = None,
 ) -> PersistenceResult:
     """
     Load CSV file into PostgreSQL table.
@@ -219,6 +231,9 @@ def load_csv_to_table(
     source_rows = 0
     skipped_rows = 0
     rejected_market_internal_rows = 0
+    excluded_identity_rows = 0
+    if table_name == "stock_prices" and identity_cutoffs is None:
+        identity_cutoffs = get_identity_price_cutoffs(conn)
 
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -252,6 +267,11 @@ def load_csv_to_table(
                     skipped_rows += 1
                     continue
 
+            if table_name == "stock_prices" and price_precedes_identity_cutoff(
+                mapped_row, identity_cutoffs or {},
+            ):
+                excluded_identity_rows += 1
+                continue
             if row_transform is not None:
                 mapped_row = row_transform(mapped_row)
             rows.append(mapped_row)
@@ -278,6 +298,10 @@ def load_csv_to_table(
             "during eligibility filtering"
         )
 
+    if excluded_identity_rows:
+        log.warning(
+            "  Excluded %d quarantined obsolete-issuer price rows", excluded_identity_rows
+        )
     if not rows:
         log.warning(f"No data in {csv_path}")
         return PersistenceResult(
@@ -287,6 +311,7 @@ def load_csv_to_table(
             source_rows=source_rows,
             eligible_rows=0,
             skipped_rows=skipped_rows,
+            excluded_identity_rows=excluded_identity_rows,
         )
 
     db_columns = list(column_mapping.values())
@@ -298,6 +323,7 @@ def load_csv_to_table(
         upsert,
         log,
         strict=effective_strict,
+        **({"identity_cutoffs": identity_cutoffs} if table_name == "stock_prices" else {}),
     )
     if effective_strict and inserted != len(rows):
         raise RuntimeError(
@@ -310,6 +336,7 @@ def load_csv_to_table(
         source_rows=source_rows,
         eligible_rows=len(rows),
         skipped_rows=skipped_rows,
+        excluded_identity_rows=excluded_identity_rows,
     )
 
 
@@ -322,6 +349,7 @@ def _insert_rows(
     log: logging.Logger | None = None,
     coalesce_columns: list[str] | None = None,
     strict: bool = False,
+    identity_cutoffs: dict[str, date] | None = None,
 ) -> int:
     """Insert rows into table with optional upsert.
 
@@ -339,6 +367,14 @@ def _insert_rows(
     log = log or logger
     if not rows:
         return 0
+
+    if table_name == "stock_prices":
+        cutoffs = identity_cutoffs
+        if cutoffs is None:
+            cutoffs = get_identity_price_cutoffs(conn, {str(row["ticker"]) for row in rows})
+        _, excluded = filter_identity_price_rows(rows, cutoffs)
+        if excluded:
+            raise ValueError("Refusing direct insertion of quarantined obsolete-issuer prices")
 
     coalesce_set = set(coalesce_columns or [])
 
@@ -620,6 +656,8 @@ def load_prices(
     total = 0
     source_rows = 0
     eligible_rows = 0
+    excluded_identity_rows = 0
+    identity_cutoffs = get_identity_price_cutoffs(conn)
     for i, csv_file in enumerate(csv_files, 1):
         count = load_csv_to_table(
             conn,
@@ -632,11 +670,13 @@ def load_prices(
             row_transform=(
                 split_adjuster.adjust_row if split_adjuster is not None else None
             ),
+            identity_cutoffs=identity_cutoffs,
         )
         require_complete_persistence(count, require_nonempty=True)
         total += count
         source_rows += count.source_rows
         eligible_rows += count.eligible_rows
+        excluded_identity_rows += count.excluded_identity_rows
         if i % 50 == 0:
             log.info(f"  Processed {i}/{len(csv_files)} symbol files")
 
@@ -647,6 +687,7 @@ def load_prices(
         artifact_found=True,
         source_rows=source_rows,
         eligible_rows=eligible_rows,
+        excluded_identity_rows=excluded_identity_rows,
     )
 
 

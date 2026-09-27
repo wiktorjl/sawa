@@ -58,11 +58,16 @@ INTERNAL_BOUNDS = (Decimal("0.34"), Decimal("3"))
 ARCHIVED_TICKERS = """
 SELECT ticker, count(*), min(date), max(date), max(stale_basis_cutoff)
 FROM stock_prices_unadjustable_archive
+WHERE COALESCE(to_jsonb(stock_prices_unadjustable_archive)->>'archive_reason', 'split_basis')
+      = 'split_basis'
 GROUP BY ticker ORDER BY ticker
 """
 ARCHIVED_ROWS = """
 SELECT date, open, high, low, close, volume
-FROM stock_prices_unadjustable_archive WHERE ticker = %s ORDER BY date
+FROM stock_prices_unadjustable_archive WHERE ticker = %s
+AND COALESCE(to_jsonb(stock_prices_unadjustable_archive)->>'archive_reason', 'split_basis')
+    = 'split_basis'
+ORDER BY date
 """
 BOUNDARY_ROW = """
 SELECT date, close FROM stock_prices
@@ -74,7 +79,14 @@ FROM stock_splits WHERE ticker = %s ORDER BY execution_date
 """
 INSERT_ROW = """
 INSERT INTO stock_prices (ticker, date, open, high, low, close, volume)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+SELECT proposed.* FROM (VALUES (%s, %s::date, %s, %s, %s, %s, %s))
+    AS proposed(ticker, date, open, high, low, close, volume)
+WHERE NOT EXISTS (
+    SELECT 1 FROM public.stock_prices_unadjustable_archive a
+    WHERE a.ticker = proposed.ticker
+      AND pg_catalog.to_jsonb(a)->>'archive_reason' = 'identity_mismatch'
+      AND proposed.date < a.stale_basis_cutoff
+)
 ON CONFLICT (ticker, date) DO NOTHING
 """
 DELETE_ARCHIVED = """
@@ -197,6 +209,11 @@ def decide(
         {"ticker": ticker, "date": d, "open": o, "high": h, "low": lo, "close": c, "volume": v}
         for d, o, h, lo, c, v in conn.execute(ARCHIVED_ROWS, (ticker,)).fetchall()
     ]
+    if not archived:
+        return Decision(
+            ticker, archived_rows, first_date, last_date, None,
+            "no split-basis archive rows; identity quarantines require issuer-aware restoration",
+        )
     boundary = conn.execute(BOUNDARY_ROW, (ticker, cutoff)).fetchone()
     if boundary is None:
         return Decision(

@@ -75,6 +75,33 @@ def test_intraday_runner_rejects_stop_without_any_accepted_bar() -> None:
     assert "without accepting" in stats["error"]
 
 
+def test_intraday_runner_rejects_unfinished_history_even_after_live_recovery() -> None:
+    client = _stream_client(minute_events_accepted=10)
+    client.history_recovery_pending = True
+    stats = _run_with_client(client)
+    assert stats["success"] is False
+    assert "historical intraday reconciliation is incomplete" in stats["error"]
+
+
+def test_intraday_exit_file_reports_failure_after_pending_history(tmp_path, monkeypatch) -> None:
+    status_file = tmp_path / "intraday.exit"
+    monkeypatch.setenv("SAWA_INTRADAY_EXIT_FILE", str(status_file))
+    client = _stream_client(minute_events_accepted=10)
+    client.history_recovery_pending = True
+    _run_with_client(client)
+    assert status_file.read_text() == "1\n"
+    assert status_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_intraday_exit_file_reports_success_after_final_stream_return(
+    tmp_path, monkeypatch
+) -> None:
+    status_file = tmp_path / "intraday.exit"
+    monkeypatch.setenv("SAWA_INTRADAY_EXIT_FILE", str(status_file))
+    _run_with_client(_stream_client(minute_events_accepted=10))
+    assert status_file.read_text() == "0\n"
+
+
 def test_intraday_runner_rejects_stream_with_only_invalid_minute_events() -> None:
     stats = _run_with_client(
         _stream_client(

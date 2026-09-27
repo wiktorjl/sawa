@@ -313,6 +313,10 @@ def insert_prices(
     if not prices:
         return 0
 
+    from sawa.database.load import PersistenceResult
+    from sawa.database.price_identity import filter_identity_price_rows, get_identity_price_cutoffs
+
+    source_rows = len(prices)
     valid = [p for p in prices if _is_valid_price_row(p)]
     skipped = len(prices) - len(valid)
     if skipped:
@@ -322,7 +326,15 @@ def insert_prices(
         )
     prices = valid
     if not prices:
-        return 0
+        return PersistenceResult(
+            0, table="stock_prices", artifact_found=True, source_rows=source_rows,
+            eligible_rows=0, skipped_rows=skipped,
+        )
+
+    cutoffs = get_identity_price_cutoffs(conn, {str(row["ticker"]) for row in prices})
+    prices, excluded = filter_identity_price_rows(prices, cutoffs)
+    if excluded:
+        logger.warning("  Excluded %d quarantined obsolete-issuer price rows", excluded)
 
     query = sql.SQL("""
         INSERT INTO stock_prices (ticker, date, open, high, low, close, volume)
@@ -369,10 +381,44 @@ def insert_prices(
             conn.rollback()
         raise
 
-    return inserted
+    return PersistenceResult(
+        inserted, table="stock_prices", artifact_found=True, source_rows=source_rows,
+        eligible_rows=len(prices), skipped_rows=skipped, excluded_identity_rows=excluded,
+    )
 
 
-def refresh_52week_extremes_if_needed(conn, logger: logging.Logger) -> bool:
+def refresh_treasury_yields(api_key: str, database_url: str, logger: logging.Logger) -> int:
+    """Refresh the daily-cadence series without replaying other weekly CSVs."""
+    from tempfile import TemporaryDirectory
+
+    from sawa.database.load import load_economy, require_complete_persistence
+    from sawa.weekly import download_economy
+
+    end = get_market_date()
+    with psycopg.connect(database_url) as conn:
+        last = get_last_date(conn, "treasury_yields")
+    start = min(last or end - timedelta(days=365), end - timedelta(days=30))
+    with TemporaryDirectory(prefix="sawa-treasury-") as tmp:
+        directory = Path(tmp)
+        with PolygonClient(api_key, logger) as client:
+            downloaded = download_economy(
+                client, start.isoformat(), end.isoformat(), directory, logger,
+                endpoints={"treasury-yields"},
+            )
+        if "treasury_yields" not in downloaded.artifacts:
+            raise RuntimeError("Treasury refresh did not produce a fresh artifact")
+        with psycopg.connect(database_url) as conn:
+            loaded = load_economy(conn, directory, logger, only_tables={"treasury_yields"})
+            result = loaded["treasury_yields"]
+            require_complete_persistence(
+                result, expected_rows=downloaded["treasury-yields"], require_nonempty=True
+            )
+            return int(result)
+
+
+def refresh_52week_extremes_if_needed(
+    conn, logger: logging.Logger, *, prices_changed: bool = False
+) -> bool:
     """Refresh the 52-week extremes materialized view when it lags prices.
 
     Args:
@@ -400,7 +446,11 @@ def refresh_52week_extremes_if_needed(conn, logger: logging.Logger) -> bool:
             logger.info("No stock price data found - skipping 52-week extremes refresh")
             return False
 
-        if latest_extremes_date is not None and latest_extremes_date >= latest_price_date:
+        if (
+            not prices_changed
+            and latest_extremes_date is not None
+            and latest_extremes_date >= latest_price_date
+        ):
             logger.info("52-week extremes materialized view is up to date")
             return False
 
@@ -787,18 +837,31 @@ def run_daily(
                 pending_ta_recompute_from: dict[str, date] = {}
                 with psycopg.connect(database_url) as conn:
                     inserted = insert_prices(conn, prices, logger, commit=False)
+                    excluded_identity_rows = getattr(inserted, "excluded_identity_rows", 0)
+                    stats["prices_excluded_identity_rows"] = excluded_identity_rows
+                    persisted_prices = prices
+                    if excluded_identity_rows:
+                        from sawa.database.price_identity import (
+                            filter_identity_price_rows,
+                            get_identity_price_cutoffs,
+                        )
+
+                        persisted_prices, _ = filter_identity_price_rows(
+                            prices, get_identity_price_cutoffs(conn, symbols)
+                        )
 
                     if prices:
-                        if inserted != len(prices):
+                        if inserted != len(persisted_prices):
                             stats["prices_error"] = (
-                                f"persisted only {inserted}/{len(prices)} valid price rows"
+                                f"persisted only {inserted}/"
+                                f"{len(persisted_prices)} eligible price rows"
                             )
                         else:
                             # Any upsert in the overlap can fill a gap or revise
                             # an old close. Recompute this ticker's TA from its
                             # earliest actually persisted date, not merely from
                             # the latest previously calculated TA row.
-                            for price in prices:
+                            for price in persisted_prices:
                                 ticker = str(price["ticker"])
                                 price_date = date.fromisoformat(str(price["date"]))
                                 current = pending_ta_recompute_from.get(ticker)
@@ -927,7 +990,7 @@ def run_daily(
             try:
                 with psycopg.connect(database_url) as conn:
                     stats["52week_extremes_refreshed"] = refresh_52week_extremes_if_needed(
-                        conn, logger
+                        conn, logger, prices_changed=True
                     )
             except psycopg.Error as e:
                 safe_error = f"{type(e).__name__}: {redact_sensitive_text(e)}"
@@ -1190,7 +1253,7 @@ def run_daily(
                     logger.info("Fetching same-day VIX/VIX3M from CBOE...")
                     try:
                         with CboeClient(logger) as cboe_client:
-                            cboe_result = cboe_client.get_market_internals()
+                            cboe_result = cboe_client.get_market_internals(mi_start, mi_end)
                         if isinstance(cboe_result, CboeMarketInternalsResult):
                             cboe_rows = cboe_result.rows
                             if cboe_result.failures:
@@ -1262,11 +1325,20 @@ def run_daily(
         else:
             logger.info("\nSkipping market internals (--skip-market-internals)")
 
+        if not skip_prices and not skip_market_internals:
+            try:
+                stats["treasury_yields"] = refresh_treasury_yields(api_key, database_url, logger)
+            except Exception as exc:
+                stats["treasury_error"] = redact_sensitive_text(exc)
+                logger.warning("Treasury refresh failed: %s", stats["treasury_error"])
+
         # The run completed without a fatal exception, but individual steps may
         # have degraded (caught + recorded above). Surface that explicitly so a
         # day where news/TA/internals silently failed is not reported as a clean
         # success — and so the operator/scheduler can react.
         degraded_reasons: list[str] = []
+        if stats.get("treasury_error"):
+            degraded_reasons.append("treasury yields refresh failed")
         if stats.get("prices_error"):
             degraded_reasons.append("price fetch failed")
         elif stats.get("prices_degraded"):

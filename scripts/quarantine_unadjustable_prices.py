@@ -27,6 +27,11 @@ Extreme absolute prices are NOT a selection criterion. A ticker with compounded
 reverse splits genuinely back-adjusts into the billions per share, and the
 provider reports those same values on both sides of the horizon; they are
 correct, not corrupt.
+
+For a verified ticker reuse, --ticker/--before/--old-cik/--current-cik/--reason
+select only the obsolete issuer's rows. --expected-rows pins the reviewed row
+count. The archive records both CIKs and the reason; automatic split restoration
+excludes identity quarantines. Verify historical provider identities before use.
 """
 
 from __future__ import annotations
@@ -35,9 +40,13 @@ import argparse
 import logging
 import os
 import sys
+from datetime import date
 
 import psycopg
 from dotenv import load_dotenv
+from psycopg.types.json import Jsonb
+
+from sawa.utils.symbols import validate_ticker
 
 load_dotenv()
 
@@ -122,6 +131,95 @@ COMMENT ON TABLE stock_prices_unadjustable_archive IS
 """
 
 
+def quarantine_identity_history(
+    conn,
+    *,
+    ticker: str,
+    before: date,
+    old_cik: str,
+    current_cik: str,
+    reason: str,
+    expected_rows: int,
+    apply: bool = False,
+) -> dict:
+    """Archive a reviewed obsolete issuer range; never infer a price multiplier.
+
+    The caller supplies verified historical identity evidence. Writes share one
+    transaction with scoped TA invalidation; failure preserves the original rows.
+    Dry runs issue SELECTs only. The caller owns commit/rollback.
+    """
+    ticker = validate_ticker(ticker)
+    if not old_cik.isdecimal() or not current_cik.isdecimal():
+        raise ValueError("both CIKs must contain decimal digits")
+    if int(old_cik) == int(current_cik) or not reason.strip() or expected_rows < 1:
+        raise ValueError("distinct verified CIKs, a reason and a positive row count are required")
+    current = conn.execute(
+        "SELECT cik FROM public.companies WHERE ticker = %s", (ticker,)
+    ).fetchone()
+    if not current or not str(current[0]).isdecimal() or int(current[0]) != int(current_cik):
+        raise ValueError("current company CIK does not match the reviewed current identity")
+    selected = conn.execute(
+        "SELECT date FROM public.stock_prices WHERE ticker = %s AND date < %s "
+        "ORDER BY date" + (" FOR UPDATE" if apply else ""),
+        (ticker, before),
+    ).fetchall()
+    if len(selected) != expected_rows:
+        raise ValueError(f"expected {expected_rows} old-identity rows, found {len(selected)}")
+    boundary = conn.execute(
+        "SELECT MIN(date) FROM public.stock_prices WHERE ticker = %s AND date >= %s",
+        (ticker, before),
+    ).fetchone()
+    if not boundary or boundary[0] != before:
+        raise ValueError("cutoff must equal the verified first stored date of the current issuer")
+    result = {
+        "ticker": ticker, "rows": len(selected), "first_date": selected[0][0].isoformat(),
+        "last_date": selected[-1][0].isoformat(), "before": before.isoformat(),
+        "old_cik": old_cik, "current_cik": current_cik, "reason": reason,
+        "applied": apply,
+    }
+    if not apply:
+        return result
+    conn.execute(CREATE_ARCHIVE)
+    conn.execute(
+        "ALTER TABLE public.stock_prices_unadjustable_archive "
+        "ADD COLUMN IF NOT EXISTS archive_reason TEXT NOT NULL DEFAULT 'split_basis', "
+        "ADD COLUMN IF NOT EXISTS identity_evidence JSONB"
+    )
+    copied = conn.execute(
+        """
+        INSERT INTO public.stock_prices_unadjustable_archive
+            (ticker, date, open, high, low, close, volume, stale_basis_cutoff,
+             archive_reason, identity_evidence)
+        SELECT ticker, date, open, high, low, close, volume, %s,
+               'identity_mismatch', %s
+        FROM public.stock_prices WHERE ticker = %s AND date = ANY(%s)
+        ON CONFLICT (ticker, date) DO NOTHING
+        """,
+        (before, Jsonb(result), ticker, [row[0] for row in selected]),
+    ).rowcount
+    if copied != expected_rows:
+        raise ValueError(f"archived only {copied}/{expected_rows} rows; refusing deletion")
+    deleted = conn.execute(
+        "DELETE FROM public.stock_prices WHERE ticker = %s AND date = ANY(%s)",
+        (ticker, [row[0] for row in selected]),
+    ).rowcount
+    if deleted != copied:
+        raise ValueError(f"archived {copied} but deleted {deleted}; transaction must roll back")
+    # Every indicator may depend on the old issuer history, not just old dates.
+    result["indicators_invalidated"] = conn.execute(
+        "DELETE FROM public.technical_indicators WHERE ticker = %s", (ticker,)
+    ).rowcount
+    result["character_rows_invalidated"] = {}
+    for table in (
+        "stock_character_classification", "stock_character_baseline",
+        "stock_character_flags", "stock_character_scorecard",
+    ):
+        result["character_rows_invalidated"][table] = conn.execute(
+            f"DELETE FROM public.{table} WHERE ticker = %s", (ticker,)
+        ).rowcount
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="commit (default: dry run)")
@@ -141,11 +239,53 @@ def main() -> int:
         help="recompute indicators for the affected tickers once rows are moved",
     )
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    parser.add_argument("--ticker", help="restrict selection, or scope an identity repair")
+    parser.add_argument(
+        "--before", type=date.fromisoformat, help="verified current-issuer start date"
+    )
+    parser.add_argument("--old-cik", help="verified obsolete issuer CIK")
+    parser.add_argument("--current-cik", help="verified current issuer CIK")
+    parser.add_argument("--reason", help="identity verification evidence saved in the archive")
+    parser.add_argument("--expected-rows", type=int, help="reviewed obsolete-issuer row count")
     args = parser.parse_args()
 
     if not args.database_url:
         print("DATABASE_URL is not set", file=sys.stderr)
         return 2
+
+    identity_args = (args.before, args.old_cik, args.current_cik, args.reason, args.expected_rows)
+    if any(value is not None for value in identity_args):
+        if not args.ticker or any(value is None for value in identity_args):
+            parser.error(
+                "identity repair requires ticker, before, old/current CIK, reason and expected rows"
+            )
+        with psycopg.connect(args.database_url) as conn:
+            result = quarantine_identity_history(
+                conn, ticker=args.ticker, before=args.before, old_cik=args.old_cik,
+                current_cik=args.current_cik, reason=args.reason,
+                expected_rows=args.expected_rows, apply=args.apply,
+            )
+            print(result)
+            if args.apply:
+                from sawa.daily import refresh_52week_extremes_if_needed
+
+                refresh_52week_extremes_if_needed(
+                    conn, logging.getLogger("quarantine.identity"), prices_changed=True,
+                )
+                conn.commit()
+        if not args.apply:
+            print("DRY RUN - no writes were performed.")
+            return 0
+        if args.recompute_ta:
+            from sawa.ta_backfill import recompute_ta_for_tickers
+
+            stats = recompute_ta_for_tickers(
+                args.database_url, [validate_ticker(args.ticker)],
+                log=logging.getLogger("quarantine.ta"),
+            )
+            return 0 if stats.get("success") else 1
+        print("TA was invalidated; run ta-backfill and character for this ticker.")
+        return 0
 
     with psycopg.connect(args.database_url) as conn:
         horizon = conn.execute(HORIZON_QUERY).fetchone()[0]
@@ -164,6 +304,9 @@ def main() -> int:
         print(f"Selecting: {selection}")
 
         stale = conn.execute(query, (horizon,)).fetchall()
+        if args.ticker:
+            ticker = validate_ticker(args.ticker)
+            stale = [(symbol, cutoff) for symbol, cutoff in stale if symbol == ticker]
         if not stale and not args.prune_orphan_ta:
             print("Nothing to do.")
             return 0

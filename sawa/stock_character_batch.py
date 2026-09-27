@@ -6,6 +6,7 @@ Follows the same pattern as ta_backfill.py.
 
 import logging
 import time
+from datetime import date, timedelta
 from multiprocessing import Pool
 from typing import Any, cast
 
@@ -20,7 +21,7 @@ from sawa.database.stock_character import (
     replace_flags,
 )
 from sawa.database.ta_load import get_tickers_with_prices
-from sawa.utils.market_hours import get_market_date
+from sawa.utils.market_hours import get_market_date, previous_trading_day
 from sawa.utils.security import redact_sensitive_text
 from sawa.utils.symbols import validate_ticker
 
@@ -54,13 +55,23 @@ def _process_ticker(ticker: str) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT date, open, high, low, close, volume "
-                    "FROM stock_prices WHERE ticker = %s ORDER BY date ASC",
-                    (ticker,),
+                    "FROM stock_prices WHERE ticker = %s AND date <= %s ORDER BY date ASC",
+                    (ticker, _run_date),
                 )
                 rows = cur.fetchall()
 
             if not rows:
                 return {"ticker": ticker, "classified": False, "error": "no prices", "time": 0}
+
+            expected_source = previous_trading_day(_run_date + timedelta(days=1))
+            if rows[-1][0] < expected_source:
+                return {
+                    "ticker": ticker,
+                    "classified": False,
+                    "stale_source": True,
+                    "source_price_date": rows[-1][0],
+                    "time": time.time() - start,
+                }
 
             prices = [
                 {
@@ -168,16 +179,16 @@ def _process_ticker(ticker: str) -> dict[str, Any]:
         }
 
 
-def _fetch_benchmark_prices(db_url: str) -> dict[str, list[dict[str, Any]]]:
-    """Fetch benchmark prices once for all workers."""
+def _fetch_benchmark_prices(db_url: str, run_date: date) -> dict[str, list[dict[str, Any]]]:
+    """Fetch benchmarks through the same as-of date used by ticker workers."""
     benchmarks = {}
     with psycopg.connect(db_url) as conn:
         for sym in ("SPY", "GLD", "TLT"):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT date, open, high, low, close, volume "
-                    "FROM stock_prices WHERE ticker = %s ORDER BY date ASC",
-                    (sym,),
+                    "FROM stock_prices WHERE ticker = %s AND date <= %s ORDER BY date ASC",
+                    (sym, run_date),
                 )
                 benchmarks[sym] = [
                     {
@@ -237,7 +248,7 @@ def run_stock_character_batch(
 
     # Fetch benchmarks once
     log.info("Fetching benchmark prices (SPY, GLD, TLT)...")
-    benchmark_prices = _fetch_benchmark_prices(database_url)
+    benchmark_prices = _fetch_benchmark_prices(database_url, run_date)
     for sym, prices in benchmark_prices.items():
         log.info(f"  {sym}: {len(prices)} days")
 
@@ -257,8 +268,7 @@ def run_stock_character_batch(
                 if (i + 1) % 200 == 0:
                     classified_count = sum(1 for r in results if r.get("classified"))
                     log.info(
-                        f"  Progress: {i + 1}/{len(all_tickers)} "
-                        f"({classified_count} classified)"
+                        f"  Progress: {i + 1}/{len(all_tickers)} ({classified_count} classified)"
                     )
     else:
         _init_worker(database_url, benchmark_prices, run_date)
@@ -266,17 +276,19 @@ def run_stock_character_batch(
             results.append(_process_ticker(ticker))
             if (i + 1) % 200 == 0:
                 classified_count = sum(1 for r in results if r.get("classified"))
-                log.info(
-                    f"  Progress: {i + 1}/{len(all_tickers)} "
-                    f"({classified_count} classified)"
-                )
+                log.info(f"  Progress: {i + 1}/{len(all_tickers)} ({classified_count} classified)")
 
     elapsed = time.time() - start_time
 
     # Stats
     classified_results = [r for r in results if r.get("classified")]
     errors = [r for r in results if r.get("error")]
-    unclassifiable = [r for r in results if not r.get("classified") and not r.get("error")]
+    stale = [r for r in results if r.get("stale_source")]
+    unclassifiable = [
+        r
+        for r in results
+        if not r.get("classified") and not r.get("error") and not r.get("stale_source")
+    ]
 
     # Character breakdown
     char_counts: dict[str, int] = {}
@@ -291,14 +303,12 @@ def run_stock_character_batch(
     total = len(all_tickers)
     classified_percent = 100 * len(classified_results) / total if total else 0.0
     unclassifiable_percent = 100 * len(unclassifiable) / total if total else 0.0
-    log.info(
-        f"  Classified:       {len(classified_results)} ({classified_percent:.1f}%)"
-    )
-    log.info(
-        f"  Unclassifiable:   {len(unclassifiable)} ({unclassifiable_percent:.1f}%)"
-    )
+    log.info(f"  Classified:       {len(classified_results)} ({classified_percent:.1f}%)")
+    log.info(f"  Unclassifiable:   {len(unclassifiable)} ({unclassifiable_percent:.1f}%)")
     log.info(f"  Errors:           {len(errors)}")
-    log.info(f"  Time:             {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    if stale:
+        log.warning("  Skipped stale price histories: %s", len(stale))
+    log.info(f"  Time:             {elapsed:.1f}s ({elapsed / 60:.1f} min)")
     rate = total / elapsed if elapsed > 0 else 0.0
     log.info(f"  Rate:             {rate:.1f} tickers/sec")
     log.info("\n  Character breakdown:")
@@ -312,7 +322,7 @@ def run_stock_character_batch(
 
     return {
         "success": total > 0 and bool(classified_results) and not errors,
-        "degraded": bool(errors),
+        "degraded": bool(errors or stale),
         # Surfaced so an operator can see which date the run stamped; a
         # mismatch with the market date is what made doctor fail after a
         # healthy weekly.
@@ -321,10 +331,10 @@ def run_stock_character_batch(
         "classified": len(classified_results),
         "unclassifiable": len(unclassifiable),
         "errors": len(errors),
+        "stale_sources": len(stale),
         "elapsed_seconds": round(elapsed, 1),
         "character_counts": char_counts,
         "ticker_errors": [
-            {"ticker": item.get("ticker"), "error": item.get("error")}
-            for item in errors
+            {"ticker": item.get("ticker"), "error": item.get("error")} for item in errors
         ],
     }

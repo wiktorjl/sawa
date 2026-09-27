@@ -35,8 +35,12 @@ Companion docs:
 └────────────────────────┘
 ┌────────────────────────┐
 │ FRED                   │── market internals: VIX, VIX3M, HY spread
-│ api.stlouisfed.org     │   (only data source for these series since
-│ FRED_API_KEY           │   commit 2d4e350; Polygon VIX path retired)
+│ api.stlouisfed.org     │   (CBOE supplements VIX/VIX3M closes;
+│ FRED_API_KEY           │   Polygon VIX path retired)
+└────────────────────────┘
+┌────────────────────────┐
+│ CBOE                   │── VIX/VIX3M quotes and historical closes
+│ cdn-api.cboe.com       │   (daily; no auth)
 └────────────────────────┘
 ┌────────────────────────┐
 │ Wikipedia              │── S&P 500 constituent list
@@ -48,10 +52,9 @@ Companion docs:
 │   symbols.txt          │   shipped inside the wheel)
 └────────────────────────┘
 ┌────────────────────────┐
-│ yfinance (optional)    │── earnings dates backfill
-│ scripts/populate_      │   (standalone script, NOT in the auto
-│   earnings.py          │   pipeline — Polygon's earnings endpoint
-│                        │   currently returns no useful data)
+│ yfinance               │── earnings dates, EPS and surprises
+│ sawa/earnings.py       │   (scheduled maintenance; Polygon's
+│                        │   earnings endpoint returns no useful data)
 └────────────────────────┘
 ```
 
@@ -71,7 +74,7 @@ Rate limiting: `sawa/repositories/rate_limiter.py` (default 5 req/s).
 | Endpoint | Populates | Pipeline command(s) | Loader |
 |----------|-----------|---------------------|--------|
 | `/v2/aggs/ticker/{t}/range/1/day/...` | `stock_prices` | `daily`, `add-symbol`, `adjust-splits` | `sawa/database/load.py` |
-| `/v2/aggs/ticker/{t}/range/{m}/{ts}/...` | `stock_prices_intraday` (REST fallback) | `intraday` (rare; usually WS) | `sawa/database/intraday_load.py` |
+| `/v2/aggs/ticker/{t}/range/{m}/{ts}/...` | `stock_prices_intraday` (REST reconciliation) | `intraday` startup/reconnect | `sawa/database/intraday_load.py` |
 | `/v3/reference/tickers/{t}` | `companies` | `coldstart`, `weekly`, `add-symbol` | `sawa/database/load.py` |
 | `/stocks/financials/v1/ratios` | `financial_ratios` | `coldstart`, `quarterly` | `sawa/database/load.py` |
 | `/stocks/financials/v1/balance-sheets` | `balance_sheets` | `coldstart`, `quarterly` | `sawa/database/load.py` |
@@ -81,7 +84,7 @@ Rate limiting: `sawa/repositories/rate_limiter.py` (default 5 req/s).
 | `/v3/reference/dividends` | `dividends` | `coldstart`, `weekly` | `sawa/corporate_actions.py` |
 | `/vX/reference/tickers/{t}/events` | `earnings` (opt-in) | `corporate-actions --include-earnings` only | `sawa/corporate_actions.py` |
 | `/v2/reference/news` | `news_articles`, `news_article_tickers`, `news_sentiment` | `coldstart`, `daily`, `weekly` | `sawa/database/news.py` |
-| `/fed/v1/treasury-yields` | `treasury_yields` | `coldstart`, `weekly` | `sawa/database/load.py` |
+| `/fed/v1/treasury-yields` | `treasury_yields` | `coldstart`, `daily`, `weekly` | `sawa/database/load.py` |
 | `/fed/v1/inflation` | `inflation` | `coldstart`, `weekly` | `sawa/database/load.py` |
 | `/fed/v1/inflation-expectations` | `inflation_expectations` | `coldstart`, `weekly` | `sawa/database/load.py` |
 | `/fed/v1/labor-market` | `labor_market` | `coldstart`, `weekly` | `sawa/database/load.py` |
@@ -93,8 +96,7 @@ Notes:
 - **Earnings via Polygon is currently inert.** The `ticker-events`
   endpoint returns only `ticker_change` events, not earnings dates. The
   `weekly` pipeline does NOT request earnings (`include_earnings=False`).
-  To populate the `earnings` table, run `scripts/populate_earnings.py`
-  (yfinance) — see §2.7.
+  Scheduled `maintenance` populates `earnings` using yfinance — see §2.7.
 - The `/fed/v1/...` family is hosted by Polygon, not FRED. FRED handles
   only the market-internals series (§2.4).
 
@@ -136,9 +138,10 @@ Client: `sawa/api/websocket_client.py`.
 |---------|-----------|------------------|--------|
 | `AM.*` (aggregate-minute → 5-min bars) | `stock_prices_intraday` | `intraday` | `sawa/database/intraday_load.py` |
 
-15-minute delayed on Polygon's basic tier. Designed to be started at the
-open and killed at the close — `scripts/market_scheduler.sh` does this
-automatically.
+15-minute delayed on Polygon's basic tier. The scheduler starts it at the
+open and drains for 30 minutes after observed close before graceful shutdown.
+REST minute reconciliation restores the current-session prefix after startup
+or reconnect, including partial buckets, with minute-level deduplication.
 
 ### 2.4 FRED — `https://api.stlouisfed.org/fred/series/observations`
 
@@ -154,15 +157,19 @@ Client: `sawa/api/fred.py` (`FredClient`).
 Loader: `sawa/database/load.py::load_market_internals` (UPSERT keyed on
 `date`).
 
-VIX and VIX3M are sourced *exclusively* from FRED since commit `2d4e350`
-("refactor: consolidate VIX to single source in market_internals",
-2026-05-13). They are no longer mirrored into `stock_prices` or
-`companies`. See [`VIX_MIGRATION.md`](VIX_MIGRATION.md) for the migration
-note.
+VIX and VIX3M live only in `market_internals`, not `stock_prices` or
+`companies`. CBOE complements FRED's publication lag using current-session
+quotes and 30-day historical replay from `cdn-api.cboe.com`:
+`/api/global/delayed_quotes/quotes/_{VIX,VIX3M}.json` and
+`/api/global/us_indices/daily_prices/{VIX,VIX3M}_History.csv`.
+Rows merge by date without clearing existing non-null fields. History or
+quote failures are reported as degradation, even if the other feed succeeds.
 
 If `FRED_API_KEY` is unset, `daily`/`weekly`/`coldstart` log a warning,
-send an ntfy alert if `NTFY_TOPIC` is set, skip the market-internals
-step, and continue. They do not fail.
+send an ntfy alert if `NTFY_TOPIC` is set, skip FRED, and continue degraded.
+In `daily`, the same key gates the entire market-internals block, including
+CBOE collection. The post-daily doctor checks both volatility series against
+the expected trading session and can fail if they are stale.
 
 ### 2.5 Wikipedia — S&P 500 constituents
 
@@ -195,19 +202,21 @@ snapshot kept as a recovery fallback — the live Polygon path is the
 source of truth. To refresh `nasdaq_listed` membership, run
 `sawa index-update`.
 
-### 2.7 yfinance — optional earnings backfill
+### 2.7 yfinance — scheduled earnings refresh
 
 Library: `yfinance`.
-Script: `scripts/populate_earnings.py` (NOT a `sawa <command>`).
+Module: `sawa/earnings.py`, invoked by `sawa maintenance`.
 
 | Source | Populates | Trigger |
 |--------|-----------|---------|
-| `yfinance.Ticker(t).earnings_dates` | `earnings` | manual: `python scripts/populate_earnings.py` |
+| `yfinance.Ticker(t).get_earnings_dates(limit=20)` | `earnings` | scheduled weekly `sawa maintenance` |
 
 This exists because Polygon's `ticker-events` endpoint currently does
-not return earnings dates — the auto pipeline therefore leaves the
-`earnings` table empty. Run this script periodically (e.g. once a
-quarter after earnings season) to populate it.
+not return earnings dates. Active common shares/ADRs refresh independently;
+HTTP failures are distinguished from legitimate empty results. Dates use New
+York time; unavailable EPS values preserve existing data. Nearby shifted,
+unreported placeholders are reconciled transactionally. The standalone
+`scripts/populate_earnings.py` remains available for legacy manual backfills.
 
 ---
 
@@ -251,7 +260,7 @@ Reverse index of §2 and §3.
 | `index_constituents` | Wikipedia (`sp500`) + Polygon (`nasdaq_listed`, `us_active`) |
 | `stock_splits` | Polygon REST `/v3/reference/splits` — coldstart records the whole price window, weekly the trailing year; also the registry `load_prices` uses to re-base as-traded flat-file bars |
 | `dividends` | Polygon REST `/v3/reference/dividends` |
-| `earnings` | yfinance via `scripts/populate_earnings.py` (manual). Polygon `ticker-events` is wired up but currently returns no earnings data. |
+| `earnings` | yfinance via scheduled `maintenance`; legacy `scripts/populate_earnings.py` is manual. Polygon `ticker-events` currently returns no earnings data. |
 | `news_articles`, `news_article_tickers`, `news_sentiment` | Polygon REST `/v2/reference/news` (sentiment provided by Polygon) |
 | `technical_indicators` | computed locally from `stock_prices` via TA-Lib |
 | `stock_character_*` | computed locally from `stock_prices` + `technical_indicators` + fundamentals |

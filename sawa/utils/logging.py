@@ -1,9 +1,12 @@
 """Unified logging configuration."""
 
 import logging
+import os
+import re
+import stat
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -25,6 +28,34 @@ DEFAULT_LOG_DIR = Path.home() / ".sawa" / "logs"
 # ~150 MB on disk.
 LOG_FILE_MAX_BYTES = 25 * 1024 * 1024
 LOG_FILE_BACKUP_COUNT = 5
+_RUN_LOG = re.compile(r"^[A-Za-z_-]+_(\d{8}_\d{6})\.log(?:\.\d+)?$")
+
+
+def prune_old_run_logs(directory: Path, days: int = 90, *, now: datetime | None = None) -> int:
+    """Expire stale per-run log families; never follow symlinks or remove audit files."""
+    if days <= 0:
+        return 0
+    cutoff = (now or datetime.now()) - timedelta(days=days)
+    removed = 0
+    for path in directory.iterdir():
+        match = _RUN_LOG.fullmatch(path.name)
+        if match is None:
+            continue
+        try:
+            created = datetime.strptime(match[1], "%Y%m%d_%H%M%S")
+            info = path.lstat()
+            if (
+                stat.S_ISREG(info.st_mode)
+                and created < cutoff
+                and info.st_mtime < cutoff.timestamp()
+            ):
+                path.unlink()
+                removed += 1
+        except (OSError, ValueError):
+            # Another run may rotate/remove a file concurrently. Retention
+            # must not prevent the data job from starting.
+            continue
+    return removed
 
 
 class _PrivateRotatingFileHandler(RotatingFileHandler):
@@ -117,6 +148,10 @@ def setup_logging(
 
     if resolved_dir is not None:
         ensure_private_directory(resolved_dir)
+        try:
+            prune_old_run_logs(resolved_dir, int(os.environ.get("SAWA_LOG_RETENTION_DAYS", "90")))
+        except (OSError, ValueError):
+            pass
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = resolved_dir / f"{run_name}_{timestamp}.log"
         ensure_private_file(log_file)

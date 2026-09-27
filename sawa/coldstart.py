@@ -794,6 +794,8 @@ def populate_index_constituents(
     *,
     minimum_source_counts: dict[str, int] | None = None,
     maximum_source_counts: dict[str, int] | None = None,
+    prefetched_symbols: dict[str, list[str]] | None = None,
+    require_complete: bool = False,
 ) -> IndexPopulationResult:
     """Atomically replace validated index memberships, preserving old data on failure."""
     logger.info("Populating index constituents...")
@@ -801,7 +803,11 @@ def populate_index_constituents(
     minimum_eligible_source_coverage = 0.5
     source_floors = minimum_source_counts or MINIMUM_INDEX_SOURCE_COUNTS
     source_ceilings = maximum_source_counts or MAXIMUM_INDEX_SOURCE_COUNTS
-    index_data = _index_fetchers(api_key)
+    index_data = (
+        [(code, lambda log, symbols=symbols: symbols)
+         for code, symbols in prefetched_symbols.items()]
+        if prefetched_symbols is not None else _index_fetchers(api_key)
+    )
     stats = IndexPopulationResult(requested=len(index_data))
 
     for code, fetcher in index_data:
@@ -857,6 +863,11 @@ def populate_index_constituents(
                     (symbols,),
                 )
                 eligible = sorted({str(item[0]).upper() for item in cur.fetchall()})
+                if require_complete and len(eligible) != len(symbols):
+                    raise ValueError(
+                        "constituent onboarding incomplete; preserving existing membership "
+                        f"({len(eligible)}/{len(symbols)} companies present)"
+                    )
                 if not eligible:
                     raise ValueError("no fetched constituents exist in companies")
                 minimum_eligible_count = max(

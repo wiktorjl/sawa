@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from sawa.doctor import (
     run_doctor_on_connection,
     summarize_checks,
 )
+from sawa.utils.market_hours import ET
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +66,7 @@ class FakeConnection:
         latest_news: datetime | None = None,
         null_sic: int = 0,
         null_mcap: int = 0,
-        economy_latest: date | None = None,
+        economy_latest: date | None = date(2026, 5, 14),
         character_run: date | None = None,
         character_tickers: int = 100,
         corporate_action_rows: int = 5,
@@ -90,7 +91,7 @@ class FakeConnection:
         self.recent_baseline_tickers = recent_baseline_tickers
         self.bad_latest_rows = bad_latest_rows
         self.latest_news = latest_news or datetime(2026, 5, 14, tzinfo=timezone.utc)
-        self.economy_latest = economy_latest or date(2026, 5, 14)
+        self.economy_latest = economy_latest
         self.character_run = character_run or date(2026, 5, 14)
         self.character_tickers = character_tickers
         self.corporate_action_rows = corporate_action_rows
@@ -125,6 +126,9 @@ class FakeConnection:
 
         if "WITH recent_dates AS" in compact:
             return (self.recent_baseline_tickers,)
+
+        if "eligible_character_prices" in compact:
+            return (self.character_tickers, self.active_count)
 
         if (
             "SELECT COUNT(DISTINCT sp.ticker), COUNT(*) FROM stock_prices sp" in compact
@@ -167,7 +171,7 @@ class FakeConnection:
             return (self.latest_price_date, self.extremes_latest)
 
         if "FROM stock_character_classification" in compact:
-            return (self.character_run, self.character_tickers)
+            return (self.character_run,)
 
         if compact.startswith("SELECT MAX(date) FROM") and any(
             t in compact
@@ -202,12 +206,13 @@ def test_doctor_daily_passes_when_latest_price_coverage_is_good() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         }
     )
 
-    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 14))
     summary = summarize_checks(checks)
 
     assert summary["success"] is True
@@ -223,13 +228,14 @@ def test_doctor_stops_at_missing_required_schema() -> None:
     summary = summarize_checks(checks)
 
     assert summary["success"] is False
-    assert summary["failed"] == 5
+    assert summary["failed"] == 6
     assert [c.name for c in checks] == [
         "schema.companies",
         "schema.stock_prices",
         "schema.technical_indicators",
         "schema.news_articles",
         "schema.market_internals",
+        "schema.treasury_yields",
         "schema.stock_prices_live",
         "schema.mv_52week_extremes",
     ]
@@ -243,6 +249,7 @@ def test_doctor_fails_when_latest_price_coverage_is_too_low() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         },
@@ -274,6 +281,7 @@ def test_latest_rows_does_not_duplicate_latest_coverage_failure() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         },
@@ -281,6 +289,7 @@ def test_latest_rows_does_not_duplicate_latest_coverage_failure() -> None:
         recent_baseline_tickers=5889,
         latest_price_tickers=5004,
         latest_price_rows=5004,
+        market_latest=(date(2026, 5, 15), date(2026, 5, 15), date(2026, 5, 14)),
     )
 
     checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
@@ -300,6 +309,7 @@ def test_doctor_uses_recent_daily_baseline_not_broad_reference_index() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
             "indices",
@@ -311,6 +321,7 @@ def test_doctor_uses_recent_daily_baseline_not_broad_reference_index() -> None:
         recent_baseline_tickers=5004,
         latest_price_tickers=5004,
         latest_price_rows=5004,
+        market_latest=(date(2026, 5, 15), date(2026, 5, 15), date(2026, 5, 14)),
     )
 
     checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
@@ -331,6 +342,7 @@ def test_same_day_news_is_not_marked_stale() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         },
@@ -351,6 +363,7 @@ def test_doctor_checks_each_market_internal_series_freshness() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         },
@@ -373,6 +386,7 @@ def test_future_market_internal_dates_do_not_pass_freshness() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         },
@@ -419,6 +433,7 @@ _DAILY_TABLES = {
     "technical_indicators",
     "news_articles",
     "market_internals",
+    "treasury_yields",
     "stock_prices_live",
     "mv_52week_extremes",
 }
@@ -522,6 +537,7 @@ def test_post_split_ta_check_flags_uncomputed_tickers() -> None:
         post_split_checked=150,
         post_split_flagged=3,
         post_split_worst="KLAC, XXII, AERT",
+        market_latest=(date(2026, 5, 15), date(2026, 5, 15), date(2026, 5, 14)),
     )
 
     checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
@@ -570,6 +586,7 @@ def test_format_checks_includes_summary_counts() -> None:
             "technical_indicators",
             "news_articles",
             "market_internals",
+            "treasury_yields",
             "stock_prices_live",
             "mv_52week_extremes",
         },
@@ -657,23 +674,94 @@ def test_a_partial_dump_is_not_counted_as_a_backup(tmp_path: Path) -> None:
 
 # ── Trading-calendar news freshness and the watchdog job ─────────────────────
 
-from datetime import timedelta  # noqa: E402
-
-from sawa.utils.market_hours import ET  # noqa: E402
-
-_DAILY_TABLES = {
-    "companies",
-    "stock_prices",
-    "technical_indicators",
-    "news_articles",
-    "market_internals",
-    "stock_prices_live",
-    "mv_52week_extremes",
-}
-
-
 def _et(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
     return ET.localize(datetime(year, month, day, hour, minute))
+
+
+@pytest.mark.parametrize("job", ["daily", "watchdog"])
+def test_daily_cadence_requires_treasury_table(job: str) -> None:
+    conn = FakeConnection(tables=_DAILY_TABLES - {"treasury_yields"})
+
+    checks = run_doctor_on_connection(conn, job=job, today=date(2026, 5, 15))
+
+    assert [c.name for c in checks if c.status == "FAIL"] == ["schema.treasury_yields"]
+    assert summarize_checks(checks)["success"] is False
+
+
+@pytest.mark.parametrize(
+    ("job", "now", "session", "treasury_floor"),
+    [
+        ("daily", _et(2026, 9, 25, 18), date(2026, 9, 25), date(2026, 9, 24)),
+        ("watchdog", _et(2026, 9, 28, 8, 30), date(2026, 9, 25), date(2026, 9, 24)),
+        # Labor Day is not a completed trading session for publication lag.
+        ("daily", _et(2026, 9, 8, 18), date(2026, 9, 8), date(2026, 9, 4)),
+        ("watchdog", _et(2026, 9, 8, 8, 30), date(2026, 9, 4), date(2026, 9, 3)),
+    ],
+)
+@pytest.mark.parametrize("state", ["publication_lag", "same_session", "stale", "empty", "future"])
+def test_treasury_daily_cadence_allows_only_one_session_publication_lag(
+    job: str, now: datetime, session: date, treasury_floor: date, state: str,
+    scheduler_state: Path, tmp_path: Path,
+) -> None:
+    from sawa.utils.market_hours import previous_trading_day
+
+    latest = {
+        "publication_lag": treasury_floor,
+        "same_session": session,
+        "stale": previous_trading_day(treasury_floor),
+        "empty": None,
+        "future": now.date() + timedelta(days=1),
+    }[state]
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=session,
+        economy_latest=latest,
+        latest_news=now,
+    )
+    proc = tmp_path / "proc"
+    proc.mkdir()
+
+    checks = run_doctor_on_connection(
+        conn, job=job, now=now, scheduler_state_dir=scheduler_state, proc=proc
+    )
+    check = next(c for c in checks if c.name == "treasury_yields.latest_date")
+
+    assert check.status == ("PASS" if state in {"publication_lag", "same_session"} else "FAIL")
+    assert check.observed == latest
+    assert str(treasury_floor) in check.expected
+    assert "one completed trading session" in check.expected
+
+
+def test_treasury_publication_lag_does_not_weaken_same_session_cboe_check() -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES,
+        latest_price_date=date(2026, 9, 25),
+        economy_latest=date(2026, 9, 24),
+        market_latest=(date(2026, 9, 24), date(2026, 9, 24), date(2026, 9, 24)),
+    )
+
+    checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 9, 25))
+    by_name = {c.name: c for c in checks}
+
+    assert by_name["treasury_yields.latest_date"].status == "PASS"
+    assert by_name["market_internals.vix.latest_date"].status == "FAIL"
+    assert by_name["market_internals.vix3m.latest_date"].status == "FAIL"
+
+
+@pytest.mark.parametrize("job", ["all", "coldstart"])
+def test_combined_doctor_uses_only_strict_daily_treasury_check(job: str) -> None:
+    conn = FakeConnection(
+        tables=_DAILY_TABLES | _WEEKLY_TABLES | _QUARTERLY_TABLES,
+        latest_price_date=date(2026, 5, 15),
+        economy_latest=date(2026, 5, 13),
+    )
+
+    checks = run_doctor_on_connection(conn, job=job, today=date(2026, 5, 15))
+    treasury = [c for c in checks if c.name == "treasury_yields.latest_date"]
+
+    assert len(treasury) == 1
+    assert treasury[0].status == "FAIL"
+    assert summarize_checks(checks)["success"] is False
 
 
 def test_news_four_days_stale_warns_but_does_not_fail_the_daily_doctor() -> None:
@@ -683,6 +771,7 @@ def test_news_four_days_stale_warns_but_does_not_fail_the_daily_doctor() -> None
     conn = FakeConnection(
         tables=_DAILY_TABLES,
         latest_news=datetime(2026, 5, 11, 20, 0, tzinfo=timezone.utc),
+        market_latest=(date(2026, 5, 15), date(2026, 5, 15), date(2026, 5, 14)),
     )
 
     checks = run_doctor_on_connection(conn, job="daily", today=date(2026, 5, 15))
@@ -779,6 +868,7 @@ def test_watchdog_passes_on_a_healthy_morning(scheduler_state: Path) -> None:
     conn = FakeConnection(
         tables=_DAILY_TABLES,
         latest_price_date=date(2026, 9, 14),
+        economy_latest=date(2026, 9, 11),
         latest_news=datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc),
         market_latest=(date(2026, 9, 14), date(2026, 9, 14), date(2026, 9, 11)),
     )
@@ -908,7 +998,9 @@ def test_watchdog_tolerates_a_stale_tick_while_a_job_holds_the_lock(
     assert "sawa daily is running" in by_name["scheduler.tick_freshness"].message
 
 
-def test_intraday_during_the_session_is_not_an_orphan(scheduler_state: Path, tmp_path: Path) -> None:
+def test_intraday_during_the_session_is_not_an_orphan(
+    scheduler_state: Path, tmp_path: Path,
+) -> None:
     from sawa import doctor as doctor_module
 
     now = _et(2026, 9, 15, 11, 0)

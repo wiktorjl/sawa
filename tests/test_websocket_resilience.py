@@ -98,6 +98,7 @@ def _client(
         connect_timeout=connect_timeout,
         handshake_timeout=handshake_timeout,
         max_buffered_bars=max_buffered_bars,
+        recover_history=False,  # REST reconciliation has separate offline tests.
     )
 
 
@@ -308,7 +309,7 @@ def test_sixty_minute_windows_anchor_to_open_and_ignore_after_hours(
 def test_new_session_prunes_finalized_cutoff_and_rejects_old_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _FrozenDateTime.current = datetime(2026, 8, 29, 15, 0, tzinfo=timezone.utc)
+    _FrozenDateTime.current = datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(websocket_client, "datetime", _FrozenDateTime)
     client = _client(bar_size=5)
     client.finalized_through[(
@@ -323,7 +324,7 @@ def test_new_session_prunes_finalized_cutoff_and_rejects_old_session(
         _minute(
             13,
             30,
-            day=29,
+            day=31,  # Next regular session after Friday, not Saturday.
             open_=100,
             high=102,
             low=99,

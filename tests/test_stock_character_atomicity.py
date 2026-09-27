@@ -210,18 +210,10 @@ def test_batch_stamps_the_market_date_not_the_host_date(monkeypatch) -> None:
     row as clock skew, so a completely healthy weekly alarmed every time.
     """
     market_date = date(2026, 9, 1)
-    monkeypatch.setattr(
-        stock_character_batch, "get_market_date", lambda: market_date
-    )
-    monkeypatch.setattr(
-        stock_character_batch, "_fetch_benchmark_prices", lambda _url: {}
-    )
-    monkeypatch.setattr(
-        stock_character_batch, "get_tickers_with_prices", lambda _conn: []
-    )
-    monkeypatch.setattr(
-        stock_character_batch.psycopg, "connect", lambda _url: _Connection()
-    )
+    monkeypatch.setattr(stock_character_batch, "get_market_date", lambda: market_date)
+    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url, _date: {})
+    monkeypatch.setattr(stock_character_batch, "get_tickers_with_prices", lambda _conn: [])
+    monkeypatch.setattr(stock_character_batch.psycopg, "connect", lambda _url: _Connection())
 
     stats = stock_character_batch.run_stock_character_batch(
         database_url="offline-test",
@@ -339,7 +331,7 @@ def test_empty_batch_is_unsuccessful_without_division_by_zero(monkeypatch) -> No
         "connect",
         lambda _url: _Connection(),
     )
-    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url: {})
+    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url, _date: {})
 
     stats = stock_character_batch.run_stock_character_batch(
         "offline-test",
@@ -358,7 +350,7 @@ def test_batch_is_unsuccessful_when_any_ticker_errors(monkeypatch) -> None:
         "connect",
         lambda _url: _Connection(),
     )
-    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url: {})
+    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url, _date: {})
     monkeypatch.setattr(
         stock_character_batch,
         "_process_ticker",
@@ -388,7 +380,7 @@ def test_batch_deduplicates_normalized_explicit_tickers(monkeypatch) -> None:
         "connect",
         lambda _url: _Connection(),
     )
-    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url: {})
+    monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url, _date: {})
     processed: list[str] = []
 
     def process(ticker: str) -> dict[str, Any]:
@@ -412,3 +404,52 @@ def test_batch_deduplicates_normalized_explicit_tickers(monkeypatch) -> None:
     assert stats["success"] is True
     assert stats["total"] == 2
     assert processed == ["AAPL", "MSFT"]
+
+
+def test_historical_batch_excludes_future_benchmarks_from_workers(monkeypatch) -> None:
+    queried: list[tuple[str, date]] = []
+    stored_rows = [
+        (RUN_DATE, 1, 2, 0.5, 1.5, 100),
+        (date(2026, 8, 31), 10, 20, 5, 15, 1000),
+    ]
+
+    class BenchmarkCursor(_Cursor):
+        def execute(self, statement, params=None, **_kwargs) -> None:
+            assert "FROM stock_prices" in str(statement)
+            # Emulate the database cutoff so the regression also verifies the
+            # benchmarks actually delivered to a historical worker.
+            assert "date <= %s" in str(statement)
+            symbol, cutoff = params
+            queried.append((symbol, cutoff))
+            self.results = [row for row in stored_rows if row[0] <= cutoff]
+
+    class BenchmarkConnection(_Connection):
+        def cursor(self) -> BenchmarkCursor:
+            return BenchmarkCursor(self)
+
+    monkeypatch.setattr(
+        stock_character_batch.psycopg,
+        "connect",
+        lambda _url: BenchmarkConnection(),
+    )
+
+    def process(ticker: str) -> dict[str, Any]:
+        assert stock_character_batch._run_date == RUN_DATE
+        assert set(stock_character_batch._benchmark_prices) == {"SPY", "GLD", "TLT"}
+        for prices in stock_character_batch._benchmark_prices.values():
+            assert [row["date"] for row in prices] == [RUN_DATE]
+            assert prices[0]["close"] == 1.5
+        return {"ticker": ticker, "classified": True, "character": "trend", "time": 0}
+
+    monkeypatch.setattr(stock_character_batch, "_process_ticker", process)
+
+    stats = stock_character_batch.run_stock_character_batch(
+        "offline-test",
+        tickers=["AAPL"],
+        workers=1,
+        run_date=RUN_DATE,
+        log=logging.getLogger(__name__),
+    )
+
+    assert stats["success"] is True
+    assert queried == [(symbol, RUN_DATE) for symbol in ("SPY", "GLD", "TLT")]

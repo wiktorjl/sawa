@@ -19,7 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "market_scheduler.sh"
 
 # Records notify() calls instead of running `sawa notify`.
-RECORD_NOTIFY = 'notify() { printf "%s|%s|%s\\n" "${3:-info}" "$1" "$2" >> "$HOME/notify-calls"; }; '
+RECORD_NOTIFY = (
+    'notify() { printf "%s|%s|%s\\n" "${3:-info}" "$1" "$2" >> "$HOME/notify-calls"; }; '
+)
 
 
 def _scheduler_shell(tmp_path: Path, command: str) -> subprocess.CompletedProcess[str]:
@@ -100,7 +102,9 @@ def test_dotenv_filters_unknown_keys_without_exporting_or_aborting(tmp_path: Pat
     assert uw_key == "" and mcp == ""  # unknown keys never exported
     assert "not allowed" not in result.stderr
     assert "ignoring .env key that is not in the scheduler allowlist: UW_KEY" in result.stderr
-    assert "ignoring .env key that is not in the scheduler allowlist: MCP_LOG_LEVEL" in result.stderr
+    assert (
+        "ignoring .env key that is not in the scheduler allowlist: MCP_LOG_LEVEL" in result.stderr
+    )
     assert "not-a-scheduler-key" not in result.stderr  # names only, never values
     state = tmp_path / "home" / ".sawa" / "scheduler"
     assert (state / "env_ignored_UW_KEY").exists()
@@ -237,7 +241,8 @@ def test_exit_handler_alerts_on_unreported_failure_after_the_tick_line(tmp_path:
 
     result = _fail_loud_shell(
         tmp_path,
-        "SCHEDULER_STAGE=tick; log 'ERROR: could not verify newly started intraday process'; exit 1",
+        "SCHEDULER_STAGE=tick; "
+        "log 'ERROR: could not verify newly started intraday process'; exit 1",
     )
 
     assert result.returncode == 1
@@ -521,6 +526,147 @@ def test_market_status_treats_polygon_after_hours_states_as_closed(tmp_path: Pat
 
 
 # ── Existing hardening tests (unchanged) ─────────────────────────────────────
+
+
+def test_closed_tick_runs_weekly_and_maintenance_after_daily_failure(tmp_path: Path) -> None:
+    stubs = r'''
+        initialize_scheduler() { :; }
+        setup_env() { :; }
+        notify_ignored_env_keys_once() { :; }
+        heartbeat() { :; }
+        check_market_status() { printf 'closed\n'; }
+        is_intraday_running() { return 1; }
+        is_daily_done_today() { return 1; }
+        is_weekly_done_this_week() { return 1; }
+        is_maintenance_done_this_week() { return 1; }
+        date() { if [ "${1:-}" = '+%-H' ]; then printf '18\n'; else command date "$@"; fi; }
+        run_daily() { printf 'daily\n' >> "$HOME/jobs"; SCHEDULER_ALERTED=true; return 1; }
+        run_weekly() { printf 'weekly\n' >> "$HOME/jobs"; }
+        run_maintenance() { printf 'maintenance\n' >> "$HOME/jobs"; }
+        start_maintenance() { run_maintenance; }
+        main
+    '''
+    result = _scheduler_shell(tmp_path, stubs)
+    assert result.returncode == 1, result.stderr
+    assert (tmp_path / "home" / "jobs").read_text().splitlines() == [
+        "daily", "weekly", "maintenance"
+    ]
+
+
+def test_observed_early_close_gets_full_delay_and_correction_drain(tmp_path: Path) -> None:
+    command = r'''
+        clock_value=100000
+        date() { printf '%s\n' "$clock_value"; }
+        if intraday_drain_complete; then exit 10; fi
+        clock_value=101799
+        if intraday_drain_complete; then exit 11; fi
+        clock_value=101800
+        intraday_drain_complete
+    '''
+    result = _scheduler_shell(tmp_path, command)
+    assert result.returncode == 0, result.stderr
+
+
+def test_first_closed_tick_at_17_waits_for_intraday_before_batch_jobs(tmp_path: Path) -> None:
+    stubs = r'''
+        initialize_scheduler() { :; }
+        setup_env() { :; }
+        notify_ignored_env_keys_once() { :; }
+        heartbeat() { :; }
+        check_market_status() { printf 'closed\n'; }
+        is_intraday_running() { return 0; }
+        intraday_drain_complete() { return 1; }
+        date() { if [ "${1:-}" = '+%-H' ]; then printf '17\n'; else command date "$@"; fi; }
+        run_daily() { printf 'daily\n' >> "$HOME/jobs"; }
+        run_weekly() { printf 'weekly\n' >> "$HOME/jobs"; }
+        run_maintenance() { printf 'maintenance\n' >> "$HOME/jobs"; }
+        main
+    '''
+    result = _scheduler_shell(tmp_path, stubs)
+    assert result.returncode == 0, result.stderr
+    assert "draining delayed bars" in result.stderr
+    assert not (tmp_path / "home" / "jobs").exists()
+
+
+def test_forced_intraday_stop_is_an_error_and_never_success(tmp_path: Path) -> None:
+    command = RECORD_NOTIFY + r'''
+        INTRADAY_STOP_TIMEOUT=0
+        intraday_identity_matches() { return 0; }
+        kill() { printf '%s\n' "$*" >> "$HOME/signals"; }
+        printf '123 456\n' > "$STATE_DIR/intraday.pid"
+        stop_intraday
+    '''
+    result = _scheduler_shell(tmp_path, command)
+    assert result.returncode == 1, result.stderr
+    assert (tmp_path / "home" / "signals").read_text().splitlines() == ["-TERM 123", "-9 123"]
+    assert any("error|Sawa Intraday FAILED" in call for call in _notify_calls(tmp_path))
+    assert not any("Sawa Intraday Stopped" in call for call in _notify_calls(tmp_path))
+
+
+def test_maintenance_done_marker_requires_job_and_doctor_success(tmp_path: Path) -> None:
+    command = RECORD_NOTIFY + r'''
+        sawa() { return 0; }
+        run_doctor() { return 1; }
+        run_maintenance
+    '''
+    result = _scheduler_shell(tmp_path, command)
+    assert result.returncode == 1, result.stderr
+    state = tmp_path / "home" / ".sawa" / "scheduler"
+    assert not list(state.glob("maintenance_done_*"))
+
+
+def test_maintenance_worker_releases_market_lock_and_prevents_duplicates(tmp_path: Path) -> None:
+    command = r'''
+        notify() { :; }
+        evening_jobs_allowed() { return 0; }
+        is_maintenance_done_this_week() { return 1; }
+        run_maintenance() {
+            printf 'worker\n' >> "$HOME/workers"
+            sleep 0.5
+        }
+        start_maintenance
+        for _attempt in {1..40}; do
+            [ -f "$HOME/workers" ] && break
+            sleep 0.01
+        done
+        test -f "$HOME/workers"
+        # Parent releases its lock; the long worker must not still hold fd9.
+        exec 9>&-
+        exec 7>"$LOCK_FILE"
+        flock -n 7
+        # A second tick cannot start duplicate maintenance while fd8 is held.
+        start_maintenance
+        wait
+    '''
+    result = _scheduler_shell(tmp_path, command)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "home" / "workers").read_text().splitlines() == ["worker"]
+
+
+def test_long_daily_does_not_launch_other_jobs_next_morning(tmp_path: Path) -> None:
+    command = r'''
+        initialize_scheduler() { :; }
+        setup_env() { :; }
+        notify_ignored_env_keys_once() { :; }
+        heartbeat() { :; }
+        check_market_status() { printf 'closed\n'; }
+        is_intraday_running() { return 1; }
+        is_daily_done_today() { return 1; }
+        is_weekly_done_this_week() { return 1; }
+        is_maintenance_done_this_week() { return 1; }
+        clock_hour=18
+        date() {
+            if [ "${1:-}" = '+%-H' ]; then printf '%s\n' "$clock_hour"
+            else command date "$@"; fi
+        }
+        run_daily() { printf 'daily\n' >> "$HOME/jobs"; clock_hour=10; }
+        run_weekly() { printf 'weekly\n' >> "$HOME/jobs"; }
+        start_maintenance() { printf 'maintenance\n' >> "$HOME/jobs"; }
+        main
+    '''
+    result = _scheduler_shell(tmp_path, command)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "home" / "jobs").read_text().splitlines() == ["daily"]
 
 
 def test_scheduler_rejects_preexisting_state_symlink(tmp_path: Path) -> None:

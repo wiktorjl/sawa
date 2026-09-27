@@ -10,11 +10,13 @@ within minutes of settlement, letting the daily write today's VIX/VIX3M.
 No API key required.
 """
 
+import csv
+import io
 import logging
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -22,7 +24,8 @@ import httpx
 from sawa.domain.exceptions import ProviderError
 from sawa.utils.security import redact_sensitive_text
 
-BASE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes"
+BASE_URL = "https://cdn-api.cboe.com/api/global/delayed_quotes/quotes"
+HISTORY_URL = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices"
 
 # CBOE quote symbols -> market_internals columns
 SYMBOLS = {
@@ -79,7 +82,7 @@ class CboeMarketInternalsResult(list[dict[str, Any]]):
     @property
     def all_quotes_failed(self) -> bool:
         """Whether every configured CBOE quote request failed."""
-        return len(self.failures) == len(SYMBOLS)
+        return not self and len({failure.field for failure in self.failures}) == len(SYMBOLS)
 
     @property
     def failure_details(self) -> list[dict[str, str]]:
@@ -136,7 +139,7 @@ class CboeClient:
 
     def __init__(self, logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger(__name__)
-        self.client = httpx.Client(timeout=30.0)
+        self.client = httpx.Client(timeout=30.0, follow_redirects=False)
 
     def close(self) -> None:
         self.client.close()
@@ -200,7 +203,33 @@ class CboeClient:
             self.logger.warning(f"  CBOE {symbol}: unusable quote ({exc})")
             return None
 
-    def get_market_internals(self) -> CboeMarketInternalsResult:
+    def _fetch_history(
+        self, symbol: str, start: date, end: date
+    ) -> list[dict[str, Any]]:
+        """Reconcile missed settlements from CBOE's authoritative daily CSV."""
+        response = self.client.get(f"{HISTORY_URL}/{symbol.lstrip('_')}_History.csv")
+        response.raise_for_status()
+        if len(response.content) > 10 * 1024 * 1024:
+            raise ProviderError("CBOE history exceeds size limit", provider="cboe")
+        reader = csv.DictReader(io.StringIO(response.text.lstrip("\ufeff")))
+        if not reader.fieldnames or not {"DATE", "CLOSE"}.issubset(reader.fieldnames):
+            raise ProviderError("CBOE history has invalid columns", provider="cboe")
+        rows = []
+        for record in reader:
+            session = datetime.strptime(record["DATE"], "%m/%d/%Y").date()
+            if not start <= session <= end:
+                continue
+            close = float(record["CLOSE"])
+            if not math.isfinite(close) or not 0 < close <= _MAX_MARKET_INTERNAL_VALUE:
+                raise ProviderError("CBOE history has invalid close", provider="cboe")
+            rows.append({"date": session.isoformat(), "close": close})
+        if not rows:
+            raise ProviderError("CBOE history contains no requested observations", provider="cboe")
+        return rows
+
+    def get_market_internals(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> CboeMarketInternalsResult:
         """
         Fetch latest VIX/VIX3M settlement values grouped by actual session.
 
@@ -214,9 +243,25 @@ class CboeClient:
             quote's actual reported date; values are never shifted onto a
             different session when the two feeds temporarily disagree.
         """
+        start = date.fromisoformat(start_date) if start_date else None
+        end = date.fromisoformat(end_date) if end_date else date.today()
+        if start is not None and start > end:
+            raise ValueError("start_date must not follow end_date")
         quotes: list[tuple[str, dict[str, Any]]] = []
-        failures: list[CboeQuoteFailure] = []
+        failures: dict[str, CboeQuoteFailure] = {}
         for symbol, field in SYMBOLS.items():
+            if start is not None:
+                try:
+                    quotes.extend(
+                        (field, row) for row in self._fetch_history(symbol, start, end)
+                    )
+                except Exception as exc:
+                    failures[field] = CboeQuoteFailure(
+                        symbol, field, type(exc).__name__, redact_sensitive_text(exc)
+                    )
+                    self.logger.warning(
+                        "CBOE %s history failed: %s", symbol, failures[field].message
+                    )
             try:
                 quote = self._fetch_quote(symbol)
             except Exception as e:
@@ -226,13 +271,17 @@ class CboeClient:
                     error_type=type(e).__name__,
                     message=redact_sensitive_text(e),
                 )
-                failures.append(failure)
+                failures[field] = failure
                 self.logger.warning(
                     f"  CBOE {symbol} failed: "
                     f"{failure.error_type}: {failure.message}"
                 )
                 continue
-            quotes.append((field, quote))
+            if (
+                (start is None or quote["date"] >= start.isoformat())
+                and quote["date"] <= end.isoformat()
+            ):
+                quotes.append((field, quote))
             self.logger.info(
                 f"  CBOE {symbol}: {quote['close']} ({quote['date']})"
             )
@@ -243,4 +292,4 @@ class CboeClient:
             row[field] = quote["close"]
 
         rows = [by_date[value] for value in sorted(by_date)]
-        return CboeMarketInternalsResult(rows, failures=tuple(failures))
+        return CboeMarketInternalsResult(rows, failures=tuple(failures.values()))

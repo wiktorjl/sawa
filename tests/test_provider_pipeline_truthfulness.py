@@ -149,7 +149,7 @@ def test_quarterly_outage_does_not_load_stale_artifacts(tmp_path: Path) -> None:
         mock.patch.object(quarterly, "PolygonClient", return_value=client),
         mock.patch.object(quarterly, "SyncRateLimiter"),
         mock.patch.object(quarterly, "get_symbols_from_db", return_value=["AAPL"]),
-        mock.patch.object(quarterly, "get_last_date", return_value=date(2026, 1, 1)),
+        mock.patch.object(quarterly, "get_fundamental_start_dates", return_value={}),
         mock.patch.object(quarterly, "load_fundamentals") as load_fundamentals,
         mock.patch.object(quarterly, "load_ratios") as load_ratios,
     ):
@@ -326,7 +326,7 @@ def test_quarterly_fails_if_one_whole_feed_fails_but_loads_fresh_siblings(
         ),
         mock.patch.object(quarterly, "SyncRateLimiter"),
         mock.patch.object(quarterly, "get_symbols_from_db", return_value=["AAPL"]),
-        mock.patch.object(quarterly, "get_last_date", return_value=date(2026, 1, 1)),
+        mock.patch.object(quarterly, "get_fundamental_start_dates", return_value={}),
         mock.patch.object(quarterly, "load_fundamentals") as load_fundamentals,
     ):
         stats = quarterly.run_quarterly(

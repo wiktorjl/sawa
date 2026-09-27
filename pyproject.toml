@@ -26,11 +26,12 @@ dependencies = [
     "websockets>=13.0",
     "pytz>=2023.3",
     "TA-Lib>=0.4.0",  # Requires C library: brew install ta-lib (macOS) or apt install libta-lib-dev (Ubuntu)
+    "yfinance>=1.1.0",  # Tested earnings parser and curl_cffi session transport
 ]
 
 [project.optional-dependencies]
 backfill = [
-    "yfinance>=0.2.0",
+    "yfinance>=1.1.0",
 ]
 dev = [
     "pytest>=7.0",
@@ -43,7 +44,7 @@ dev = [
     "types-pytz",
     "types-requests",
     "boto3-stubs[s3]",
-    "yfinance>=0.2.0",
+    "yfinance>=1.1.0",
 ]
 
 [project.scripts]

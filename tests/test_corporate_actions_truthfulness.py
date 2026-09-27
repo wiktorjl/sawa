@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import ExitStack
 from datetime import date, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
 
@@ -16,7 +17,6 @@ from sawa.domain.corporate_actions import (
     Dividend,
     Earnings,
     StockSplit,
-    is_unrepresentable_split_ratio,
 )
 
 
@@ -464,27 +464,31 @@ def test_dividend_upsert_uses_nullable_identity_conflict_expression() -> None:
 def test_split_parser_rejects_nonpositive_or_nonfinite_ratios(
     payload: dict[str, object],
 ) -> None:
-    with pytest.raises(ValueError, match="positive integer"):
+    with pytest.raises(ValueError, match="positive finite"):
         StockSplit.from_polygon(payload)
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "expected"),
     [
-        _split() | {"split_to": 1.5},
-        _split() | {"split_to": 0.9668},
-        _split() | {"split_from": 2.5, "split_to": 3},
+        (_split() | {"split_to": 1.5}, (2, 3)),
+        (_split() | {"split_to": 0.9668}, (2500, 2417)),
+        (_split() | {"split_from": 2.5, "split_to": 3}, (5, 6)),
+        (_split() | {"split_from": "0.2", "split_to": "0.3"}, (2, 3)),
+        (_split() | {"split_from": Decimal("2.50"), "split_to": 1}, (5, 2)),
+        (
+            _split("AXIA") | {"execution_date": "2025-12-22", "split_to": 1.2628378881074},
+            (5_000_000_000_000, 6_314_189_440_537),
+        ),
+        (_split() | {"split_to": "0.0000000001"}, (10_000_000_000, 1)),
+        (_split() | {"split_to": 9_223_372_036_854_775_807}, (1, 9_223_372_036_854_775_807)),
     ],
 )
-def test_fund_reorganization_ratios_are_skippable_not_malformed(
-    payload: dict[str, object],
+def test_fractional_split_ratios_are_normalized_exactly(
+    payload: dict[str, object], expected: tuple[int, int],
 ) -> None:
-    """Fractional ratios are unrepresentable in the integer schema, not corrupt.
-
-    One of these aborted the whole corporate-actions batch, including the real
-    equity splits that drive price/TA repair.
-    """
-    assert is_unrepresentable_split_ratio(payload) is True
+    split = StockSplit.from_polygon(payload)
+    assert (split.split_from, split.split_to) == expected
 
 
 @pytest.mark.parametrize(
@@ -493,14 +497,60 @@ def test_fund_reorganization_ratios_are_skippable_not_malformed(
         _split() | {"split_from": 0},
         _split() | {"split_to": -2},
         _split() | {"split_to": float("inf")},
-        _split() | {"split_to": "3"},
+        _split() | {"split_to": True},
+        _split() | {"split_to": "NaN"},
+        _split() | {"split_to": "0.00000000000000000001"},
+        _split() | {"split_to": 9_223_372_036_854_775_808},
+        _split() | {"split_to": "1e-1000000"},
         _split() | {"split_to": None},
-        42,
     ],
 )
-def test_malformed_split_ratios_stay_fatal(payload: object) -> None:
-    """Only fractional ratios are skipped; anything else must still raise."""
-    assert is_unrepresentable_split_ratio(payload) is False
+def test_malformed_or_unstorable_split_ratios_stay_fatal(payload: dict) -> None:
+    with pytest.raises(ValueError):
+        StockSplit.from_polygon(payload)
+
+
+@pytest.mark.parametrize(
+    ("ticker", "execution_date", "split_to", "expected"),
+    [
+        ("NIPMY", "2026-08-01", 1.5, (2, 3)),
+        ("AXIA", "2025-12-22", 1.2628378881074, (5_000_000_000_000, 6_314_189_440_537)),
+    ],
+)
+def test_tracked_fractional_split_is_persisted_and_triggers_repair(
+    ticker: str, execution_date: str, split_to: float, expected: tuple[int, int],
+) -> None:
+    conn = _connection()
+    client = _client()
+    client.get_splits.return_value = [
+        _split(ticker) | {"execution_date": execution_date, "split_to": split_to}
+    ]
+    with _dependency_patches(conn, client):
+        stats = actions.run_corporate_actions_update(
+            api_key="offline-key", database_url="unused", tickers=[ticker],
+            include_dividends=False,
+        )
+    assert stats["success"] is True
+    assert stats["splits_loaded"] == stats["splits_eligible"] == 1
+    assert stats["split_tickers"] == [ticker]
+    assert stats["splits_persistence"]["committed_rows"] == 1
+    cursor = conn.cursor.return_value.__enter__.return_value
+    inserts = [c for c in cursor.execute.call_args_list if "INSERT INTO stock_splits" in c.args[0]]
+    assert inserts[0].args[1] == (ticker, date.fromisoformat(execution_date), *expected)
+    conn.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_unrepresentable_tracked_split_never_reports_clean_success(dry_run: bool) -> None:
+    conn = _connection(rollback_on_error_exit=True)
+    client = _client()
+    client.get_splits.return_value = [_split() | {"split_to": "0.00000000000000000001"}]
+    with _dependency_patches(conn, client), pytest.raises(ValueError, match="exact split ratio"):
+        actions.run_corporate_actions_update(
+            api_key="offline-key", database_url="unused", tickers=["AAPL"],
+            include_dividends=False, dry_run=dry_run,
+        )
+    conn.commit.assert_not_called()
 
 
 def test_weekly_and_semimonthly_dividend_frequencies_are_accepted() -> None:

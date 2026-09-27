@@ -21,6 +21,9 @@ def _verified_coldstart_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(coldstart, "verify_tables", lambda _conn: [])
     monkeypatch.setattr(coldstart, "verify_views", lambda _conn: [])
     monkeypatch.setattr(coldstart, "verify_materialized_views", lambda _conn: [])
+    # These fixtures exercise persistence with object() connections; issuer
+    # boundary discovery/filtering has its own database-shaped regression suite.
+    monkeypatch.setattr(database_load, "get_identity_price_cutoffs", lambda *_args: {})
 
 
 def _schema_connection(*columns: str) -> mock.MagicMock:
@@ -155,6 +158,7 @@ def test_successful_loader_returns_structured_persistence_counts(
         "eligible_rows": 1,
         "inserted_rows": 1,
         "skipped_rows": 0,
+        "excluded_identity_rows": 0,
         "failed_rows": 0,
         "fully_persisted": True,
     }
@@ -198,7 +202,7 @@ def test_quarterly_rejects_truncated_fresh_ratio_artifact(tmp_path: Path) -> Non
         mock.patch.object(quarterly, "PolygonClient"),
         mock.patch.object(quarterly, "SyncRateLimiter"),
         mock.patch.object(quarterly, "get_symbols_from_db", return_value=["AAPL"]),
-        mock.patch.object(quarterly, "get_last_date", return_value=date(2026, 1, 1)),
+        mock.patch.object(quarterly, "get_fundamental_start_dates", return_value={}),
         mock.patch.object(quarterly, "download_ratios", return_value=downloaded),
         mock.patch.object(quarterly, "load_ratios", return_value=truncated),
     ):

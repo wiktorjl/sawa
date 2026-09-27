@@ -96,8 +96,9 @@ Runs after market close. Steps:
 4. Fetch news (`fetch_and_load_news`) — last `DEFAULT_NEWS_DAYS` of articles
 5. Recompute technical indicators incrementally
    (`sawa/database/ta_load.py`)
-6. Pull FRED market internals → `market_internals` table (VIX/VIX3M/HY
-   spread live only here; not mirrored into `stock_prices`)
+6. Pull FRED market internals and CBOE VIX/VIX3M quotes/history with a
+   30-day replay → `market_internals` (not mirrored into `stock_prices`)
+7. Refresh treasury yields with a 30-day revision overlap
 
 Skips: `--skip-news`, `--skip-ta`, `--skip-market-internals`,
 `--news-only`. `--from-date YYYY-MM-DD` replays prices from a date forward and
@@ -106,20 +107,21 @@ the needed warm-up history).
 
 A missing `POLYGON_API_KEY` is fatal: `daily` logs an error and exits
 non-zero before doing any work (Polygon underpins prices, news, and TA).
-A missing `FRED_API_KEY` is not fatal: it triggers `alert_missing_api_key`
-— the market-internals step is skipped, an ntfy notification is sent if
-`NTFY_TOPIC` is set, and the overall job still exits 0 for the other
-steps. (See `b59f8a6 feat: alert on missing API keys, deprecate Polygon
-VIX path`.)
+A missing `FRED_API_KEY` is not fatal to collection: it triggers
+`alert_missing_api_key` and the job reports degradation. The daily
+market-internals block, including CBOE collection, is skipped. The post-daily
+doctor can still fail: it requires both volatility series through the expected
+trading session, matching the watchdog.
 
 ### `sawa weekly` → `sawa/weekly.py`
 
 Slow-moving data:
 
 1. Economy: treasury yields, CPI/PCE, inflation expectations, labor market
+   (365-day revision overlap per table)
 2. Company overviews — re-pulls ticker details (market cap, SIC, etc.)
 3. News (same loader as daily)
-4. Corporate actions: stock splits, dividends, earnings via
+4. Corporate actions: stock splits and dividends via
    `sawa/corporate_actions.py`
 5. Stock character classification — see
    [`docs/STOCK_CHARACTER.md`](STOCK_CHARACTER.md). Runs via
@@ -133,24 +135,39 @@ Skips: `--skip-economy`, `--skip-overviews`, `--skip-news`,
 1. Balance sheets, income statements, cash flows (Polygon REST)
 2. Financial ratios
 
-Slow but rarely changes. Run by hand after a quarter ends, or as a cron
-once a quarter.
+Uses a separate filing watermark for each ticker/feed with a 120-day
+overlap; missing histories fetch without a lower bound. `--full-history`
+reconciles older gaps. Scheduled maintenance invokes this weekly and
+requests full history once per calendar month, recording completion only
+after successful persistence.
+
+### `sawa maintenance` → `sawa/maintenance.py`
+
+Runs universe discovery/onboarding before replacing complete index snapshots,
+then fundamentals/ratios, then Yahoo earnings. Stages fail independently;
+any incomplete stage prevents a successful completion marker. Failed sources
+or onboarding retain affected membership snapshots. Earnings failures remain
+visible, including Yahoo HTTP errors hidden by its library; missing EPS fields
+preserve stored values. Use `--skip-universe`, `--skip-fundamentals`,
+`--skip-earnings`, `--full-history`, or `--dry-run` for scoped work.
 
 ### `sawa intraday` → `sawa/intraday.py` + `sawa/live.py`
 
 Polygon WebSocket subscription for live 5-min bars (15-min delayed on the
-basic tier). Writes to `stock_prices_intraday`. Designed to be started at
-the open and killed at the close — `scripts/market_scheduler.sh` does this
-automatically.
+basic tier). Writes to `stock_prices_intraday`. The scheduler starts it at
+the open, drains for 30 minutes after the observed close (delay plus correction
+allowance), then requests graceful shutdown and verifies final persistence.
+Startup/reconnect REST reconciliation restores elapsed current-session minutes,
+including partial five-minute buckets. EOD cleanup waits until the stream stops.
 
 ## 3. The unattended scheduler
 
 `scripts/market_scheduler.sh` is a single bash file that handles
 everything. Install it as a single cron entry that fires every 15 minutes
-on weekdays:
+every day (including weekend recovery):
 
 ```cron
-*/15 * * * 1-5 /path/to/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
+*/15 * * * * /path/to/sawa/scripts/market_scheduler.sh >> ~/.sawa/scheduler/cron.log 2>&1
 ```
 
 On each tick it:
@@ -158,16 +175,21 @@ On each tick it:
 1. Acquires a flock so two instances don't overlap
 2. Checks `https://api.polygon.io/v1/marketstatus/now` (fallback: ET clock)
 3. Market open → start `sawa intraday` if not already running
-4. Market closed → stop `sawa intraday`, then:
+4. Market closed → finish the delayed-feed drain and stop `sawa intraday`, then:
    - If `>= 17:00 ET` and daily hasn't run today, run `sawa daily`
-   - If Saturday and weekly hasn't run this ISO week, run `sawa weekly`
-5. After successful daily/weekly jobs, run `sawa doctor --job daily|weekly`
+   - If `>= 17:00 ET` and weekly hasn't run this ISO week, run `sawa weekly`
+     (normally Monday); daily failure does not suppress this attempt
+   - Start weekly `sawa maintenance` under its own background lock, releasing
+     the scheduler lock so long maintenance cannot prevent next-session streaming
+5. After successful daily/weekly/maintenance jobs, run the daily/weekly/quarterly
+   doctor respectively; only a passing check earns a completion marker
 6. Sends start/stop/failure push notifications to `NTFY_TOPIC`
 
 State lives in `~/.sawa/scheduler/`:
 - `intraday.pid`, `intraday.log`, `intraday_{start,stop}_time`
 - `daily_done_YYYY-MM-DD` (cleaned after 7 days)
 - `weekly_done_YYYY-WNN` (cleaned after 60 days)
+- `maintenance_done_YYYY-WNN`, separate maintenance lock, bounded attempt counters
 - `scheduler.log` (trimmed to 5000 lines when it exceeds 10000)
 
 The `scripts/{daily,weekly,coldstart}.sh` wrappers are simpler — they just

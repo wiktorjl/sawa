@@ -7,7 +7,8 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from math import ceil
 from pathlib import Path
 from typing import Any, Literal
@@ -18,7 +19,6 @@ from sawa.utils.logging import setup_logging
 from sawa.utils.market_hours import (
     ET,
     expected_latest_eod_date,
-    get_market_date,
     is_trading_day,
     previous_trading_day,
 )
@@ -135,6 +135,7 @@ def _required_tables_checks(conn: Any, job: DoctorJob) -> list[DoctorCheck]:
                 "technical_indicators",
                 "news_articles",
                 "market_internals",
+                "treasury_yields",
                 "stock_prices_live",
                 "mv_52week_extremes",
             ]
@@ -611,6 +612,7 @@ def _daily_checks(
     min_coverage: float,
     expected_eod: date,
     calendar_strict: bool = False,
+    internals_strict: bool = False,
 ) -> list[DoctorCheck]:
     """Daily-cadence freshness checks.
 
@@ -687,7 +689,8 @@ def _daily_checks(
             ("vix", "vix3m", "hy_spread"), latest_values, strict=True
         ):
             max_days = (
-                max(0, (today - internals_floor[field]).days) if calendar_strict else 5
+                max(0, (today - internals_floor[field]).days)
+                if calendar_strict or internals_strict else 5
             )
             checks.append(
                 _check(
@@ -699,6 +702,27 @@ def _daily_checks(
                     expected=f"within {max_days} days of {today}",
                 )
             )
+
+    if _table_exists(conn, "treasury_yields"):
+        latest_treasury = _fetchone(
+            conn, "SELECT MAX(date) FROM public.treasury_yields"
+        )[0]
+        # Unlike CBOE's same-session settlement, Treasury observations may be
+        # published one completed trading session late. Use the trading
+        # calendar so weekends/holidays do not consume that publication lag.
+        treasury_floor = previous_trading_day(expected_eod)
+        treasury_max_days = max(0, (today - treasury_floor).days)
+        checks.append(
+            _check(
+                "treasury_yields.latest_date",
+                _within_days(latest_treasury, today, treasury_max_days),
+                f"latest treasury_yields date is {latest_treasury}",
+                severity="fail",
+                observed=latest_treasury,
+                expected=f"on or after {treasury_floor} and not after {today} "
+                "(one completed trading session publication lag)",
+            )
+        )
 
     if _table_exists(conn, "news_articles"):
         latest_news, news_rows = _fetchone(
@@ -756,19 +780,15 @@ def _weekly_checks(
     active_count: int,
     today: date,
     min_coverage: float,
+    include_treasury: bool = True,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
 
-    # treasury_yields is a daily-cadence series but currently refreshed only by
-    # the weekly job, so it can lag up to a week. Threshold tightened from 21 to
-    # 8 days so a *missed* weekly run (which would push it past a week) is
-    # surfaced instead of hidden. (Follow-up: move it to the daily refresh.)
-    #
-    # treasury_yields is the fastest-cadence weekly series, so promote it to FAIL
-    # so a silently-skipped/failed weekly economy pull flips the exit code and
-    # the scheduler retries — the same "success on failure" guard the daily
-    # TA/internals checks already carry. The slower inflation/labor series stay
-    # WARN on their long thresholds (they genuinely refresh infrequently).
+    # Treasury now refreshes daily and the daily/watchdog checks enforce its
+    # one-session publication lag. Keep this older eight-day guard for the
+    # standalone weekly economy job; combined all/coldstart checks already use
+    # the stricter daily guard and must not emit a duplicate weaker result.
+    # Slow inflation/labor series stay WARN on their long release cadences.
     economy_thresholds: dict[str, tuple[int, Severity]] = {
         "treasury_yields": (8, "fail"),
         "inflation": (120, "warn"),
@@ -776,6 +796,8 @@ def _weekly_checks(
         "labor_market": (120, "warn"),
     }
     for table, (max_age, severity) in economy_thresholds.items():
+        if table == "treasury_yields" and not include_treasury:
+            continue
         if not _table_exists(conn, table):
             continue
         latest = _fetchone(conn, f"SELECT MAX(date) FROM {table}")[0]
@@ -791,13 +813,37 @@ def _weekly_checks(
         )
 
     if _table_exists(conn, "stock_character_classification"):
-        latest_run, classified = _fetchone(
+        latest_run = _fetchone(
             conn,
             """
-            SELECT MAX(run_date), COUNT(DISTINCT ticker)
-            FROM stock_character_classification
+            SELECT MAX(sc.run_date)
+            FROM stock_character_classification sc
+            JOIN companies c ON c.ticker = sc.ticker AND c.active = true
             """,
-        )
+        )[0]
+        classified, eligible = 0, 0
+        if latest_run is not None:
+            from sawa.calculation.stock_character_config import MIN_HISTORY_DAYS
+
+            source_date = previous_trading_day(latest_run + timedelta(days=1))
+            classified, eligible = _fetchone(
+                conn,
+                """
+                WITH eligible_character_prices AS (
+                    SELECT sp.ticker
+                    FROM stock_prices sp
+                    JOIN companies c ON c.ticker = sp.ticker AND c.active = true
+                    WHERE sp.date <= %s
+                    GROUP BY sp.ticker
+                    HAVING MAX(sp.date) = %s AND COUNT(*) >= %s
+                )
+                SELECT COUNT(sc.ticker), COUNT(ep.ticker)
+                FROM eligible_character_prices ep
+                LEFT JOIN stock_character_classification sc
+                    ON sc.ticker = ep.ticker AND sc.run_date = %s
+                """,
+                (latest_run, source_date, MIN_HISTORY_DAYS, latest_run),
+            )
         # The character classification is the headline weekly artifact; a run
         # that silently fails or is skipped leaves stale classifications served
         # to MCP tools with no alert. Promote freshness to FAIL (the 21-day
@@ -816,11 +862,12 @@ def _weekly_checks(
         checks.append(
             _check(
                 "stock_character_classification.coverage",
-                _coverage_ok(int(classified or 0), active_count, min_coverage),
-                f"stock character covers {classified or 0}/{active_count} active tickers",
+                bool(eligible) and _coverage_ok(int(classified or 0), int(eligible), min_coverage),
+                f"latest stock character run covers {classified or 0}/{eligible} "
+                "eligible active tickers with current source prices",
                 severity="warn",
                 observed=int(classified or 0),
-                expected=f">= {min_coverage:.0%} of active companies",
+                expected=f">= {min_coverage:.0%} of eligible active companies on latest run",
             )
         )
 
@@ -1029,7 +1076,10 @@ def _scheduler_state_checks(
             (
                 f"intraday PID {pid} is running outside the session window{started}"
                 if alive and not in_session_window
-                else (f"intraday PID {pid} running during the session" if alive else "no live intraday process")
+                else (
+                    f"intraday PID {pid} running during the session"
+                    if alive else "no live intraday process"
+                )
             ),
             severity="fail",
             observed=pid if alive else None,
@@ -1139,6 +1189,7 @@ def run_doctor_on_connection(
                 min_coverage=min_coverage,
                 expected_eod=expected_eod,
                 calendar_strict=job == "watchdog",
+                internals_strict=job in {"daily", "watchdog"},
             )
         )
 
@@ -1159,6 +1210,7 @@ def run_doctor_on_connection(
                 active_count=active_count,
                 today=today,
                 min_coverage=min_coverage,
+                include_treasury=job == "weekly",
             )
         )
 

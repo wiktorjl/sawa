@@ -1,6 +1,7 @@
 """Market hours utilities for US stock market."""
 
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 
 import pytz
 
@@ -138,6 +139,24 @@ def is_trading_day(day: date) -> bool:
     )
 
 
+@lru_cache(maxsize=512)
+def regular_session_close(day: date) -> datetime | None:
+    """Scheduled NYSE close, including the recurring 13:00 ET half sessions.
+
+    The scheduler additionally follows the provider's live exchange status for
+    unscheduled closures. Full-day holidays always take precedence here.
+    """
+    if not is_trading_day(day):
+        return None
+    thanksgiving = _nth_weekday(day.year, 11, 3, 4)
+    early = (
+        day == thanksgiving + timedelta(days=1)
+        or (day.month, day.day) == (12, 24)
+        or (day.month, day.day) == (7, 3)
+    )
+    return ET.localize(datetime(day.year, day.month, day.day, 13 if early else 16))
+
+
 def previous_trading_day(day: date) -> date:
     """Most recent trading day strictly before ``day``."""
     candidate = day - timedelta(days=1)
@@ -146,9 +165,7 @@ def previous_trading_day(day: date) -> date:
     return candidate
 
 
-def expected_latest_eod_date(
-    now_et: datetime | None = None, *, settled_hour: int = 20
-) -> date:
+def expected_latest_eod_date(now_et: datetime | None = None, *, settled_hour: int = 20) -> date:
     """Most recent session whose EOD data should already be in the database.
 
     The daily job starts at 17:00 ET and normally finishes before 19:00 ET, so

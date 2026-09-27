@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS stock_splits (
     id SERIAL PRIMARY KEY,
     ticker VARCHAR(10) NOT NULL REFERENCES companies(ticker) ON DELETE CASCADE,
     execution_date DATE NOT NULL,
-    split_from INTEGER NOT NULL,  -- e.g., 1
-    split_to INTEGER NOT NULL,    -- e.g., 4 (for 4:1 split)
+    split_from BIGINT NOT NULL,  -- exact normalized denominator, e.g., 1
+    split_to BIGINT NOT NULL,    -- exact normalized numerator, e.g., 4
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(ticker, execution_date)
 );

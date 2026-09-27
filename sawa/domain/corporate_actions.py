@@ -10,7 +10,6 @@ from typing import Any
 from sawa.domain.price_validation import MAX_BIGINT, MAX_STORABLE_PRICE, PRICE_SCALE
 from sawa.utils.symbols import validate_ticker
 
-_MAX_INTEGER = 2_147_483_647
 _MAX_BIGINT = 9_223_372_036_854_775_807
 _MAX_NUMERIC_10_4 = Decimal("1000000")
 _NUMERIC_10_4_SCALE = Decimal("0.0001")
@@ -31,38 +30,41 @@ def _positive_integer(value: object, field: str) -> int:
         not parsed.is_finite()
         or parsed != parsed.to_integral_value()
         or parsed <= 0
-        or parsed > _MAX_INTEGER
+        or parsed > MAX_BIGINT
     ):
         raise ValueError(f"{field} must be a positive integer")
     return int(parsed)
 
 
-def is_unrepresentable_split_ratio(data: object) -> bool:
-    """Whether a provider split record carries a non-integer share ratio.
+def normalize_split_ratio(split_from: object, split_to: object) -> tuple[int, int]:
+    """Represent finite decimal share counts as an exact bounded integer ratio.
 
-    Polygon reports mutual-fund reorganizations through the splits endpoint
-    with fractional ratios (NSNRX 1:0.9668, NIPMY 1:1.5). ``stock_splits``
-    stores integer share counts, so such a record is unrepresentable rather
-    than malformed, and one of them must not fail the batch that also carries
-    real equity splits. Anything else — a missing, non-numeric, zero, negative,
-    or out-of-range ratio — stays malformed and is left to the strict parser.
+    For example, 1:1.5 becomes 2:3 and 1:0.9668 becomes 2500:2417.
+    Both normalized counts must fit PostgreSQL BIGINT (migration 49).
+    Decimal parsing avoids introducing a binary-float approximation. Never
+    round an unrepresentable ratio: it must fail visibly before persistence.
     """
-    if not isinstance(data, dict):
-        return False
-    for field in ("split_from", "split_to"):
-        value = data.get(field)
-        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-            return False
+    values: list[Decimal] = []
+    for field, value in (("split_from", split_from), ("split_to", split_to)):
+        if isinstance(value, bool):
+            raise ValueError(f"{field} must be a positive finite share count")
         try:
             parsed = Decimal(str(value))
-        except (InvalidOperation, ValueError):
-            return False
-        if not parsed.is_finite() or parsed <= 0 or parsed > _MAX_INTEGER:
-            return False
-    return any(
-        Decimal(str(data[field])) != Decimal(str(data[field])).to_integral_value()
-        for field in ("split_from", "split_to")
-    )
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{field} must be a positive finite share count") from exc
+        if (
+            not parsed.is_finite()
+            or parsed <= 0
+            or parsed > MAX_BIGINT
+            # Bound provider-controlled arithmetic before constructing Fractions.
+            or parsed.as_tuple().exponent < -100
+        ):
+            raise ValueError(f"{field} must be a positive finite bounded share count")
+        values.append(parsed)
+    ratio = Fraction(values[1]) / Fraction(values[0])
+    if ratio.numerator > MAX_BIGINT or ratio.denominator > MAX_BIGINT:
+        raise ValueError("exact split ratio does not fit positive BIGINT share counts")
+    return ratio.denominator, ratio.numerator
 
 
 def _optional_numeric_10_4(
@@ -130,11 +132,12 @@ class StockSplit:
     @classmethod
     def from_polygon(cls, data: dict) -> "StockSplit":
         """Create from Polygon API response."""
+        split_from, split_to = normalize_split_ratio(data["split_from"], data["split_to"])
         return cls(
             ticker=validate_ticker(str(data["ticker"])),
             execution_date=date.fromisoformat(data["execution_date"]),
-            split_from=_positive_integer(data["split_from"], "split_from"),
-            split_to=_positive_integer(data["split_to"], "split_to"),
+            split_from=split_from,
+            split_to=split_to,
         )
 
     def to_tuple(self) -> tuple:

@@ -45,6 +45,7 @@ ECONOMY_ENDPOINT_TABLES = {
     "inflation-expectations": "inflation_expectations",
     "labor-market": "labor_market",
 }
+ECONOMY_REVISION_OVERLAP_DAYS = 365
 
 
 def download_overviews(
@@ -116,6 +117,7 @@ def download_economy(
     output_dir: Path,
     logger: logging.Logger,
     start_dates: dict[str, str] | None = None,
+    endpoints: set[str] | None = None,
 ) -> DownloadStats:
     """Download economy data.
 
@@ -131,11 +133,15 @@ def download_economy(
     Returns:
         Dict mapping endpoint names to downloaded row counts.
     """
+    if endpoints is not None and not endpoints <= ECONOMY_ENDPOINT_TABLES.keys():
+        raise ValueError("Unknown economy endpoint")
     stats = DownloadStats()
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for endpoint in ECONOMY_ENDPOINT_TABLES:
+        if endpoints is not None and endpoint not in endpoints:
+            continue
         endpoint_start = start_dates.get(endpoint, start_date) if start_dates else start_date
         logger.info(f"Downloading {endpoint} ({endpoint_start} to {end_date})...")
         try:
@@ -190,7 +196,12 @@ def get_economy_start_dates(conn, end_date: date) -> dict[str, str]:
 
     for endpoint, table_name in ECONOMY_ENDPOINT_TABLES.items():
         last_date = get_last_date(conn, table_name)
-        start = last_date or default_start
+        # Releases revise earlier observations. Revisit a year before each
+        # feed's own watermark, including after an extended collection outage.
+        start = (
+            min(last_date, end_date) - timedelta(days=ECONOMY_REVISION_OVERLAP_DAYS)
+            if last_date else default_start
+        )
         start_dates[endpoint] = start.strftime(DATE_FORMAT)
 
     return start_dates
@@ -651,6 +662,11 @@ def run_weekly(
                     log=logger,
                 )
                 stats["character"] = character_stats
+                if character_stats.get("degraded"):
+                    provider_degraded_reasons.append(
+                        "stock character skipped stale source histories "
+                        f"({character_stats.get('stale_sources', 0)} tickers)"
+                    )
                 if not character_stats.get("success", False):
                     raise RuntimeError(
                         "stock character batch reported an incomplete result "

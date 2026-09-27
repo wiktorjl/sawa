@@ -52,6 +52,7 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 | `44_ohlcv_completeness.sql` | Adds non-destructive daily/intraday OHLCV NULL guards | — |
 | `45_intraday_bar_size_identity.sql` | Preserves legacy bars while making interval part of intraday identity; keeps the live candle on one resolution | — |
 | `46_dividend_identity.sql` | Archives legacy duplicate dividend identities and adds PG12-compatible NULL-normalized uniqueness | — |
+| `49_widen_split_ratio_precision.sql` | Widens split share counts to BIGINT so fractional corporate actions retain exact normalized ratios | — |
 
 For the canonical mapping of external data source → table → loader →
 pipeline command, see [`docs/DATA_SOURCES.md`](../docs/DATA_SOURCES.md).
@@ -85,6 +86,13 @@ after copying every non-survivor into `dividend_identity_conflicts`. The runner
 uses `psycopg.sql.Identifier` for safe table-name handling and verifies the
 expected tables exist after loading. See `sawa/database/schema.py` for the list
 of `EXPECTED_TABLES`.
+
+Existing installations must apply migration 49 before loading high-precision
+fractional splits. It only widens `public.stock_splits.split_from` and
+`split_to`, preserves existing values, and skips columns already at BIGINT.
+For a scoped upgrade, execute this file in a single transaction with errors
+stopping execution; do not run the destructive schema-only command. The type
+change takes an exclusive lock on `stock_splits`, so apply it between jobs.
 
 ## Table Relationships
 

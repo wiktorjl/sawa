@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 from sawa.api import PolygonClient
-from sawa.database import get_last_date, get_symbols_from_db
+from sawa.database import get_symbols_from_db
 from sawa.database.load import (
     PersistenceResult,
     load_fundamentals,
@@ -40,6 +41,31 @@ FUNDAMENTAL_ENDPOINT_TABLES = {
 }
 
 
+def get_fundamental_start_dates(conn, end_date: date) -> dict[str, dict[str, str]]:
+    """Independent persisted filing watermarks; an absent ticker gets full history.
+
+    A successful ticker or statement type cannot move a failed sibling's
+    checkpoint. Monthly full-history reconciliation also repairs old interior
+    gaps that predate these checkpoints.
+    """
+    windows: dict[str, dict[str, str]] = {}
+    with conn.cursor() as cur:
+        for endpoint, table in FUNDAMENTAL_ENDPOINT_TABLES.items():
+            cur.execute(
+                sql.SQL(
+                    "SELECT ticker, MAX(filing_date) FROM {} "
+                    "WHERE filing_date <= %s GROUP BY ticker"
+                ).format(sql.Identifier(table)),
+                (end_date,),
+            )
+            windows[endpoint] = {
+                ticker: (last_filing - timedelta(days=120)).isoformat()
+                for ticker, last_filing in cur.fetchall()
+                if last_filing is not None
+            }
+    return windows
+
+
 def download_fundamentals(
     client: PolygonClient,
     symbols: list[str],
@@ -49,6 +75,7 @@ def download_fundamentals(
     logger: logging.Logger,
     rate_limiter: SyncRateLimiter | None = None,
     filing_date_gte: str | None = None,
+    filing_start_dates: dict[str, dict[str, str]] | None = None,
 ) -> DownloadStats:
     """Download fundamentals data (balance sheets, cash flow, income statements).
 
@@ -76,7 +103,11 @@ def download_fundamentals(
                     ticker=symbol,
                     start_date=start_date,
                     end_date=end_date,
-                    filing_date_gte=filing_date_gte,
+                    filing_date_gte=(
+                        filing_start_dates.get(endpoint, {}).get(symbol)
+                        if filing_start_dates is not None
+                        else filing_date_gte
+                    ),
                 )
                 if not isinstance(data, list):
                     raise ProviderError(
@@ -99,6 +130,9 @@ def download_fundamentals(
 
         artifact: str | None = None
         if all_data:
+            # The loader upserts in file order. For amended fiscal periods,
+            # the newest filing must win regardless of provider page ordering.
+            all_data.sort(key=lambda row: str(row.get("filing_date") or ""))
             filepath = output_dir / f"{endpoint.replace('-', '_')}.csv"
             write_csv_auto_fields(filepath, all_data, logger)
             artifact = table_name
@@ -142,8 +176,7 @@ def download_ratios(
                     provider="polygon",
                 )
             bound_rows = [
-                bind_provider_record(record, symbol, output_field="ticker")
-                for record in ratios
+                bind_provider_record(record, symbol, output_field="ticker") for record in ratios
             ]
             all_ratios.extend(bound_rows)
             succeeded += 1
@@ -174,6 +207,7 @@ def run_quarterly(
     skip_ratios: bool = False,
     dry_run: bool = False,
     logger: logging.Logger | None = None,
+    full_history: bool = False,
 ) -> dict[str, Any]:
     """
     Run quarterly fundamentals update.
@@ -211,45 +245,22 @@ def run_quarterly(
             logger.info(f"Found {len(symbols)} symbols in database")
             stats["symbols"] = len(symbols)
 
-            # Get last date for incremental updates. Anchor on MAX(filing_date)
-            # (when reports became available), NOT MAX(period_end) (when the
-            # fiscal period closed): filtering on period_end silently skips
-            # late/amended filers, non-calendar fiscal years, and restatements
-            # of older quarters whose period_end predates the global max.
-            last_filing_date = get_last_date(conn, "balance_sheets", "filing_date")
-
-            # Calculate date range
             end_date = date.today()
             end_str = end_date.strftime(DATE_FORMAT)
-
-            # filing_date_gte drives the incremental pull; fund_start_str
-            # (period_end.gte) is only used for the full-backfill cold path.
-            fund_start_str: str | None
-            if last_filing_date:
-                # Widen overlap to 120 days to also recapture amended filings.
-                filing_gte = last_filing_date - timedelta(days=120)
-                filing_gte_str = filing_gte.strftime(DATE_FORMAT)
-                fund_start_str = None
-                logger.info(
-                    f"Fundamentals incremental window: filing_date >= {filing_gte_str} "
-                    f"(period_end <= {end_str})"
-                )
-            else:
-                # No data yet: full backfill anchored on period_end.
-                fund_start = end_date - timedelta(days=365)
-                fund_start_str = fund_start.strftime(DATE_FORMAT)
-                filing_gte_str = None
-                logger.info(f"Fundamentals date range: {fund_start_str} to {end_str}")
+            filing_windows = (
+                {}
+                if full_history or skip_fundamentals
+                else get_fundamental_start_dates(conn, end_date)
+            )
+            stats["full_history"] = full_history
 
         if dry_run:
             logger.info("\n[DRY RUN] Would update:")
             if not skip_fundamentals:
-                window = (
-                    f"filing_date >= {filing_gte_str}"
-                    if filing_gte_str
-                    else f"period_end >= {fund_start_str}"
+                logger.info(
+                    "  - Fundamentals (%s)",
+                    "full history" if full_history else "per-ticker/feed filing windows",
                 )
-                logger.info(f"  - Fundamentals ({window})")
             if not skip_ratios:
                 logger.info(f"  - Financial ratios for {len(symbols)} symbols")
             stats["success"] = True
@@ -275,20 +286,18 @@ def run_quarterly(
                 fund_stats = download_fundamentals(
                     client,
                     symbols,
-                    fund_start_str,
+                    None,
                     end_str,
                     output_dir / "fundamentals",
                     logger,
                     rate_limiter,
-                    filing_date_gte=filing_gte_str,
+                    filing_start_dates=filing_windows,
                 )
                 stats["fundamentals"] = fund_stats
                 stats["fundamentals_requests"] = fund_stats.requests
                 failed_feeds = fund_stats.failed_feeds
                 if fund_stats.has_failures and not failed_feeds:
-                    degraded_reasons.append(
-                        "fundamentals provider requests partially failed"
-                    )
+                    degraded_reasons.append("fundamentals provider requests partially failed")
                 if fund_stats.empty_feeds:
                     degraded_reasons.append(
                         "fundamentals feeds returned no fresh rows: "
@@ -304,8 +313,7 @@ def run_quarterly(
                         )
                     if isinstance(loaded_fundamentals, dict):
                         stats["fundamentals_loaded"] = {
-                            table: int(result)
-                            for table, result in loaded_fundamentals.items()
+                            table: int(result) for table, result in loaded_fundamentals.items()
                         }
                         stats["fundamentals_persistence"] = {
                             table: result.summary()
@@ -317,18 +325,15 @@ def run_quarterly(
                                 continue
                             result = loaded_fundamentals.get(table)
                             if result is None:
-                                raise RuntimeError(
-                                    f"Fresh {table} artifact was not loaded"
-                                )
+                                raise RuntimeError(f"Fresh {table} artifact was not loaded")
                             if isinstance(result, PersistenceResult):
                                 require_complete_persistence(
                                     result,
                                     expected_rows=int(fund_stats.get(endpoint, 0)),
                                 )
-                if failed_feeds:
+                if fund_stats.has_failures:
                     raise ProviderError(
-                        "Every request failed for fundamentals feed(s): "
-                        + ", ".join(sorted(failed_feeds)),
+                        "Fundamentals requests failed; incomplete tickers require retry",
                         provider="polygon",
                     )
             except Exception as e:
@@ -362,17 +367,15 @@ def run_quarterly(
                         )
                         stats["ratios_loaded"] = int(loaded_ratios)
                         stats["ratios_persistence"] = loaded_ratios.summary()
-                if ratio_count.all_failed:
+                if ratio_count.failed:
                     raise ProviderError(
-                        "All ratios provider requests failed",
+                        "Ratios requests failed; incomplete tickers require retry",
                         provider="polygon",
                     )
             except Exception as e:
                 _record_step_failure("ratios", e)
 
-        degraded_reasons.extend(
-            f"quarterly step failed ({name})" for name in sorted(step_errors)
-        )
+        degraded_reasons.extend(f"quarterly step failed ({name})" for name in sorted(step_errors))
         stats["degraded"] = bool(degraded_reasons)
         if degraded_reasons:
             stats["degraded_reasons"] = degraded_reasons
@@ -380,9 +383,7 @@ def run_quarterly(
         if step_errors:
             stats["step_errors"] = step_errors
         logger.info("\n" + "=" * 60)
-        logger.info(
-            "QUARTERLY UPDATE COMPLETE" + (" (DEGRADED)" if degraded_reasons else "")
-        )
+        logger.info("QUARTERLY UPDATE COMPLETE" + (" (DEGRADED)" if degraded_reasons else ""))
         logger.info("=" * 60)
 
         if "fundamentals" in stats:

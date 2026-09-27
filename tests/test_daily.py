@@ -383,7 +383,9 @@ def test_price_insert_later_batch_failure_rolls_back_every_row() -> None:
     conn = FailingConnection()
     rows = [_price_row(date=f"2026-01-{index:02d}") for index in range(1, 1002)]
 
-    with pytest.raises(RuntimeError, match="later-batch"):
+    with mock.patch(
+        "sawa.database.price_identity.get_identity_price_cutoffs", return_value={}
+    ), pytest.raises(RuntimeError, match="later-batch"):
         insert_prices(conn, rows, logging.getLogger(__name__))
 
     assert conn.committed == []
@@ -729,9 +731,17 @@ def test_next_run_retries_full_stale_ticker_window_after_long_catchup(
     ]
 
 
+@pytest.mark.parametrize("identity_exclusion", [False, True])
 def test_stale_price_repair_widens_split_lookup_and_recomputes_ta_per_ticker(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, identity_exclusion: bool,
 ) -> None:
+    from sawa.database import price_identity
+    from sawa.database.load import PersistenceResult
+
+    monkeypatch.setattr(
+        price_identity, "get_identity_price_cutoffs",
+        lambda *_args: {"CURRENT": date(2026, 1, 1)},
+    )
     class CalendarClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
@@ -748,6 +758,12 @@ def test_stale_price_repair_widens_split_lookup_and_recomputes_ta_per_ticker(
         _price_row(ticker="STALE", date="2026-05-02"),
         _price_row(ticker="CURRENT", date="2026-07-02"),
     ]
+    if identity_exclusion:
+        fetched.append(_price_row(ticker="CURRENT", date="2021-01-04"))
+    price_result = PersistenceResult(
+        2, table="stock_prices", artifact_found=True, source_rows=len(fetched),
+        eligible_rows=2, excluded_identity_rows=int(identity_exclusion),
+    )
     price_starts: dict[str, date | None] = {}
     persisted: dict[str, list[date]] = {}
 
@@ -812,7 +828,7 @@ def test_stale_price_repair_widens_split_lookup_and_recomputes_ta_per_ticker(
         mock.patch.object(daily, "get_market_date", return_value=date(2026, 7, 2)),
         mock.patch.object(daily, "is_after_market_close", return_value=True),
         mock.patch.object(daily, "fetch_prices_via_api", side_effect=fetch_prices),
-        mock.patch.object(daily, "insert_prices", return_value=2),
+        mock.patch.object(daily, "insert_prices", return_value=price_result),
         mock.patch.object(daily, "_heal_splits_in_window") as heal,
         mock.patch.object(daily, "refresh_52week_extremes_if_needed", return_value=False),
         mock.patch(
@@ -847,6 +863,7 @@ def test_stale_price_repair_widens_split_lookup_and_recomputes_ta_per_ticker(
         )
 
     assert stats["success"] is True
+    assert stats["prices_excluded_identity_rows"] == int(identity_exclusion)
     assert heal.call_args.args[2] == date(2026, 5, 1)
     assert price_starts == {
         "STALE": date(2026, 4, 27),
