@@ -134,12 +134,33 @@ def bind_provider_record(
     *,
     output_field: str,
     provider: str = "polygon",
+    allow_related_tickers: bool = False,
 ) -> dict[str, Any]:
-    """Validate provider identity and bind a copied row to the requested ticker."""
+    """Validate provider identity and bind a copied row to the requested ticker.
+
+    Financial statements list all related share classes in ``tickers``. For
+    those feeds, membership establishes the requested symbol; related symbols
+    (including warrants outside our trading universe) are never persisted.
+    Singular identities and other feeds still require an exact match.
+    """
     if not isinstance(record, dict):
         raise ProviderError("Provider returned a non-object record", provider=provider)
 
     requested = validate_ticker(requested_symbol)
+    if allow_related_tickers and "tickers" in record:
+        raw_tickers = record["tickers"]
+        if not isinstance(raw_tickers, list) or not raw_tickers:
+            raise ProviderError(
+                "Provider returned an empty or invalid ticker identity", provider=provider,
+            )
+        if any(not isinstance(ticker, str) or not ticker.strip() for ticker in raw_tickers):
+            raise ProviderError("Provider returned an invalid ticker identity", provider=provider)
+        if requested not in {ticker.strip() for ticker in raw_tickers}:
+            raise ProviderError("Provider returned a mismatched ticker identity", provider=provider)
+        # Validate any explicit singular identity through the strict path too.
+        # Do not normalize related preferred-share suffixes (e.g. AAp) into a
+        # different listed common-stock symbol, or mutate the provider payload.
+        record = {**record, "tickers": [requested]}
     identities: list[Any] = []
     identity_field_present = "ticker" in record or "tickers" in record
     if "ticker" in record:

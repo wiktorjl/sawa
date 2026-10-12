@@ -25,6 +25,7 @@ from sawa.domain.issuer_continuity import (
     REVIEWED_IDENTITY_CORRECTIONS,
     REVIEWED_ISSUER_SUCCESSORS,
 )
+from sawa.domain.reviewed_price_moves import is_reviewed_price_move
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
@@ -376,7 +377,10 @@ def plan_pre_horizon_rebases(
             applicable = [ratio for day, ratio, _ in unapplied if left < day <= right]
             for ratio in applicable:
                 step *= Decimal(ratio.numerator) / ratio.denominator
-            if not historical_lower < step < historical_upper:
+            if (
+                not historical_lower < step < historical_upper
+                and not is_reviewed_price_move(ticker, left, right, step)
+            ):
                 mixed = True
                 break
         if mixed:
@@ -386,7 +390,10 @@ def plan_pre_horizon_rebases(
         for execution_date, ratio, _ in unapplied:
             if tail_date < execution_date <= probe_dates[0]:
                 continuity *= Decimal(ratio.denominator) / ratio.numerator
-        if not lower <= continuity <= upper:
+        if (
+            not lower <= continuity <= upper
+            and not is_reviewed_price_move(ticker, tail_date, probe_dates[0], 1 / continuity)
+        ):
             skipped[ticker] = "pre-horizon rows already sit on a different basis than the boundary"
             continue
         horizon = min(fetched)
@@ -460,10 +467,12 @@ def get_tickers_with_recent_splits(
     conn,
     since_date: date,
 ) -> list[str]:
-    """Query stock_splits for tickers with splits since the given date."""
+    """Find executed splits for active listings; explicit repair requests remain unrestricted."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT ticker FROM stock_splits WHERE execution_date >= %s ORDER BY ticker",
+            "SELECT DISTINCT s.ticker FROM stock_splits s JOIN companies c USING (ticker) "
+            "WHERE c.active = true AND s.execution_date >= %s "
+            "AND s.execution_date <= CURRENT_DATE ORDER BY s.ticker",
             (since_date,),
         )
         return [row[0] for row in cur.fetchall()]
@@ -618,8 +627,15 @@ def refresh_split_adjusted_prices(
             stats["identity_conflicts"] = conflicts
             stats["error"] = (
                 "ticker reuse requires historical issuer quarantine before split repair"
+                f": {', '.join(sorted(conflicts))}"
             )
             logger.error(stats["error"])
+            for ticker, conflict in sorted(conflicts.items()):
+                logger.error(
+                    "  %s: issuer CIK %s on %s differs from %s on %s",
+                    ticker, conflict["old_cik"], conflict["first_date"],
+                    conflict["current_cik"], conflict["last_date"],
+                )
             return stats
 
         # Fetch adjusted prices for each ticker
@@ -734,9 +750,7 @@ def refresh_split_adjusted_prices(
                     f"{plan.before.isoformat()} by {_format_ratio(plan.factor)}"
                 )
             if rebase_skipped:
-                stats["pre_horizon_rebase_skipped"] = dict(
-                    sorted(rebase_skipped.items())[:10]
-                )
+                stats["pre_horizon_rebase_skipped"] = dict(sorted(rebase_skipped.items()))
                 logger.warning(
                     f"  {stats['pre_horizon_dates_not_adjusted']} pre-horizon row(s) "
                     f"across {len(rebase_skipped)} ticker(s) keep their existing basis: "

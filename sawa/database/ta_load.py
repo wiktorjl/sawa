@@ -168,7 +168,7 @@ def get_last_ta_date(conn, ticker: str) -> date | None:
     return None
 
 
-def get_tickers_with_prices(conn) -> list[str]:
+def get_tickers_with_prices(conn, *, active_only: bool = False) -> list[str]:
     """Get all tickers that have price data.
 
     Args:
@@ -177,7 +177,11 @@ def get_tickers_with_prices(conn) -> list[str]:
     Returns:
         List of ticker symbols
     """
-    query = "SELECT DISTINCT ticker FROM stock_prices ORDER BY ticker"
+    query = (
+        "SELECT DISTINCT p.ticker FROM stock_prices p JOIN companies c USING (ticker) "
+        "WHERE c.active = true ORDER BY p.ticker"
+        if active_only else "SELECT DISTINCT ticker FROM stock_prices ORDER BY ticker"
+    )
     with conn.cursor() as cur:
         cur.execute(query)
         return [row[0] for row in cur.fetchall()]

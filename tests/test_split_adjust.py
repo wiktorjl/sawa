@@ -516,6 +516,50 @@ def test_plan_reports_a_tail_already_on_the_provider_basis() -> None:
     assert skipped == {}
 
 
+@pytest.mark.parametrize("ticker,first,last,left_close,right_close", [
+    ("EJH", date(2021, 8, 2), date(2021, 8, 3), "509", "198"),
+    ("EEIQ", date(2021, 9, 28), date(2021, 9, 29), "139.84", "104.16"),
+])
+@pytest.mark.parametrize("corrupt_ratio", [False, True])
+def test_reviewed_market_move_preserves_prices_without_relaxing_other_ratios(
+    ticker, first, last, left_close, right_close, corrupt_ratio,
+) -> None:
+    left = Decimal(left_close) * (2 if corrupt_ratio else 1)
+    right = Decimal(right_close)
+    stored = {
+        first: {"open": left, "close": left},
+        last: {"open": right, "close": right},
+    }
+    with (
+        mock.patch.object(split_adjust, "get_stored_price_rows", return_value=stored),
+        mock.patch.object(split_adjust, "get_unapplied_splits_in_range", return_value=[]),
+        mock.patch.object(split_adjust, "recorded_basis_factor", return_value=Fraction(1)),
+    ):
+        plans, already, skipped = split_adjust.plan_pre_horizon_rebases(
+            object(), fetched_by_ticker={ticker: {last: stored[last]}},
+            existing_dates={ticker: {first, last}}, unreachable_by_ticker={ticker: [first]},
+        )
+    assert not plans
+    if corrupt_ratio:
+        assert ticker in skipped
+        assert not already
+    else:
+        assert not skipped
+        assert already == [ticker]
+
+
+def test_reviewed_market_move_requires_exact_ticker_dates_and_observed_ratio() -> None:
+    from sawa.domain.reviewed_price_moves import is_reviewed_price_move
+
+    left, right = date(2021, 6, 10), date(2021, 6, 11)
+    ratio = Decimal("0.48979591836734694")
+    assert is_reviewed_price_move("RCON", left, right, ratio)
+    assert not is_reviewed_price_move("OTHER", left, right, ratio)
+    assert not is_reviewed_price_move("RCON", date(2021, 6, 9), right, ratio)
+    assert not is_reviewed_price_move("RCON", left, right, ratio * 2)
+    assert not is_reviewed_price_move("RCON", left, right, Decimal("NaN"))
+
+
 @pytest.mark.parametrize("historical_step", ["1.44", "1.3032", "0.7625", "0.725"])
 def test_adjusted_tail_allows_large_historical_market_moves(historical_step: str) -> None:
     stored = _stored_rows(boundary_scale="1", tail_close="14.906")
@@ -759,7 +803,7 @@ def test_small_split_and_real_price_move_are_not_guessed_from_proximity() -> Non
         split_adjust.raw_split_jump_present(Decimal("10"), Decimal("8"), Fraction(3, 2))
 
 
-def test_known_reused_ticker_is_rejected_before_price_fetch_or_writes() -> None:
+def test_known_reused_ticker_is_rejected_before_price_fetch_or_writes(caplog) -> None:
     client = mock.Mock()
     client.get_single.side_effect = [
         {"ticker": "DFNS", "cik": "0001777946"},
@@ -783,6 +827,8 @@ def test_known_reused_ticker_is_rejected_before_price_fetch_or_writes() -> None:
     assert stats["success"] is False
     assert stats["identity_conflicts"]["DFNS"]["old_cik"] == "1777946"
     assert "ticker reuse" in stats["error"]
+    assert "DFNS" in caplog.text
+    assert "1777946 on 2021-02-18 differs from 1787518 on 2026-09-25" in caplog.text
     fetch.assert_not_called()
     insert.assert_not_called()
     assert conn.commits == 0

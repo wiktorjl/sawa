@@ -119,6 +119,7 @@ def download_fundamentals(
                         record,
                         symbol,
                         output_field="tickers",
+                        allow_related_tickers=True,
                     )
                     for record in data
                 ]

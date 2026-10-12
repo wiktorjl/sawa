@@ -15,7 +15,7 @@ from psycopg import sql
 
 from sawa.api import PolygonClient
 from sawa.daily import fetch_prices_via_api, insert_prices
-from sawa.domain.exceptions import ProviderError
+from sawa.domain.exceptions import PriceHistoryUnavailableError, ProviderError
 from sawa.provider_downloads import bind_provider_record
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import setup_logging
@@ -272,6 +272,7 @@ def fetch_and_insert_fundamentals(
                         record,
                         symbol,
                         output_field="ticker",
+                        allow_related_tickers=True,
                     )
                 except ProviderError:
                     failed_rows += 1
@@ -355,12 +356,13 @@ def fetch_and_insert_prices(
     if provider_stats.get("fetch_errors"):
         raise ProviderError("Price history request failed", provider="polygon")
     if not prices:
-        message = (
-            "Price history contained no valid rows"
-            if provider_stats.get("provider_price_rows", 0)
-            else "Price history returned no rows"
-        )
-        raise ProviderError(message, provider="polygon")
+        if provider_stats.get("provider_price_rows", 0):
+            raise ProviderError("Price history contained no valid rows", provider="polygon")
+        if symbol not in provider_stats.get("confirmed_empty_tickers", []):
+            raise ProviderError(
+                "Price history returned no confirmed observations", provider="polygon",
+            )
+        raise PriceHistoryUnavailableError("Price history returned no rows", provider="polygon")
     persisted = insert_prices(conn, prices, logger)
     if not persisted:
         raise ProviderError(

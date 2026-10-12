@@ -16,7 +16,7 @@ from sawa.add_symbol import (
     fetch_and_insert_ratios,
     run_add_symbols,
 )
-from sawa.domain.exceptions import ProviderError
+from sawa.domain.exceptions import PriceHistoryUnavailableError, ProviderError
 
 
 def _sql_text(statement: object) -> str:
@@ -253,9 +253,9 @@ def test_fundamentals_reject_mismatched_provider_ticker_without_mutation() -> No
     assert conn.cursor_instance.insert_attempts == 0
 
 
-def test_fundamentals_reject_mixed_provider_tickers_without_writing() -> None:
+def test_fundamentals_accept_related_share_classes_without_mutating_source() -> None:
     record: dict[str, Any] = {
-        "tickers": ["AAPL", "MSFT"],
+        "tickers": ["GOOGL", "GOOG"],
         "period_end": "2026-03-31",
         "total_assets": 10,
     }
@@ -270,15 +270,16 @@ def test_fundamentals_reject_mixed_provider_tickers_without_writing() -> None:
     stats = fetch_and_insert_fundamentals(
         conn,
         MixedClient(),  # type: ignore[arg-type]
-        "AAPL",
+        "GOOG",
         "2026-01-01",
         "2026-12-31",
         logging.getLogger(__name__),
     )
 
-    assert stats["balance_sheets"] == 0
-    assert conn.cursor_instance.insert_attempts == 0
-    assert record["tickers"] == ["AAPL", "MSFT"]
+    assert stats["balance_sheets"] == 1
+    assert not stats.failures
+    assert conn.cursor_instance.insert_attempts == 1
+    assert record["tickers"] == ["GOOGL", "GOOG"]
 
 
 @pytest.mark.parametrize(
@@ -396,13 +397,27 @@ def test_add_symbol_price_loader_treats_empty_history_as_primary_failure() -> No
         def cursor(self) -> object:
             raise AssertionError("empty provider results must not reach the database")
 
-    with pytest.raises(ProviderError, match="returned no rows"):
+    with pytest.raises(ProviderError, match="no confirmed observations") as error:
         fetch_and_insert_prices(
             NoDatabaseAccess(),
             EmptyPriceClient(),  # type: ignore[arg-type]
             "TEST",
             "2026-06-12",
             "2026-06-12",
+            logging.getLogger(__name__),
+        )
+    assert not isinstance(error.value, PriceHistoryUnavailableError)
+
+
+def test_explicit_empty_price_history_is_distinct_from_an_invalid_response() -> None:
+    client = mock.Mock()
+    client.get.return_value = {
+        "ticker": "SVA", "status": "DELAYED", "adjusted": True,
+        "queryCount": 0, "resultsCount": 0,
+    }
+    with pytest.raises(PriceHistoryUnavailableError):
+        fetch_and_insert_prices(
+            mock.Mock(), client, "SVA", "2021-09-29", "2026-09-29",
             logging.getLogger(__name__),
         )
 

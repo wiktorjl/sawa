@@ -212,7 +212,9 @@ def test_batch_stamps_the_market_date_not_the_host_date(monkeypatch) -> None:
     market_date = date(2026, 9, 1)
     monkeypatch.setattr(stock_character_batch, "get_market_date", lambda: market_date)
     monkeypatch.setattr(stock_character_batch, "_fetch_benchmark_prices", lambda _url, _date: {})
-    monkeypatch.setattr(stock_character_batch, "get_tickers_with_prices", lambda _conn: [])
+    monkeypatch.setattr(
+        stock_character_batch, "get_tickers_with_prices", lambda _conn, **_kwargs: [],
+    )
     monkeypatch.setattr(stock_character_batch.psycopg, "connect", lambda _url: _Connection())
 
     stats = stock_character_batch.run_stock_character_batch(

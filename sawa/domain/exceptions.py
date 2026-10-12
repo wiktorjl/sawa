@@ -63,6 +63,10 @@ class ProviderError(RepositoryError):
         return redact_sensitive_text(rendered)
 
 
+class PriceHistoryUnavailableError(ProviderError):
+    """A successful price request returned no observations, rather than bad rows."""
+
+
 class RateLimitError(ProviderError):
     """Rate limit exceeded.
 

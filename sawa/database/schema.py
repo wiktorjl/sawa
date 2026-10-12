@@ -121,6 +121,7 @@ REQUIRED_SCHEMA_FILENAMES = frozenset(
         "47_widen_indicator_overflow_headroom.sql",
         "48_widen_price_for_compounded_reverse_splits.sql",
         "49_widen_split_ratio_precision.sql",
+        "50_widen_historical_eps.sql",
         "51_widen_earnings_precision.sql",
         "52_fractional_intraday_volume.sql",
     }

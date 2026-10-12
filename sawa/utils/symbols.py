@@ -180,7 +180,7 @@ def fetch_sp500_symbols(logger: logging.Logger) -> list[str]:
 def fetch_nasdaq100_symbols(logger: logging.Logger) -> list[str]:
     """Fetch current NASDAQ-100 symbols from Wikipedia."""
     return _fetch_wikipedia_constituents(
-        "https://en.wikipedia.org/wiki/Nasdaq-100",
+        "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies",
         "NASDAQ-100",
         logger,
     )
@@ -189,7 +189,7 @@ def fetch_nasdaq100_symbols(logger: logging.Logger) -> list[str]:
 def fetch_dow30_symbols(logger: logging.Logger) -> list[str]:
     """Fetch current Dow Jones Industrial Average symbols from Wikipedia."""
     return _fetch_wikipedia_constituents(
-        "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
+        "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies",
         "Dow 30",
         logger,
     )
@@ -205,7 +205,7 @@ def fetch_russell1000_symbols(logger: logging.Logger) -> list[str]:
     enough to live on Wikipedia.
     """
     return _fetch_wikipedia_constituents(
-        "https://en.wikipedia.org/wiki/Russell_1000_Index",
+        "https://en.wikipedia.org/wiki/List_of_Russell_1000_companies",
         "Russell 1000",
         logger,
     )

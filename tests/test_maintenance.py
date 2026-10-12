@@ -9,6 +9,8 @@ from unittest import mock
 import pytest
 
 from sawa import coldstart, earnings, maintenance, quarterly, weekly
+from sawa.domain.exceptions import PriceHistoryUnavailableError, ProviderError
+from sawa.domain.price_availability import reviewed_empty_price_history
 
 LOG = logging.getLogger(__name__)
 
@@ -120,7 +122,9 @@ def test_maintenance_dry_run_has_no_external_effects(tmp_path):
 
 def test_universe_onboards_before_replacing_memberships_and_retries_missing_prices():
     conn = connection()
-    conn.execute.return_value.fetchall.return_value = [("AAPL", True, True), ("MSFT", True, False)]
+    conn.execute.return_value.fetchall.return_value = [
+        ("AAPL", True, True, "320193"), ("MSFT", True, False, "789019"),
+    ]
     client = mock.MagicMock()
     client.__enter__.return_value = client
     client.get_ticker_details.side_effect = lambda symbol: {"ticker": symbol, "name": symbol}
@@ -170,9 +174,70 @@ def test_missing_company_preserves_index_membership_before_delete():
     assert not any("DELETE FROM" in str(call.args[0]) for call in cursor.execute.call_args_list)
 
 
-def test_price_failure_preserves_affected_index_even_after_company_commit():
+@pytest.mark.parametrize(
+    "stored_active,stored_cik,listings,active_feed,accepted",
+    [
+        (False, "0000801337", [{"ticker": "WBS", "cik": "801337", "active": False}], False, True),
+        (True, "801337", [{"ticker": "WBS", "cik": "801337", "active": False}], False, False),
+        (False, None, [{"ticker": "WBS", "cik": "801337", "active": False}], False, False),
+        (False, "999999", [{"ticker": "WBS", "cik": "801337", "active": False}], False, False),
+        (False, "801337", [{"ticker": "WBS", "active": False}], False, False),
+        (False, "801337", [{"ticker": "OTHER", "cik": "801337", "active": False}], False, False),
+        (False, "801337", [{"ticker": "WBS", "cik": "801337", "active": True}], False, False),
+        (False, "801337", [{"ticker": "WBS", "cik": "801337"}], False, False),
+        (False, "801337", [{"ticker": "WBS", "cik": "801337", "active": False}], True, False),
+        (False, "801337", [], False, False),
+        (False, "801337", [None], False, False),
+        (False, "801337", [{}, {}], False, False),
+        (False, "801337", ProviderError("offline", "polygon"), False, False),
+    ],
+)
+def test_stale_index_exclusion_requires_confirmed_retired_issuer(
+    stored_active, stored_cik, listings, active_feed, accepted,
+):
     conn = connection()
-    conn.execute.return_value.fetchall.return_value = [("AAPL", True, True)]
+    conn.execute.return_value.fetchall.return_value = [
+        ("AAPL", True, True, "320193"), ("WBS", stored_active, False, stored_cik),
+    ]
+    client = mock.MagicMock()
+    client.__enter__.return_value = client
+    client.get_ticker_details.return_value = None
+    if isinstance(listings, Exception):
+        client.get_paginated.side_effect = listings
+    else:
+        client.get_paginated.return_value = listings
+    fetchers = [("custom", lambda log: ["AAPL", "WBS"])]
+    if active_feed:
+        fetchers.append(("us_active", lambda log: ["WBS"]))
+    indices_result = coldstart.IndexPopulationResult(requested=1)
+    indices_result["custom"] = 1
+    with (
+        mock.patch.object(maintenance.psycopg, "connect", return_value=conn),
+        mock.patch.object(maintenance, "_index_fetchers", return_value=fetchers),
+        mock.patch.object(maintenance, "MINIMUM_INDEX_SOURCE_COUNTS", {}),
+        mock.patch.object(maintenance, "PolygonClient", return_value=client),
+        mock.patch.object(maintenance, "SyncRateLimiter"),
+        mock.patch.object(maintenance, "insert_company") as company,
+        mock.patch.object(maintenance, "fetch_and_insert_prices") as prices,
+        mock.patch.object(maintenance, "populate_index_constituents",
+                          return_value=indices_result) as indices,
+    ):
+        result = maintenance.refresh_universe("key", "db", LOG)
+    assert result["success"] is accepted
+    company.assert_not_called()
+    prices.assert_not_called()
+    if accepted:
+        assert result["excluded_inactive_listings"] == {"WBS": listings[0]}
+        assert indices.call_args.kwargs["prefetched_symbols"] == {"custom": ["AAPL"]}
+    else:
+        assert "onboard:WBS" in result["failures"]
+        assert "custom" in result["failures"]
+        indices.assert_not_called()
+
+
+def test_price_failure_preserves_affected_index_even_after_company_commit(caplog):
+    conn = connection()
+    conn.execute.return_value.fetchall.return_value = [("AAPL", True, True, "320193")]
     client = mock.MagicMock()
     client.__enter__.return_value = client
     client.get_ticker_details.return_value = {"ticker": "MSFT", "name": "Microsoft"}
@@ -203,7 +268,56 @@ def test_price_failure_preserves_affected_index_even_after_company_commit():
     assert not result["success"]
     assert "onboard:MSFT" in result["failures"]
     assert "affected" in result["failures"]
+    assert "Universe onboarding MSFT failed: offline" in caplog.text
     assert indices.call_args.kwargs["prefetched_symbols"] == {"healthy": ["AAPL"]}
+
+
+@pytest.mark.parametrize(
+    "ticker,cik,error,accepted",
+    [
+        ("SVA", "0001084201", PriceHistoryUnavailableError("no rows", "polygon"), True),
+        ("SVA", "1084201", ProviderError("request failed", "polygon"), False),
+        ("SVA", "999999", PriceHistoryUnavailableError("no rows", "polygon"), False),
+        ("AAPL", "1084201", PriceHistoryUnavailableError("no rows", "polygon"), False),
+    ],
+)
+def test_reviewed_halt_allows_only_successful_empty_history_for_same_issuer(
+    ticker, cik, error, accepted,
+):
+    conn = connection()
+    conn.execute.return_value.fetchall.return_value = [(ticker, True, False, cik)]
+    client = mock.MagicMock()
+    client.__enter__.return_value = client
+    client.get_ticker_details.return_value = {"ticker": ticker, "cik": cik, "active": True}
+    indices_result = coldstart.IndexPopulationResult(requested=1)
+    indices_result["custom"] = 1
+    with (
+        mock.patch.object(maintenance.psycopg, "connect", return_value=conn),
+        mock.patch.object(maintenance, "_index_fetchers",
+                          return_value=[("custom", lambda log: [ticker])]),
+        mock.patch.object(maintenance, "PolygonClient", return_value=client),
+        mock.patch.object(maintenance, "SyncRateLimiter"),
+        mock.patch.object(maintenance, "insert_company", return_value=True),
+        mock.patch.object(maintenance, "fetch_and_insert_prices", side_effect=error) as prices,
+        mock.patch.object(maintenance, "populate_index_constituents",
+                          return_value=indices_result) as indices,
+    ):
+        result = maintenance.refresh_universe("key", "db", LOG)
+    prices.assert_called_once()  # Do not stop retrying prices for the halted listing.
+    assert result["success"] is accepted
+    if accepted:
+        assert "2019-02-22" in result["unavailable_price_history"][ticker]
+        assert indices.call_args.kwargs["prefetched_symbols"] == {"custom": [ticker]}
+    else:
+        assert f"onboard:{ticker}" in result["failures"]
+        indices.assert_not_called()
+
+
+def test_halt_does_not_explain_a_window_including_pre_halt_prices():
+    details = {"cik": "1084201", "active": True}
+    assert reviewed_empty_price_history("SVA", details, date(2019, 2, 21)) is None
+    assert reviewed_empty_price_history("SVA", details, date(2019, 2, 22))
+    assert reviewed_empty_price_history("SVA", {**details, "active": False}, date.today()) is None
 
 
 @pytest.mark.parametrize(

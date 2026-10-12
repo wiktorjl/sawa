@@ -440,7 +440,9 @@ def download_fundamentals(
                         provider="polygon",
                     )
                 bound_rows = [
-                    bind_provider_record(record, symbol, output_field="tickers")
+                    bind_provider_record(
+                        record, symbol, output_field="tickers", allow_related_tickers=True,
+                    )
                     for record in data
                 ]
                 all_data.extend(bound_rows)

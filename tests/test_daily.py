@@ -190,6 +190,7 @@ def test_fetch_rejects_malformed_rows_before_reporting_fetched() -> None:
         "failed_symbols": 0,
         "failed_tickers": [],
         "empty_tickers": [],
+        "confirmed_empty_tickers": [],
         "provider_price_rows": 3,
         "invalid_price_rows": 2,
     }
@@ -298,6 +299,7 @@ def test_fetch_rejects_bool_and_out_of_range_timestamps() -> None:
         "failed_symbols": 0,
         "failed_tickers": [],
         "empty_tickers": [],
+        "confirmed_empty_tickers": [],
         "provider_price_rows": 3,
         "invalid_price_rows": 2,
     }

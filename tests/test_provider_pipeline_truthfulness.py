@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 from datetime import date
 from pathlib import Path
@@ -84,6 +85,52 @@ def test_bind_provider_record_rejects_mixed_provider_identities() -> None:
         bind_provider_record(source, "AAPL", output_field="tickers")
 
     assert source["tickers"] == ["AAPL", "MSFT"]
+
+
+@pytest.mark.parametrize(
+    "ticker,related",
+    [
+        ("AA", ["AA", "AAp", "AApB"]),
+        ("ACEL", ["ACEL", "ACEL.WS"]),
+        ("GOOG", ["GOOGL", "GOOG"]),
+    ],
+)
+@pytest.mark.parametrize(
+    "downloader", [quarterly.download_fundamentals, coldstart.download_fundamentals],
+)
+def test_fundamentals_bind_related_share_classes_only_to_requested_symbol(
+    ticker, related, downloader, tmp_path,
+) -> None:
+    source = {"tickers": related, "period_end": "2026-06-30", "total_assets": 10}
+    client = mock.Mock()
+    client.get_fundamentals.return_value = [source]
+    result = downloader(
+        client, [ticker], "2026-01-01", "2026-09-28", tmp_path, logging.getLogger(__name__),
+    )
+    assert not result.has_failures
+    assert result.total_succeeded == 3
+    for path in tmp_path.glob("*.csv"):
+        with path.open() as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 1
+        assert rows[0]["tickers"] == ticker
+    assert source["tickers"] == related
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"tickers": ["AAp"]},  # Preferred-share suffix is not common-stock AAP.
+        {"tickers": ["AAP", None]},
+        {"tickers": ["AAP", ""]},
+        {"tickers": []},
+        {"tickers": "AAP"},
+        {"ticker": "MSFT", "tickers": ["AAP", "MSFT"]},
+    ],
+)
+def test_related_share_class_binding_still_rejects_invalid_or_conflicting_identity(source):
+    with pytest.raises(ProviderError):
+        bind_provider_record(source, "AAP", output_field="tickers", allow_related_tickers=True)
 
 
 def test_present_but_empty_provider_identity_is_a_failed_request(

@@ -660,12 +660,16 @@ def run_weekly(
                     database_url=database_url,
                     workers=character_workers,
                     log=logger,
+                    api_key=api_key,
                 )
                 stats["character"] = character_stats
                 if character_stats.get("degraded"):
+                    stale_count = character_stats.get(
+                        "unresolved_stale_sources", character_stats.get("stale_sources", 0),
+                    )
                     provider_degraded_reasons.append(
                         "stock character skipped stale source histories "
-                        f"({character_stats.get('stale_sources', 0)} tickers)"
+                        f"({stale_count} tickers)"
                     )
                 if not character_stats.get("success", False):
                     raise RuntimeError(

@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import psycopg
 
+from sawa.api import PolygonClient
 from sawa.calculation.stock_character_scorecard import analyze_stock
 from sawa.database.stock_character import (
     StockCharacterWriteError,
@@ -21,6 +22,9 @@ from sawa.database.stock_character import (
     replace_flags,
 )
 from sawa.database.ta_load import get_tickers_with_prices
+from sawa.domain.price_availability import is_explicit_empty_price_response
+from sawa.repositories.rate_limiter import SyncRateLimiter
+from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
 from sawa.utils.market_hours import get_market_date, previous_trading_day
 from sawa.utils.security import redact_sensitive_text
 from sawa.utils.symbols import validate_ticker
@@ -210,6 +214,7 @@ def run_stock_character_batch(
     workers: int = 4,
     run_date: Any = None,
     log: logging.Logger | None = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """Run stock character classification across all tickers.
 
@@ -240,7 +245,9 @@ def run_stock_character_batch(
             all_tickers = list(dict.fromkeys(validate_ticker(t) for t in tickers))
         else:
             all_tickers = list(
-                dict.fromkeys(validate_ticker(t) for t in get_tickers_with_prices(conn))
+                dict.fromkeys(
+                    validate_ticker(t) for t in get_tickers_with_prices(conn, active_only=True)
+                )
             )
 
     log.info(f"Tickers to process: {len(all_tickers)}")
@@ -284,6 +291,18 @@ def run_stock_character_batch(
     classified_results = [r for r in results if r.get("classified")]
     errors = [r for r in results if r.get("error")]
     stale = [r for r in results if r.get("stale_source")]
+    unavailable: list[dict[str, Any]] = []
+    verification_errors: dict[str, str] = {}
+    if stale and api_key:
+        # No eligible trades means no daily bar. Verify the entire missing
+        # window before treating this as unavailable source data. The worker
+        # still skips classification; no stale input gets a new run-date stamp.
+        unavailable, verification_errors = verify_empty_price_windows(
+            api_key, stale, previous_trading_day(run_date + timedelta(days=1)), log,
+        )
+    unavailable_tickers = {r["ticker"] for r in unavailable}
+    unresolved_stale = [r for r in stale if r["ticker"] not in unavailable_tickers]
+    elapsed = time.time() - start_time
     unclassifiable = [
         r
         for r in results
@@ -306,8 +325,10 @@ def run_stock_character_batch(
     log.info(f"  Classified:       {len(classified_results)} ({classified_percent:.1f}%)")
     log.info(f"  Unclassifiable:   {len(unclassifiable)} ({unclassifiable_percent:.1f}%)")
     log.info(f"  Errors:           {len(errors)}")
-    if stale:
-        log.warning("  Skipped stale price histories: %s", len(stale))
+    if unavailable:
+        log.info("  Skipped provider-confirmed empty price windows: %s", len(unavailable))
+    if unresolved_stale:
+        log.warning("  Unresolved stale price histories: %s", len(unresolved_stale))
     log.info(f"  Time:             {elapsed:.1f}s ({elapsed / 60:.1f} min)")
     rate = total / elapsed if elapsed > 0 else 0.0
     log.info(f"  Rate:             {rate:.1f} tickers/sec")
@@ -322,7 +343,7 @@ def run_stock_character_batch(
 
     return {
         "success": total > 0 and bool(classified_results) and not errors,
-        "degraded": bool(errors or stale),
+        "degraded": bool(errors or unresolved_stale),
         # Surfaced so an operator can see which date the run stamped; a
         # mismatch with the market date is what made doctor fail after a
         # healthy weekly.
@@ -332,9 +353,56 @@ def run_stock_character_batch(
         "unclassifiable": len(unclassifiable),
         "errors": len(errors),
         "stale_sources": len(stale),
+        "unresolved_stale_sources": len(unresolved_stale),
+        "unavailable_sources": unavailable,
+        "source_verification_errors": verification_errors,
         "elapsed_seconds": round(elapsed, 1),
         "character_counts": char_counts,
         "ticker_errors": [
             {"ticker": item.get("ticker"), "error": item.get("error")} for item in errors
         ],
     }
+
+
+def verify_empty_price_windows(
+    api_key: str, stale: list[dict[str, Any]], through: date, log: logging.Logger,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Confirm explicit empty provider responses; failures and missing bars stay stale.
+
+    The provider documents that periods without eligible trades have no bar:
+    https://massive.com/knowledge-base/article/why-are-there-missing-aggregates-in-massives-data
+    A generic empty object, malformed response, or a window containing any new
+    observations does not qualify. This check never changes stored prices.
+    """
+    unavailable: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    limiter = SyncRateLimiter(DEFAULT_API_RATE_LIMIT)
+    with PolygonClient(api_key, log) as client:
+        for row in stale:
+            ticker = row["ticker"]
+            try:
+                start = row["source_price_date"] + timedelta(days=1)
+                if start > through:
+                    continue
+                limiter.acquire()
+                response = client.get(
+                    "aggregates",
+                    path_params={
+                        "ticker": ticker, "start": start.isoformat(),
+                        "end": through.isoformat(),
+                    },
+                    params={"adjusted": "true", "limit": 50000},
+                )
+                if is_explicit_empty_price_response(response, ticker):
+                    unavailable.append({
+                        "ticker": ticker,
+                        "source_price_date": row["source_price_date"],
+                        "verified_through": through,
+                        "request_id": response.get("request_id"),
+                    })
+            except Exception as exc:
+                errors[ticker] = redact_sensitive_text(exc)
+                log.warning(
+                    "  %s: price availability verification failed: %s", ticker, errors[ticker],
+                )
+    return unavailable, errors

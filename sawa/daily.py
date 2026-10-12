@@ -27,10 +27,12 @@ from sawa.api import (
 from sawa.database import get_last_date, get_symbols_from_db
 from sawa.database.news import NewsLoadResult, fetch_and_load_news
 from sawa.domain.exceptions import ProviderError
+from sawa.domain.price_availability import is_explicit_empty_price_response
 from sawa.domain.price_validation import (
     is_valid_daily_ohlcv,
     normalize_provider_volume,
 )
+from sawa.provider_price_repairs import recover_rounded_adjusted_bars
 from sawa.repositories.rate_limiter import SyncRateLimiter
 from sawa.utils import alert_missing_api_key, get_notifier, setup_logging
 from sawa.utils.constants import (
@@ -185,6 +187,7 @@ def fetch_prices_via_api(
     succeeded_symbols = 0
     failed_tickers: list[str] = []
     empty_tickers: list[str] = []
+    confirmed_empty_tickers: list[str] = []
     invalid_rows = 0
     provider_rows = 0
     requested_end = date.fromisoformat(end_date)
@@ -215,6 +218,13 @@ def fetch_prices_via_api(
                 raise ProviderError(
                     "Invalid aggregate results array", provider="polygon"
                 )
+            results, recovered = recover_rounded_adjusted_bars(
+                client, symbol, data, symbol_start, end_date, rate_limiter,
+            )
+            if recovered:
+                logger.info("  %s: recovered %d rounded-zero adjusted bars", symbol, recovered)
+                if stats is not None:
+                    stats.setdefault("rounded_price_rows_recovered", {})[symbol] = recovered
             for r in results:
                 provider_rows += 1
                 if not isinstance(r, dict):
@@ -252,6 +262,8 @@ def fetch_prices_via_api(
             succeeded_symbols += 1
             if len(all_prices) == before_count:
                 empty_tickers.append(symbol)
+                if is_explicit_empty_price_response(data, symbol):
+                    confirmed_empty_tickers.append(symbol)
 
         except Exception as e:
             failures += 1
@@ -272,6 +284,7 @@ def fetch_prices_via_api(
         stats["failed_symbols"] = failures
         stats["failed_tickers"] = failed_tickers
         stats["empty_tickers"] = empty_tickers
+        stats["confirmed_empty_tickers"] = confirmed_empty_tickers
         stats["provider_price_rows"] = provider_rows
         if invalid_rows:
             stats["invalid_price_rows"] = invalid_rows

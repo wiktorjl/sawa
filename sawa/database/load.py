@@ -35,6 +35,7 @@ from sawa.utils.constants import (
     DEFAULT_NEWS_DAYS,
     DEFAULT_NEWS_LIMIT_PER_SYMBOL,
 )
+from sawa.utils.security import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -430,8 +431,11 @@ def _insert_rows(
                     errors += 1
                     if strict:
                         conn.rollback()
+                        row_key = {key: row.get(key) for key in pk_columns}
                         raise RuntimeError(
-                            f"Atomic insert into {table_name} failed"
+                            f"Atomic insert into {table_name} failed "
+                            f"({redact_sensitive_text(row_key)}): "
+                            f"{type(e).__name__}: {redact_sensitive_text(e)}"
                         ) from e
                     if errors <= 3:
                         log.warning(f"  Insert failed: {e}")

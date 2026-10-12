@@ -7,11 +7,34 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
+import psycopg
 import pytest
 
 from sawa import coldstart, quarterly, weekly
 from sawa.database import load as database_load
 from sawa.provider_downloads import DownloadCount
+
+
+def test_atomic_insert_reports_row_and_redacted_database_cause_and_rolls_back():
+    conn = mock.MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    error = psycopg.errors.NumericValueOutOfRange("numeric field overflow token=private-test-key")
+    cursor.execute.side_effect = [None, error, None, None]
+    row = {"ticker": "TNXP", "period_end": "2013-09-30", "basic_earnings_per_share": -2720000000}
+    with mock.patch.object(
+        database_load, "_get_primary_key", return_value=["ticker", "period_end"],
+    ):
+        with pytest.raises(RuntimeError) as raised:
+            database_load._insert_rows(
+                conn, "income_statements", list(row), [row], True, strict=True,
+            )
+    message = str(raised.value)
+    assert "TNXP" in message and "2013-09-30" in message
+    assert "NumericValueOutOfRange" in message and "numeric field overflow" in message
+    assert "private-test-key" not in message
+    assert raised.value.__cause__ is error
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
 
 
 @pytest.fixture(autouse=True)

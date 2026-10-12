@@ -17,6 +17,8 @@ from sawa.coldstart import (
     _index_fetchers,
     populate_index_constituents,
 )
+from sawa.domain.exceptions import PriceHistoryUnavailableError
+from sawa.domain.price_availability import reviewed_empty_price_history
 from sawa.earnings import run_earnings_update
 from sawa.provider_downloads import bind_provider_record
 from sawa.quarterly import run_quarterly
@@ -50,8 +52,9 @@ def refresh_universe(api_key: str, database_url: str, logger: logging.Logger) ->
     """Discover once, onboard missing companies/history, then refresh membership.
 
     No company is deleted or deactivated merely because a listing source omits
-    it. Failed sources keep their prior membership; an incomplete onboarding
-    also preserves the affected index's prior snapshot.
+    it. Already inactive issuers require explicit provider confirmation before
+    exclusion from stale constituent sources. Failed sources keep their prior
+    membership; incomplete onboarding also preserves the affected snapshot.
     """
     stats: dict[str, Any] = {"success": False, "sources": {}, "onboarded": [], "failures": {}}
     snapshots: dict[str, list[str]] = {}
@@ -71,26 +74,63 @@ def refresh_universe(api_key: str, database_url: str, logger: logging.Logger) ->
             stats["sources"][code] = len(symbols)
         except Exception as exc:
             stats["failures"][code] = redact_sensitive_text(exc)
+            logger.error("Universe source %s failed: %s", code, stats["failures"][code])
     discovered = sorted({symbol for symbols in snapshots.values() for symbol in symbols})
     with psycopg.connect(database_url) as conn:
         known = {
-            ticker: (active, has_prices)
-            for ticker, active, has_prices in conn.execute(
+            ticker: (active, has_prices, cik)
+            for ticker, active, has_prices, cik in conn.execute(
                 "SELECT c.ticker, c.active, EXISTS (SELECT 1 FROM stock_prices p "
-                "WHERE p.ticker = c.ticker) FROM companies c"
+                "WHERE p.ticker = c.ticker), c.cik FROM companies c"
             ).fetchall()
         }
-    pending = [symbol for symbol in discovered if symbol not in known or not all(known[symbol])]
+    pending = [symbol for symbol in discovered if symbol not in known or not all(known[symbol][:2])]
     stats["pending"] = len(pending)
     today = date.today()
     start = today.replace(year=today.year - 5, day=min(today.day, 28))
     limiter = SyncRateLimiter(DEFAULT_API_RATE_LIMIT)
     failed_onboarding: set[str] = set()
+    confirmed_inactive: set[str] = set()
     with PolygonClient(api_key, logger) as client:
         for symbol in pending:
             try:
                 limiter.acquire()
                 details = client.get_ticker_details(symbol)
+                if details is None and symbol in known and known[symbol][0] is False:
+                    # A 404 alone is not evidence of retirement. Require the
+                    # exact inactive listing and stored issuer, and reject a
+                    # contradiction from either current active-listing feed.
+                    limiter.acquire()
+                    listings = client.get_paginated(
+                        "/v3/reference/tickers",
+                        params={
+                            "ticker": symbol, "active": "false", "market": "stocks", "limit": 1000,
+                        },
+                    )
+                    listing = (
+                        listings[0] if isinstance(listings, list) and len(listings) == 1 else {}
+                    )
+                    stored_cik = str(known[symbol][2])
+                    listed_cik = str(listing.get("cik", "")) if isinstance(listing, dict) else ""
+                    if not (
+                        isinstance(listing, dict) and listing.get("ticker") == symbol
+                        and listing.get("active") is False
+                        and stored_cik.isdecimal() and listed_cik.isdecimal()
+                        and int(stored_cik) == int(listed_cik) > 0
+                        and not any(
+                            symbol in snapshots.get(code, [])
+                            for code in ("us_active", "nasdaq_listed")
+                        )
+                    ):
+                        raise ValueError(
+                            "Inactive listing conflicts with stored issuer or active feeds"
+                        )
+                    confirmed_inactive.add(symbol)
+                    stats.setdefault("excluded_inactive_listings", {})[symbol] = listing
+                    logger.info(
+                        "  %s: verified inactive issuer; excluding stale index membership", symbol,
+                    )
+                    continue
                 if not isinstance(details, dict) or not details:
                     raise ValueError("Company details unavailable")
                 details = bind_provider_record(details, symbol, output_field="ticker")
@@ -104,13 +144,26 @@ def refresh_universe(api_key: str, database_url: str, logger: logging.Logger) ->
                 if symbol not in known or not known[symbol][1]:
                     limiter.acquire()
                     with psycopg.connect(database_url) as conn:
-                        fetch_and_insert_prices(
-                            conn, client, symbol, start.isoformat(), today.isoformat(), logger
-                        )
+                        try:
+                            fetch_and_insert_prices(
+                                conn, client, symbol, start.isoformat(), today.isoformat(), logger
+                            )
+                        except PriceHistoryUnavailableError:
+                            reason = reviewed_empty_price_history(symbol, details, start)
+                            if reason is None:
+                                raise
+                            stats.setdefault("unavailable_price_history", {})[symbol] = reason
+                            logger.warning(
+                                "  %s: %s; will retry prices next maintenance", symbol, reason,
+                            )
                 stats["onboarded"].append(symbol)
             except Exception as exc:
                 failed_onboarding.add(symbol)
                 stats["failures"][f"onboard:{symbol}"] = redact_sensitive_text(exc)
+                logger.error(
+                    "Universe onboarding %s failed: %s", symbol,
+                    stats["failures"][f"onboard:{symbol}"],
+                )
     complete_snapshots = {}
     for code, symbols in snapshots.items():
         incomplete = failed_onboarding.intersection(symbols)
@@ -119,7 +172,9 @@ def refresh_universe(api_key: str, database_url: str, logger: logging.Logger) ->
                 f"Preserving membership: {len(incomplete)} constituents failed onboarding"
             )
         else:
-            complete_snapshots[code] = symbols
+            complete_snapshots[code] = [
+                symbol for symbol in symbols if symbol not in confirmed_inactive
+            ]
     if complete_snapshots:
         with psycopg.connect(database_url) as conn:
             indices = populate_index_constituents(
