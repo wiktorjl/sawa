@@ -192,6 +192,27 @@ def cmd_daily(args) -> int:
         return 1
 
 
+def cmd_treasury(args) -> int:
+    """Refresh Treasury observations without replaying the daily pipeline."""
+    from sawa.daily import refresh_treasury_yields
+
+    logger = setup_logging(args.verbose, log_dir=get_log_dir(args), run_name="treasury")
+    api_key = args.api_key or os.environ.get("POLYGON_API_KEY")
+    database_url = args.database_url or os.environ.get("DATABASE_URL")
+    if not api_key or not database_url:
+        logger.error("POLYGON_API_KEY and DATABASE_URL are required")
+        return 1
+    try:
+        with monitored_run("treasury", logger=logger) as ctx:
+            rows = refresh_treasury_yields(api_key, database_url, logger)
+            ctx["stats"] = {"success": True, "treasury_yields": rows}
+        return 0
+    except Exception:
+        if args.verbose:
+            raise
+        return 1
+
+
 def cmd_intraday(args) -> int:
     """Run intraday price streaming."""
     from sawa.intraday import run_intraday
@@ -1193,6 +1214,15 @@ Environment Variables:
     daily_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     daily_parser.add_argument("-v", "--verbose", action="store_true")
     daily_parser.set_defaults(func=cmd_daily)
+
+    treasury_parser = subparsers.add_parser(
+        "treasury", help="Refresh Treasury yields without replaying daily prices and TA"
+    )
+    treasury_parser.add_argument("--api-key", help="Polygon API key")
+    treasury_parser.add_argument("--database-url", help="PostgreSQL URL")
+    treasury_parser.add_argument("--log-dir", help="Directory for log files")
+    treasury_parser.add_argument("-v", "--verbose", action="store_true")
+    treasury_parser.set_defaults(func=cmd_treasury)
 
     # Intraday subcommand
     intraday_parser = subparsers.add_parser(

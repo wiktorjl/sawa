@@ -504,6 +504,73 @@ def test_daily_summary_reads_the_inserted_count_sawa_actually_logs(tmp_path: Pat
     assert "Daily completed: inserted=120581" in result.stderr
 
 
+def test_treasury_lag_retries_only_treasury_then_marks_daily_done(tmp_path: Path) -> None:
+    stubs = (
+        "notify() { :; }; heartbeat() { :; }; build_daily_summary() { :; }; "
+        'sawa() { printf "%s\\n" "$1" >> "$HOME/sawa-runs"; '
+        'if [ "$1" = doctor ] && [ ! -f "$HOME/refreshed" ]; then '
+        'printf "FAIL   treasury_yields.latest_date   publication lag\\n"; return 1; fi; '
+        'if [ "$1" = treasury ]; then touch "$HOME/refreshed"; fi; return 0; }; '
+    )
+    result = _scheduler_shell(
+        tmp_path, stubs + 'run_daily || true; '
+        'test -z "$(find "$STATE_DIR" -name \'daily_done_*\')"; '
+        'run_daily; test -n "$(find "$STATE_DIR" -name \'daily_done_*\')"; '
+        'test -z "$(find "$STATE_DIR" -name \'daily_treasury_pending_*\')"',
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "home" / "sawa-runs").read_text().splitlines() == [
+        "daily", "doctor", "treasury", "doctor",
+    ]
+
+
+def test_additional_doctor_failure_prevents_treasury_only_retry(tmp_path: Path) -> None:
+    stubs = (
+        "notify() { :; }; heartbeat() { :; }; "
+        'sawa() { printf "%s\\n" "$1" >> "$HOME/sawa-runs"; '
+        'if [ "$1" = doctor ]; then '
+        'printf "FAIL treasury_yields.latest_date stale\\nFAIL stock_prices.latest_date stale\\n"; '
+        'return 1; fi; return 0; }; '
+    )
+    result = _scheduler_shell(tmp_path, stubs + 'run_daily || true; run_daily || true')
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "home" / "sawa-runs").read_text().splitlines() == [
+        "daily", "doctor", "daily", "doctor",
+    ]
+
+
+def test_treasury_publication_retries_have_a_separate_finite_cap(tmp_path: Path) -> None:
+    stubs = (
+        "notify() { :; }; heartbeat() { :; }; "
+        'sawa() { printf "%s\\n" "$1" >> "$HOME/sawa-runs"; '
+        'if [ "$1" = doctor ]; then '
+        'printf "FAIL treasury_yields.latest_date stale\\n"; return 1; fi; return 0; }; '
+    )
+    result = _scheduler_shell(
+        tmp_path, stubs + 'for i in {1..20}; do run_daily || true; done; '
+        'test -z "$(find "$STATE_DIR" -name \'daily_done_*\')"',
+    )
+    assert result.returncode == 0, result.stderr
+    runs = (tmp_path / "home" / "sawa-runs").read_text().splitlines()
+    assert runs.count("daily") == 1
+    assert runs.count("treasury") == 12
+    assert runs.count("doctor") == 13
+
+
+def test_failed_required_daily_step_never_runs_doctor_or_marks_done(tmp_path: Path) -> None:
+    stubs = (
+        "notify() { :; }; heartbeat() { :; }; "
+        'sawa() { printf "%s\\n" "$1" >> "$HOME/sawa-runs"; return 1; }; '
+    )
+    result = _scheduler_shell(
+        tmp_path, stubs + 'run_daily || true; '
+        'test -z "$(find "$STATE_DIR" -name \'daily_done_*\' '
+        '-o -name \'daily_treasury_pending_*\')"',
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "home" / "sawa-runs").read_text().splitlines() == ["daily"]
+
+
 def test_market_status_treats_polygon_after_hours_states_as_closed(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

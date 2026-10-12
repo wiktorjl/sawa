@@ -10,10 +10,11 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+from sawa.domain.volume import decimal_volume
+
 TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 MAX_PRICE_EXCLUSIVE = Decimal("1000000000000")
 PRICE_SCALE = Decimal("0.00000001")
-MAX_VOLUME = 9_223_372_036_854_775_807
 
 
 def load_intraday_bars(
@@ -41,6 +42,7 @@ def load_intraday_bars(
     # authoritative even when high or volume decreases. A partial/incomparable
     # replay after process restart must not overwrite the stored snapshot.
     allowed_bar_sizes = {1, 5, 15, 30, 60}
+    volumes: list[Decimal] = []
     for bar in bars:
         ticker = bar.get("ticker")
         if not isinstance(ticker, str) or not TICKER_PATTERN.fullmatch(ticker):
@@ -82,13 +84,7 @@ def load_intraday_bars(
         if prices["low"] > min(prices["open"], prices["high"], prices["close"]):
             raise ValueError("low is inconsistent with OHLC values")
 
-        volume = bar.get("volume")
-        if (
-            isinstance(volume, bool)
-            or not isinstance(volume, int)
-            or not 0 <= volume <= MAX_VOLUME
-        ):
-            raise ValueError("volume must fit a non-negative PostgreSQL BIGINT")
+        volumes.append(decimal_volume(bar.get("volume")))
 
         bar_size = bar.get("bar_size_minutes", 5)
         if isinstance(bar_size, bool) or bar_size not in allowed_bar_sizes:
@@ -174,7 +170,7 @@ def load_intraday_bars(
 
     inserted = 0
     with conn.cursor() as cur:
-        for bar in bars:
+        for bar, volume in zip(bars, volumes):
             bar_size = bar.get("bar_size_minutes", 5)
             cur.execute(
                 query,
@@ -185,7 +181,7 @@ def load_intraday_bars(
                     bar["high"],
                     bar["low"],
                     bar["close"],
-                    bar["volume"],
+                    volume,
                     bar_size,
                     bar.get("source_minute_count", bar_size),
                     bar.get("source_minute_mask", (1 << bar_size) - 1),

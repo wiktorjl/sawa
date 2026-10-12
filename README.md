@@ -209,6 +209,7 @@ sawa weekly                                # Economy, overviews, news, corporate
 sawa weekly --skip-character               # Skip stock character classification
 sawa quarterly                             # Fundamentals + financial ratios
 sawa doctor --job daily                    # Database checks after daily/weekly jobs
+sawa treasury                             # Retry Treasury publication without replaying daily work
 
 # Intraday streaming (WebSocket, 15-min delayed)
 sawa intraday                              # Stream 5-min bars

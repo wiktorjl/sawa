@@ -1,12 +1,33 @@
 """CLI behavior tests."""
 
 import logging
+from argparse import Namespace
 from unittest import mock
 
 import pytest
 
 from sawa import cli
 from sawa.cli import _log_schema_only_warning, _redact_database_url
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_treasury_command_refreshes_only_treasury_and_reports_failure(failure):
+    args = Namespace(api_key="offline", database_url="offline", verbose=False, log_dir=None)
+    with mock.patch.object(cli, "setup_logging", return_value=logging.getLogger(__name__)), \
+         mock.patch.object(cli, "monitored_run") as monitored, \
+         mock.patch("sawa.daily.refresh_treasury_yields") as refresh, \
+         mock.patch("sawa.daily.run_daily") as daily:
+        stats = {}
+        monitored.return_value.__enter__.return_value = stats
+        if failure:
+            refresh.side_effect = RuntimeError("offline provider failure")
+        else:
+            refresh.return_value = 22
+        assert cli.cmd_treasury(args) == int(failure)
+        daily.assert_not_called()
+        refresh.assert_called_once()
+        if not failure:
+            assert stats["stats"] == {"success": True, "treasury_yields": 22}
 
 
 def test_redact_database_url_removes_password() -> None:

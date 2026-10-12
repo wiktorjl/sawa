@@ -28,6 +28,9 @@ INTRADAY_DRAIN_SECONDS=1800  # 15-min delayed feed + 15-min correction horizon
 # evening tick; without a cap an unfixable doctor FAIL re-ran the 75-minute
 # daily back-to-back until midnight (2026-08-31: 7 attempts). Per-date cap.
 MAX_JOB_ATTEMPTS=3
+# Publication can lag the daily pipeline by over an hour. These cheap,
+# separate retries run on subsequent ticks without replaying prices/news/TA.
+MAX_TREASURY_ATTEMPTS=12
 
 # Fail-loud bookkeeping (see "Fail loud" section). STATE_DIR_OK is set once
 # initialize_scheduler has verified the state directory, so nothing writes
@@ -39,6 +42,7 @@ SCHEDULER_STAGE="startup"
 SCHEDULER_ALERTED=false
 SCHEDULER_LAST_ERROR=""
 SCHEDULER_IGNORED_ENV_KEYS=""
+SCHEDULER_DOCTOR_FAILURES=""
 
 # ── Lock (prevent overlapping runs) ──────────────────────────────────────────
 
@@ -157,10 +161,16 @@ notify_unreported_failure() {
 run_doctor() {
     local job="$1"
     local exit_code=0
+    local report
+    SCHEDULER_DOCTOR_FAILURES=""
+    report=$(mktemp "$STATE_DIR/doctor.XXXXXX") || return 1
 
     log "Starting sawa doctor --job $job..."
     sawa doctor --job "$job" --log-dir "$PROJECT_DIR/logs" \
-        >> "$LOG_FILE" 2>&1 || exit_code=$?
+        > "$report" 2>&1 || exit_code=$?
+    cat "$report" >> "$LOG_FILE"
+    SCHEDULER_DOCTOR_FAILURES=$(awk '$1 == "FAIL" { print $2 }' "$report")
+    rm -f "$report"
 
     if [ "$exit_code" -ne 0 ]; then
         log "ERROR: sawa doctor --job $job failed (exit $exit_code)"
@@ -806,21 +816,22 @@ intraday_drain_complete() {
 # has been reached, after alerting once; otherwise records this attempt.
 job_attempts_exhausted() {
     local job="$1" period="$2" attempts=0
+    local max_attempts="${3:-$MAX_JOB_ATTEMPTS}"
     local file="$STATE_DIR/${job}_attempts_$period"
     if [ -f "$file" ]; then
         IFS= read -r attempts < "$file" || attempts=0
         [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=0
     fi
-    if [ "$attempts" -ge "$MAX_JOB_ATTEMPTS" ]; then
+    if [ "$attempts" -ge "$max_attempts" ]; then
         log "${job^}: giving up for $period after $attempts failed attempt(s)"
         return 0
     fi
     attempts=$((attempts + 1))
     printf '%s\n' "$attempts" > "$file"
-    if [ "$attempts" -eq "$MAX_JOB_ATTEMPTS" ]; then
+    if [ "$attempts" -eq "$max_attempts" ]; then
         # Final allowed attempt: say so once, before it runs.
         notify "Sawa ${job^}: last retry" \
-            "sawa $job for $period has failed $((attempts - 1)) time(s); this is attempt $attempts of $MAX_JOB_ATTEMPTS. If it fails again the scheduler stops retrying for $period (touch ~/.sawa/scheduler/${job}_done_$period to skip, or delete ${job}_attempts_$period to re-arm)." \
+            "sawa $job for $period has failed $((attempts - 1)) time(s); this is attempt $attempts of $max_attempts. If it fails again the scheduler stops retrying for $period; delete ${job}_attempts_$period after repair to re-arm." \
             warning
     fi
     return 1
@@ -960,12 +971,21 @@ is_daily_done_today() {
 run_daily() {
     local today
     today=$(TZ=America/New_York date '+%Y-%m-%d')
+    local treasury_pending="$STATE_DIR/daily_treasury_pending_$today"
+    local command=daily
 
-    if job_attempts_exhausted daily "$today"; then
-        return 0
+    if [ -f "$treasury_pending" ]; then
+        command=treasury
+        if job_attempts_exhausted treasury "$today" "$MAX_TREASURY_ATTEMPTS"; then
+            return 0
+        fi
+    else
+        if job_attempts_exhausted daily "$today"; then
+            return 0
+        fi
     fi
 
-    log "Starting sawa daily..."
+    log "Starting sawa $command..."
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/daily_start_time"
 
     local inserted exit_code=0
@@ -974,7 +994,7 @@ run_daily() {
     # bound. pipefail preserves sawa's exit status through awk.
     # sawa/daily.py logs the committed price count as "Inserted N records"
     # (progress lines read "Inserted N/M ..." and never match).
-    inserted=$(sawa daily --log-dir "$PROJECT_DIR/logs" 2>&1 | awk '
+    inserted=$(sawa "$command" --log-dir "$PROJECT_DIR/logs" 2>&1 | awk '
         !found && match($0, /Inserted [0-9,]+ records/) {
             value = substr($0, RSTART, RLENGTH)
             sub(/^Inserted /, "", value)
@@ -987,19 +1007,26 @@ run_daily() {
     TZ=America/New_York date '+%Y-%m-%d %H:%M ET' > "$STATE_DIR/daily_end_time"
 
     if [ "$exit_code" -ne 0 ]; then
-        log "ERROR: sawa daily failed (exit $exit_code)"
+        log "ERROR: sawa $command failed (exit $exit_code)"
         notify_unreported_failure "$exit_code" "Sawa Daily FAILED" \
-            "sawa daily exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")"
+            "sawa $command exited with code $exit_code at $(cat "$STATE_DIR/daily_end_time")"
         heartbeat "${SAWA_HEARTBEAT_URL:-}" /fail
         return 1
     fi
 
     if ! run_doctor daily; then
+        if [ "$SCHEDULER_DOCTOR_FAILURES" = "treasury_yields.latest_date" ]; then
+            touch "$treasury_pending"
+            log "Daily pipeline passed; subsequent ticks will retry Treasury only"
+        else
+            rm -f "$treasury_pending"
+        fi
         heartbeat "${SAWA_HEARTBEAT_URL:-}" /fail
         return 1
     fi
 
     # Mark daily as done
+    rm -f "$treasury_pending"
     touch "$STATE_DIR/daily_done_$today" || return 1
 
     # Build summary
@@ -1013,6 +1040,8 @@ run_daily() {
     # Clean up old flag files (keep last 7 days)
     find "$STATE_DIR" -name "daily_done_*" -mtime +7 -delete 2>/dev/null || true
     find "$STATE_DIR" -name "daily_attempts_*" -mtime +7 -delete 2>/dev/null || true
+    find "$STATE_DIR" -name "daily_treasury_pending_*" -mtime +7 -delete 2>/dev/null || true
+    find "$STATE_DIR" -name "treasury_attempts_*" -mtime +7 -delete 2>/dev/null || true
 }
 
 build_daily_summary() {

@@ -3,6 +3,7 @@
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from unittest import mock
 
 import pytest
@@ -63,6 +64,31 @@ def test_malformed_recovery_does_not_publish_a_partial_ticker():
     with pytest.raises(ValueError, match="invalid OHLCV"):
         stream._merge_history_minutes("AAPL", rows, start, start + timedelta(minutes=5))
     assert not stream.buffer
+    assert not stream.bar_aggregator
+
+
+def test_fractional_rest_recovery_preserves_volume_and_live_decimal_correction():
+    stream = client(recover_history=False)
+    start = datetime(2026, 10, 8, 13, 30, tzinfo=timezone.utc)
+    rows = [minute(start + timedelta(minutes=i), volume=100.123456) for i in range(5)]
+    correction = minute(start + timedelta(minutes=2), volume=50)
+    correction.update(sym="AAPL", s=correction["t"], dv="50.000001")
+    assert stream._aggregate_bar(correction)
+    assert stream._merge_history_minutes("AAPL", rows, start, start + timedelta(minutes=5)) == 5
+    assert stream.buffer[0]["volume"] == Decimal("450.493825")
+    assert stream.buffer[0]["source_minute_mask"] == 31
+    # A repeated corrected minute replaces its old value without double counting.
+    correction["dv"] = "49.0000001"
+    assert stream._aggregate_bar(correction)
+    assert stream.bar_aggregator[("AAPL", start)]["volume"] == Decimal("449.4938241")
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-1", "bad", None, True])
+def test_invalid_decimal_volume_does_not_fall_back_to_integer_volume(value):
+    stream = client(recover_history=False)
+    start = datetime(2026, 10, 8, 13, 30, tzinfo=timezone.utc)
+    row = minute(start)
+    assert not stream._aggregate_bar({"sym": "AAPL", "s": row["t"], **row, "dv": value})
     assert not stream.bar_aggregator
 
 

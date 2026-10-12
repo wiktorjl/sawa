@@ -1381,18 +1381,20 @@ def run_daily(
         if degraded_reasons:
             stats["degraded_reasons"] = degraded_reasons
 
-        # Degradation stays orthogonal to process success: optional feeds and a
-        # small number of isolated ticker failures are visible but do not cause
-        # retry storms. A failed required price step is fatal and returns nonzero.
+        # Optional feeds can degrade independently. Required price ingestion
+        # and split repair must succeed before the scheduler marks daily done.
         fatal_reasons: list[str] = []
         if stats.get("prices_error"):
             fatal_reasons.append("required price update failed")
+        if stats.get("split_heal_error"):
+            fatal_reasons.append("required split adjustment/TA self-heal failed")
         if news_only and stats.get("news_error"):
             fatal_reasons.append("required news-only update failed")
         stats["fatal_reasons"] = fatal_reasons
         stats["success"] = not fatal_reasons
         logger.info("\n" + "=" * 60)
-        logger.info("DAILY UPDATE COMPLETE" + (" (DEGRADED)" if degraded_reasons else ""))
+        outcome = "DAILY UPDATE FAILED" if fatal_reasons else "DAILY UPDATE COMPLETE"
+        logger.info(outcome + (" (DEGRADED)" if degraded_reasons else ""))
         logger.info("=" * 60)
         logger.info(f"  Price records: {stats.get('prices_inserted', 0)}")
         if not skip_news:
@@ -1403,6 +1405,8 @@ def run_daily(
             logger.info(f"  Market internals: {stats['market_internals']}")
         if degraded_reasons:
             logger.warning("  DEGRADED: " + "; ".join(degraded_reasons))
+        if degraded_reasons and not fatal_reasons:
+            # monitored_run sends the error for required-step failures.
             get_notifier(logger).send(
                 title="Sawa: daily completed DEGRADED",
                 body=(

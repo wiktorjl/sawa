@@ -65,6 +65,26 @@ def test_loader_keeps_same_timestamp_at_two_bar_sizes() -> None:
     assert "ON CONFLICT (ticker, timestamp, bar_size_minutes)" in query_text
 
 
+def test_loader_persists_fractional_volume_without_rounding() -> None:
+    conn = _Connection()
+    bars = [{**_bar(5), "volume": Decimal("527.006406")},
+            {**_bar(15), "volume": 913.054703}]
+    assert load_intraday_bars(conn, bars, logging.getLogger(__name__)) == 2
+    assert [call[1][6] for call in conn.cursor_value.calls] == [
+        Decimal("527.006406"), Decimal("913.054703"),
+    ]
+
+
+@pytest.mark.parametrize("volume", [True, -0.25, float("nan"), float("inf"),
+                                   Decimal("NaN"), "100.5", 10**30])
+def test_loader_rejects_invalid_volume_before_any_writes(volume) -> None:
+    conn = _Connection()
+    with pytest.raises(ValueError, match="volume"):
+        load_intraday_bars(conn, [{**_bar(5), "volume": volume}], logging.getLogger(__name__))
+    assert not conn.cursor_value.calls
+    assert conn.commits == 0
+
+
 def test_loader_rejects_unsupported_size_before_opening_cursor() -> None:
     conn = _Connection()
 

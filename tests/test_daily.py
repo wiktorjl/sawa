@@ -928,7 +928,8 @@ def test_forced_historical_partial_failure_is_fatal(monkeypatch) -> None:
     assert stats["success"] is False
 
 
-def test_split_self_heal_failure_is_explicitly_degraded(monkeypatch) -> None:
+def test_split_self_heal_failure_prevents_successful_completion(monkeypatch, caplog) -> None:
+    caplog.set_level(logging.INFO)
     class CalendarClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
@@ -967,10 +968,13 @@ def test_split_self_heal_failure_is_explicitly_degraded(monkeypatch) -> None:
             logger=logging.getLogger(__name__),
         )
 
-    assert stats["success"] is True
+    assert stats["success"] is False
     assert stats["degraded"] is True
+    assert stats["fatal_reasons"] == ["required split adjustment/TA self-heal failed"]
     assert stats["split_heal_error"] == "RuntimeError: split repair failed"
     assert "split adjustment/TA self-heal failed" in stats["degraded_reasons"]
+    assert "DAILY UPDATE FAILED" in caplog.text
+    assert "DAILY UPDATE COMPLETE" not in caplog.text
 
 
 def test_empty_price_result_on_reported_trading_day_is_fatal(monkeypatch) -> None:

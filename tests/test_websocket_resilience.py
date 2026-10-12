@@ -1071,10 +1071,10 @@ def test_out_of_range_values_and_future_time_do_not_poison_state(
         close=1_000_000_000_000,
         volume=50,
     )
-    fractional_volume = _minute(
+    negative_volume = _minute(
         13, 31, open_=100, high=102, low=99, close=101, volume=50
     )
-    fractional_volume["v"] = 1.5
+    negative_volume["v"] = -1.5
     future = _minute(
         13,
         30,
@@ -1096,7 +1096,7 @@ def test_out_of_range_values_and_future_time_do_not_poison_state(
     )
 
     client._aggregate_bar(too_large)
-    client._aggregate_bar(fractional_volume)
+    client._aggregate_bar(negative_volume)
     client._aggregate_bar(future)
     client._aggregate_bar(below_scale)
 

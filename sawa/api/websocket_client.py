@@ -17,6 +17,7 @@ from websockets.asyncio.client import ClientConnection
 
 from sawa.api.async_client import AsyncPolygonClient
 from sawa.database.intraday_load import load_intraday_bars
+from sawa.domain.volume import MAX_VOLUME, decimal_volume, sum_volumes
 from sawa.repositories.rate_limiter import TokenBucket
 from sawa.utils.constants import DEFAULT_API_RATE_LIMIT
 from sawa.utils.market_hours import regular_session_close
@@ -55,7 +56,6 @@ TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 MAX_PRICE_EXCLUSIVE = 1_000_000_000_000
 MAX_PRICE_DECIMAL = Decimal("1000000000000")
 PRICE_SCALE = Decimal("0.00000001")
-MAX_VOLUME = 9_223_372_036_854_775_807
 MAX_EVENT_CLOCK_SKEW_MINUTES = 5
 MAX_SAFE_ERROR_CHARS = 500
 
@@ -594,7 +594,7 @@ class PolygonWebSocketClient:
             return False
 
         numeric_fields: dict[str, float | int] = {}
-        for field in ("o", "h", "l", "c", "v"):
+        for field in ("o", "h", "l", "c"):
             value = bar_data.get(field)
             if (
                 isinstance(value, bool)
@@ -606,15 +606,24 @@ class PolygonWebSocketClient:
                 return False
             numeric_fields[field] = value
 
+        try:
+            # WebSocket dv includes fractional trades; its legacy v is whole
+            # shares. REST aggregates already include the fractions in v.
+            volume = decimal_volume(
+                bar_data["dv"] if "dv" in bar_data else bar_data.get("v"),
+                allow_string="dv" in bar_data,
+            )
+        except ValueError as exc:
+            self.logger.warning("Ignoring malformed minute volume for %s: %s", ticker, exc)
+            self.invalid_minute_events += 1
+            return False
+
         if (
             any(
                 not _price_rounds_to_numeric_20_8(numeric_fields[field])
                 for field in ("o", "h", "l", "c")
             )
             or any(numeric_fields[field] >= MAX_PRICE_EXCLUSIVE for field in ("o", "h", "l", "c"))
-            or numeric_fields["v"] < 0
-            or numeric_fields["v"] > MAX_VOLUME
-            or not float(numeric_fields["v"]).is_integer()
             or numeric_fields["h"]
             < max(numeric_fields["o"], numeric_fields["l"], numeric_fields["c"])
             or numeric_fields["l"]
@@ -640,7 +649,6 @@ class PolygonWebSocketClient:
             self.logger.warning(f"Ignoring future minute timestamp for {ticker}")
             self.invalid_minute_events += 1
             return False
-        numeric_fields["v"] = int(numeric_fields["v"])
         local_event_time = event_time.astimezone(MARKET_TIMEZONE)
         local_market_time = local_event_time.time().replace(tzinfo=None)
         session_close = regular_session_close(local_event_time.date())
@@ -704,13 +712,13 @@ class PolygonWebSocketClient:
             }
 
         agg = self.bar_aggregator[key]
-        minutes: dict[datetime, dict[str, float | int]] = agg["_minutes"]
+        minutes: dict[datetime, dict[str, Any]] = agg["_minutes"]
         minute = {
             "open": numeric_fields["o"],
             "high": numeric_fields["h"],
             "low": numeric_fields["l"],
             "close": numeric_fields["c"],
-            "volume": numeric_fields["v"],
+            "volume": volume,
         }
         if minutes.get(event_time) == minute:
             return True
@@ -720,7 +728,7 @@ class PolygonWebSocketClient:
         previous_minute = minutes.get(event_time)
         minutes[event_time] = minute
         ordered_minutes = [minutes[timestamp] for timestamp in sorted(minutes)]
-        total_volume = sum(item["volume"] for item in ordered_minutes)
+        total_volume = sum_volumes([item["volume"] for item in ordered_minutes])
         if total_volume > MAX_VOLUME:
             if previous_minute is None:
                 del minutes[event_time]

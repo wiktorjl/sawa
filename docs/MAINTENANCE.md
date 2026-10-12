@@ -185,6 +185,19 @@ On each tick it:
    doctor respectively; only a passing check earns a completion marker
 6. Sends start/stop/failure push notifications to `NTFY_TOPIC`
 
+Required split repair must succeed before daily can earn a completion marker.
+If the daily pipeline succeeds and its only failing doctor check is Treasury
+freshness, subsequent ticks run `sawa treasury` and repeat the daily doctor.
+These publication retries have a separate limit of 12 attempts; prices, news,
+and technical indicators are not replayed. Any other doctor failure returns
+the next attempt to the full daily pipeline. A passing doctor clears the
+Treasury pending marker and records daily completion.
+
+Intraday REST volume includes fractional shares. Streaming uses WebSocket `dv`
+when present and otherwise `v`; recovery uses REST `v`. Both paths preserve
+decimal volume through aggregation and persistence. Migration 52 upgrades
+existing intraday storage and retains the installed live view and privileges.
+
 State lives in `~/.sawa/scheduler/`:
 - `intraday.pid`, `intraday.log`, `intraday_{start,stop}_time`
 - `daily_done_YYYY-MM-DD` (cleaned after 7 days)

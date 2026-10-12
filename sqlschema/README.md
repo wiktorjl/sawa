@@ -53,6 +53,8 @@ loader globs `NN_*.sql` and sorts; gaps in numbering are harmless.
 | `45_intraday_bar_size_identity.sql` | Preserves legacy bars while making interval part of intraday identity; keeps the live candle on one resolution | — |
 | `46_dividend_identity.sql` | Archives legacy duplicate dividend identities and adds PG12-compatible NULL-normalized uniqueness | — |
 | `49_widen_split_ratio_precision.sql` | Widens split share counts to BIGINT so fractional corporate actions retain exact normalized ratios | — |
+| `51_widen_earnings_precision.sql` | Widens Yahoo earnings EPS and surprise fields to NUMERIC(24,4), preserving existing wider columns | — |
+| `52_fractional_intraday_volume.sql` | Preserves fractional-share volume as NUMERIC and retains the installed live view, owner, grants, options, and comment | — |
 
 For the canonical mapping of external data source → table → loader →
 pipeline command, see [`docs/DATA_SOURCES.md`](../docs/DATA_SOURCES.md).
